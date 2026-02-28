@@ -35,6 +35,7 @@ let backend: Comlink.Remote<MistcastBackend> | null = null;
 let audioContext: AudioContext | null = null;
 let encoderNode: AudioWorkletNode | null = null;
 let decoderNode: AudioWorkletNode | null = null;
+let rxInputGain: GainNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 let micStream: MediaStream | null = null;
 
@@ -161,6 +162,32 @@ async function startDecoderStandby() {
   );
 }
 
+function safeDisconnect<T extends AudioNode>(node: T | null, destination?: AudioNode | null) {
+  if (!node) return;
+  try {
+    if (destination) {
+      node.disconnect(destination);
+    } else {
+      node.disconnect();
+    }
+  } catch {
+    // no-op
+  }
+}
+
+function routeDecoderInput(source: "encoder" | "mic") {
+  if (!encoderNode || !rxInputGain) return;
+
+  safeDisconnect(encoderNode, rxInputGain);
+  safeDisconnect(micSource, rxInputGain);
+
+  if (source === "mic") {
+    micSource?.connect(rxInputGain);
+  } else {
+    encoderNode.connect(rxInputGain);
+  }
+}
+
 async function init() {
   if (backend) return;
   status.value = "Initializing...";
@@ -184,8 +211,12 @@ async function init() {
   });
   await backend.setAudioInPort(Comlink.transfer(decoderNode.port, [decoderNode.port]));
 
+  rxInputGain = audioContext.createGain();
+  rxInputGain.gain.value = 1.0;
+  rxInputGain.connect(decoderNode);
+
   encoderNode.connect(audioContext.destination);
-  encoderNode.connect(decoderNode);
+  routeDecoderInput("encoder");
 
   await startDecoderStandby();
   
@@ -251,8 +282,7 @@ async function toggleMic() {
       });
       micStream = stream;
       micSource = audioContext.createMediaStreamSource(stream);
-      encoderNode.disconnect(decoderNode);
-      micSource.connect(decoderNode);
+      routeDecoderInput("mic");
       isMicActive.value = true;
       status.value = "Mic Active (Rx)";
     } catch (e) {
@@ -264,7 +294,7 @@ async function toggleMic() {
     micSource = null;
     micStream?.getTracks().forEach((t) => t.stop());
     micStream = null;
-    encoderNode.connect(decoderNode);
+    routeDecoderInput("encoder");
     isMicActive.value = false;
     status.value = "Internal Loopback";
   }
@@ -292,7 +322,10 @@ async function reset() {
 }
 
 onBeforeUnmount(() => {
-  micSource?.disconnect();
+  safeDisconnect(micSource);
+  safeDisconnect(encoderNode);
+  safeDisconnect(rxInputGain);
+  safeDisconnect(decoderNode);
   micStream?.getTracks().forEach((t) => t.stop());
   clearOutput();
 });
