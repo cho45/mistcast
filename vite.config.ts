@@ -10,4 +10,7 @@ export default defineConfig({
     wasm(),
     topLevelAwait(),
   ],
+  server: {
+    allowedHosts: ['.trycloudflare.com'],
+  },
 })

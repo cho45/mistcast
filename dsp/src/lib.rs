@@ -10,7 +10,24 @@ pub mod encoder;
 
 use wasm_bindgen::prelude::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DifferentialModulation {
+    Dbpsk,
+    Dqpsk,
+}
+
+impl DifferentialModulation {
+    pub const fn bits_per_symbol(self) -> usize {
+        match self {
+            DifferentialModulation::Dbpsk => 1,
+            DifferentialModulation::Dqpsk => 2,
+        }
+    }
+}
+
 pub mod params {
+    use super::DifferentialModulation;
+
     pub const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
     pub const CARRIER_FREQ: f32 = 12000.0;
     pub const MSEQ_ORDER: usize = 4;
@@ -24,6 +41,7 @@ pub mod params {
     pub const PAYLOAD_SIZE: usize = 16;
     pub const FIXED_K: usize = 10;
     pub const FOUNTAIN_OVERHEAD: f32 = 0.1;
+    pub const MODULATION: DifferentialModulation = DifferentialModulation::Dqpsk;
 }
 
 #[derive(Clone, Debug)]

@@ -1,37 +1,68 @@
-//! DBPSK + DSSS 復調器
+//! 差動PSK + DSSS 復調器
 
-use crate::DspConfig;
+use crate::{DifferentialModulation, DspConfig};
+use num_complex::Complex32;
 
-/// DBPSK + DSSS 復調器
+fn decode_symbol_bits(
+    mode: DifferentialModulation,
+    diff: Complex32,
+    out: &mut Vec<u8>,
+) -> Complex32 {
+    match mode {
+        DifferentialModulation::Dbpsk => {
+            if diff.re >= 0.0 {
+                out.push(0);
+                Complex32::new(1.0, 0.0)
+            } else {
+                out.push(1);
+                Complex32::new(-1.0, 0.0)
+            }
+        }
+        DifferentialModulation::Dqpsk => {
+            if diff.re.abs() >= diff.im.abs() {
+                if diff.re >= 0.0 {
+                    out.extend_from_slice(&[0, 0]);
+                    Complex32::new(1.0, 0.0)
+                } else {
+                    out.extend_from_slice(&[1, 1]);
+                    Complex32::new(-1.0, 0.0)
+                }
+            } else if diff.im >= 0.0 {
+                out.extend_from_slice(&[0, 1]);
+                Complex32::new(0.0, 1.0)
+            } else {
+                out.extend_from_slice(&[1, 0]);
+                Complex32::new(0.0, -1.0)
+            }
+        }
+    }
+}
+
+/// 差動PSK + DSSS 復調器
 pub struct Demodulator {
     config: DspConfig,
-    prev_i: f32,
-    prev_q: f32,
+    mode: DifferentialModulation,
+    prev: Complex32,
 }
 
 impl Demodulator {
     pub fn new(config: DspConfig) -> Self {
+        Self::new_with_mode(config, crate::params::MODULATION)
+    }
+
+    pub fn new_with_mode(config: DspConfig, mode: DifferentialModulation) -> Self {
         Demodulator {
             config,
-            // 初期位相基準
-            prev_i: 1.0,
-            prev_q: 0.0,
+            mode,
+            prev: Complex32::new(1.0, 0.0),
         }
     }
 
     /// チップ列（拡散されたベースバンド信号）からビット列を復元する
     pub fn demodulate_chips(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<u8> {
-        let lrs = self.demodulate_chips_soft(chips_i, chips_q);
-        lrs.into_iter()
-            .map(|llr| if llr > 0.0 { 0 } else { 1 })
-            .collect()
-    }
-
-    /// ソフト判定 (LLR) を返す復調
-    pub fn demodulate_chips_soft(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<f32> {
         let sf = self.config.spread_factor();
         let num_symbols = chips_i.len() / sf;
-        let mut llrs = Vec::with_capacity(num_symbols);
+        let mut bits = Vec::with_capacity(num_symbols * self.mode.bits_per_symbol());
 
         let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
         let pn: Vec<f32> = mseq.generate(sf).iter().map(|&c| c as f32).collect();
@@ -42,7 +73,6 @@ impl Demodulator {
             let symbol_chips_i = &chips_i[start..end];
             let symbol_chips_q = &chips_q[start..end];
 
-            // 1. 逆拡散
             let mut cur_i = 0.0f32;
             let mut cur_q = 0.0f32;
             for (k, &pn_val) in pn.iter().enumerate() {
@@ -51,37 +81,26 @@ impl Demodulator {
             }
             cur_i /= sf as f32;
             cur_q /= sf as f32;
-
-            // 2. DBPSK 判定 (ドット積)
-            let dot = cur_i * self.prev_i + cur_q * self.prev_q;
-            llrs.push(dot); // 簡易的な LLR としてドット積をそのまま返す
-
-            // 位相基準の更新 (信頼性が高い場合のみ強く更新)
-            let mag = (cur_i * cur_i + cur_q * cur_q).sqrt().max(1e-6);
-            if mag > 0.1 {
-                // 指数移動平均的な更新（ノイズ耐性向上のため、瞬時の位相に引きずられすぎないようにする）
-                let alpha = 0.8;
-                self.prev_i = self.prev_i * (1.0 - alpha) + (cur_i / mag) * alpha;
-                self.prev_q = self.prev_q * (1.0 - alpha) + (cur_q / mag) * alpha;
-                let norm = (self.prev_i * self.prev_i + self.prev_q * self.prev_q)
-                    .sqrt()
-                    .max(1e-6);
-                self.prev_i /= norm;
-                self.prev_q /= norm;
+            let cur = Complex32::new(cur_i, cur_q);
+            let diff = cur * self.prev.conj();
+            let decided = decode_symbol_bits(self.mode, diff, &mut bits);
+            let norm = cur.norm();
+            if norm > 1e-4 {
+                self.prev = cur / norm;
+            } else {
+                self.prev = decided;
             }
         }
 
-        llrs
+        bits
     }
 
     pub fn reset(&mut self) {
-        self.prev_i = 1.0;
-        self.prev_q = 0.0;
+        self.prev = Complex32::new(1.0, 0.0);
     }
 
     pub fn set_reference_phase(&mut self, i: f32, q: f32) {
         let mag = (i * i + q * q).sqrt().max(1e-6);
-        self.prev_i = i / mag;
-        self.prev_q = q / mag;
+        self.prev = Complex32::new(i / mag, q / mag);
     }
 }

@@ -9,10 +9,10 @@ use crate::{
     common::nco::Nco,
     common::rrc_filter::DecimatingRrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
-    params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD, SYNC_WORD_BITS},
+    params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD, SYNC_WORD_BITS},
     phy::demodulator::Demodulator,
     phy::sync::{SyncDetector, SyncResult},
-    DspConfig,
+    DifferentialModulation, DspConfig,
 };
 use num_complex::Complex32;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -95,7 +95,10 @@ impl Decoder {
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
             sync_detector: SyncDetector::new(proc_config.clone()),
-            demodulator: Demodulator::new(proc_config.clone()),
+            demodulator: Demodulator::new_with_mode(
+                proc_config.clone(),
+                DifferentialModulation::Dbpsk,
+            ),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
@@ -143,9 +146,12 @@ impl Decoder {
         self.sample_buffer_q.extend_from_slice(&q_decimated);
 
         let sync_bits_len = SYNC_WORD_BITS;
+        let sync_symbol_len = sync_bits_len;
+        let bits_per_symbol_payload = MODULATION.bits_per_symbol();
         let fec_bits_len = self.interleaver.rows() * self.interleaver.cols();
         let burst_data_bits_len = fec_bits_len * self.packets_per_sync_burst.max(1);
-        let total_bits = sync_bits_len + burst_data_bits_len;
+        let payload_symbols = burst_data_bits_len.div_ceil(bits_per_symbol_payload);
+        let total_symbols = sync_symbol_len + payload_symbols;
         let symbol_len = sf * spc;
         // 1回の process_samples で探索しすぎると detect() が支配的になるため、
         // 反復数を最小限に抑えてストリーミング側へ制御を返す。
@@ -194,7 +200,7 @@ impl Decoder {
             };
 
             let start = sync.peak_sample_idx;
-            let data_end_sample = start + total_bits * sf * spc;
+            let data_end_sample = start + total_symbols * sf * spc;
 
             // データが溜まるのを待つ
             if self.sample_buffer_i.len() < data_end_sample + spc {
@@ -233,9 +239,9 @@ impl Decoder {
                             self.demodulator.set_reference_phase(ref_i, ref_q);
                         }
 
-                        let mut sync_chips_i = Vec::with_capacity(sync_bits_len * sf);
-                        let mut sync_chips_q = Vec::with_capacity(sync_bits_len * sf);
-                        for c_idx in 0..(sync_bits_len * sf) {
+                        let mut sync_chips_i = Vec::with_capacity(sync_symbol_len * sf);
+                        let mut sync_chips_q = Vec::with_capacity(sync_symbol_len * sf);
+                        for c_idx in 0..(sync_symbol_len * sf) {
                             let cp = p_start + c_idx * spc + (spc / 2);
                             if cp >= self.sample_buffer_i.len() {
                                 sync_chips_i.clear();
@@ -245,21 +251,21 @@ impl Decoder {
                             sync_chips_i.push(self.sample_buffer_i[cp]);
                             sync_chips_q.push(self.sample_buffer_q[cp]);
                         }
-                        if sync_chips_i.len() != sync_bits_len * sf {
+                        if sync_chips_i.len() != sync_symbol_len * sf {
                             continue;
                         }
 
-                        let llrs = self
+                        let mut bits = self
                             .demodulator
-                            .demodulate_chips_soft(&sync_chips_i, &sync_chips_q);
-                        let bits: Vec<u8> = llrs
-                            .iter()
-                            .map(|&l| if l > 0.0 { 0u8 } else { 1u8 })
-                            .collect();
+                            .demodulate_chips(&sync_chips_i, &sync_chips_q);
+                        if bits.len() < sync_bits_len {
+                            continue;
+                        }
+                        bits.truncate(sync_bits_len);
 
                         let mut val = 0u32;
-                        for b in &bits[0..sync_bits_len] {
-                            val = (val << 1) | (*b as u32);
+                        for b in bits {
+                            val = (val << 1) | (b as u32);
                         }
 
                         if val == SYNC_WORD {
@@ -276,15 +282,16 @@ impl Decoder {
             if found_header {
                 let p_start =
                     (start as i32 + best_sym_shift * symbol_len as i32 + best_t_shift) as usize;
-                let ref_sym_start = p_start.saturating_sub(sf * spc);
-                let (ref_i, ref_q) = self.despread_at(ref_sym_start);
-
+                let last_sync_sym_start = p_start + (sync_symbol_len - 1) * symbol_len;
+                let (sync_last_i, sync_last_q) = self.despread_at(last_sync_sym_start);
                 let initial_ref = if best_invert {
-                    Complex32::new(-ref_i, -ref_q)
+                    Complex32::new(-sync_last_i, -sync_last_q)
                 } else {
-                    Complex32::new(ref_i, ref_q)
+                    Complex32::new(sync_last_i, sync_last_q)
                 };
-                let Some(bits) = self.decode_bits_with_tracking(p_start, total_bits, initial_ref)
+                let payload_start = p_start + sync_symbol_len * symbol_len;
+                let Some(payload_bits) =
+                    self.decode_bits_with_tracking(payload_start, burst_data_bits_len, initial_ref)
                 else {
                     let skip = (start + symbol_len).min(self.sample_buffer_i.len());
                     self.sample_buffer_i.drain(0..skip);
@@ -295,7 +302,6 @@ impl Decoder {
                 };
                 let p_bits_len = PACKET_BYTES * 8;
                 let mut _valid_packet_count = 0usize;
-                let payload_bits = &bits[sync_bits_len..total_bits];
                 for packet_bits in payload_bits.chunks_exact(fec_bits_len) {
                     let deinterleaved = self.interleaver.deinterleave(packet_bits);
                     let decoded_bits = fec::decode(&deinterleaved);
@@ -354,7 +360,8 @@ impl Decoder {
                 }
                 // lock判定は preamble+sync のみで行う。
                 // CRC失敗パケットは捨てるだけにして、受信窓は常にバースト分前進させる。
-                let actual_end = (p_start + total_bits * sf * spc).min(self.sample_buffer_i.len());
+                let actual_end =
+                    (p_start + total_symbols * sf * spc).min(self.sample_buffer_i.len());
                 self.sample_buffer_i.drain(0..actual_end);
                 self.sample_buffer_q.drain(0..actual_end);
                 self.last_search_idx = 0;
@@ -423,12 +430,14 @@ impl Decoder {
     fn decode_bits_with_tracking(
         &self,
         start_sample: usize,
-        num_symbols: usize,
+        num_bits: usize,
         initial_phase_ref: Complex32,
     ) -> Option<Vec<u8>> {
         let sf = self.config.spread_factor();
         let spc = self.proc_config.samples_per_chip().max(1);
         let symbol_len = sf * spc;
+        let bits_per_symbol = MODULATION.bits_per_symbol();
+        let symbols_needed = num_bits.div_ceil(bits_per_symbol);
         let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
         let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
@@ -441,9 +450,9 @@ impl Decoder {
         let mut timing_offset = 0.0f32;
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-        let mut bits = Vec::with_capacity(num_symbols);
+        let mut bits = Vec::with_capacity(num_bits);
 
-        for s_idx in 0..num_symbols {
+        for s_idx in 0..symbols_needed {
             let symbol_start = start_sample + s_idx * symbol_len;
             let on = self.despread_symbol_with_timing(symbol_start, &pn, timing_offset, 0.0)?;
             let early = self.despread_symbol_with_timing(
@@ -460,12 +469,9 @@ impl Decoder {
             )?;
 
             let on_rot = on * phase_ref.conj();
-            let llr = on_rot.re * prev_symbol.re + on_rot.im * prev_symbol.im;
-            bits.push(if llr > 0.0 { 0 } else { 1 });
-
-            // Decision-directed phase tracking: ±1 data成分を取り除いて残留位相誤差のみを抽出する。
             let diff = on_rot * prev_symbol.conj();
-            let dphi = phase_step_from_diff(diff);
+            let decided = decode_diff_symbol_and_push_bits(diff, &mut bits, num_bits);
+            let dphi = phase_step_from_diff(diff, decided);
             let (sin_dphi, cos_dphi) = dphi.sin_cos();
             phase_ref *= Complex32::new(cos_dphi, sin_dphi);
             let phase_norm = phase_ref.norm().max(1e-6);
@@ -481,9 +487,12 @@ impl Decoder {
             let on_norm = on_rot.norm();
             if on_norm > 1e-4 {
                 prev_symbol = on_rot / on_norm;
+            } else {
+                prev_symbol = decided;
             }
         }
 
+        bits.truncate(num_bits);
         Some(bits)
     }
 
@@ -628,9 +637,47 @@ fn timing_error_from_early_late(early_mag: f32, late_mag: f32) -> f32 {
 }
 
 #[inline]
-fn phase_step_from_diff(diff: Complex32) -> f32 {
-    let decision_sign = if diff.re >= 0.0 { 1.0 } else { -1.0 };
-    let diff_data_removed = diff * decision_sign;
+fn decode_diff_symbol_and_push_bits(
+    diff: Complex32,
+    bits: &mut Vec<u8>,
+    target_bits: usize,
+) -> Complex32 {
+    match MODULATION {
+        DifferentialModulation::Dbpsk => {
+            if bits.len() < target_bits {
+                bits.push(if diff.re >= 0.0 { 0 } else { 1 });
+            }
+            if diff.re >= 0.0 {
+                Complex32::new(1.0, 0.0)
+            } else {
+                Complex32::new(-1.0, 0.0)
+            }
+        }
+        DifferentialModulation::Dqpsk => {
+            let (symbol, pair) = if diff.re.abs() >= diff.im.abs() {
+                if diff.re >= 0.0 {
+                    (Complex32::new(1.0, 0.0), [0u8, 0u8])
+                } else {
+                    (Complex32::new(-1.0, 0.0), [1u8, 1u8])
+                }
+            } else if diff.im >= 0.0 {
+                (Complex32::new(0.0, 1.0), [0u8, 1u8])
+            } else {
+                (Complex32::new(0.0, -1.0), [1u8, 0u8])
+            };
+            for &b in &pair {
+                if bits.len() < target_bits {
+                    bits.push(b);
+                }
+            }
+            symbol
+        }
+    }
+}
+
+#[inline]
+fn phase_step_from_diff(diff: Complex32, decided_symbol: Complex32) -> f32 {
+    let diff_data_removed = diff * decided_symbol.conj();
     let phase_err = diff_data_removed.im / (diff_data_removed.re.abs() + 1e-6);
     (TRACKING_PHASE_LOOP_GAIN * phase_err)
         .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
@@ -823,9 +870,9 @@ mod tests {
 
     #[test]
     fn test_tracking_phase_step_sign_and_clamp() {
-        let p = phase_step_from_diff(Complex32::new(0.8, 0.8));
-        let n = phase_step_from_diff(Complex32::new(0.8, -0.8));
-        let c = phase_step_from_diff(Complex32::new(1e-6, 10.0));
+        let p = phase_step_from_diff(Complex32::new(0.8, 0.8), Complex32::new(1.0, 0.0));
+        let n = phase_step_from_diff(Complex32::new(0.8, -0.8), Complex32::new(1.0, 0.0));
+        let c = phase_step_from_diff(Complex32::new(1e-6, 10.0), Complex32::new(1.0, 0.0));
         assert!(p > 0.0);
         assert!(n < 0.0);
         assert!(c.abs() <= TRACKING_PHASE_STEP_CLAMP + 1e-6);
