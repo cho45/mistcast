@@ -8,7 +8,7 @@
 
 use crate::common::msequence::MSequence;
 use crate::common::rrc_filter::RrcFilter;
-use crate::params::SYNC_WORD;
+use crate::params::{SYNC_WORD, SYNC_WORD_BITS};
 use crate::DspConfig;
 
 /// 変調器
@@ -127,10 +127,16 @@ impl Modulator {
 
         // 1. プリアンブル
         self.mseq.reset();
-        all_chips.extend(self.mseq.generate(sf * preamble_repeat));
+        let pn = self.mseq.generate(sf);
+        for rep in 0..preamble_repeat {
+            let sign: i8 = if rep == preamble_repeat - 1 { -1 } else { 1 };
+            for &chip in &pn {
+                all_chips.push(sign * chip);
+            }
+        }
 
-        // 2. 同期ワード (32bit)
-        let sync_bits: Vec<u8> = (0..32)
+        // 2. 同期ワード
+        let sync_bits: Vec<u8> = (0..SYNC_WORD_BITS)
             .rev()
             .map(|i| ((SYNC_WORD >> i) & 1) as u8)
             .collect();
@@ -304,9 +310,9 @@ mod tests {
         prev_i /= mag;
         prev_q /= mag;
 
-        // 2. 同期ワード(32bit) + データ(bits)
+        // 2. 同期ワード + データ(bits)
         let data_start_chips = sf * preamble_repeat;
-        let total_symbols = 32 + bits.len();
+        let total_symbols = SYNC_WORD_BITS + bits.len();
         let mut recovered_bits = Vec::new();
 
         for s_idx in 0..total_symbols {
@@ -325,7 +331,7 @@ mod tests {
             let dot = cur_i * prev_i + cur_q * prev_q;
             let bit = if dot > 0.0 { 0 } else { 1 };
 
-            if s_idx >= 32 {
+            if s_idx >= SYNC_WORD_BITS {
                 recovered_bits.push(bit);
             }
 

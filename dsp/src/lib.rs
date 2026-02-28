@@ -18,7 +18,9 @@ pub mod params {
     pub const RRC_ALPHA: f32 = 0.35;
     pub const CHIP_RATE: f32 = 8000.0;
     pub const PREAMBLE_REPEAT: usize = 4;
+    pub const SYNC_WORD_BITS: usize = 32;
     pub const SYNC_WORD: u32 = 0xDEAD_BEEF;
+    pub const PACKETS_PER_SYNC_BURST: usize = 2;
     pub const PAYLOAD_SIZE: usize = 16;
     pub const FIXED_K: usize = 10;
     pub const FOUNTAIN_OVERHEAD: f32 = 0.1;
@@ -160,7 +162,12 @@ impl WasmEncoder {
         self.fountain_encoder = Some(coding::fountain::FountainEncoder::new(data, params));
     }
     pub fn pull_frame(&mut self) -> Option<Vec<f32>> {
-        let fountain_pkt = self.fountain_encoder.as_mut()?.next_packet();
-        Some(self.inner.encode_packet(&fountain_pkt))
+        let burst_count = params::PACKETS_PER_SYNC_BURST.max(1);
+        let mut packets = Vec::with_capacity(burst_count);
+        let encoder = self.fountain_encoder.as_mut()?;
+        for _ in 0..burst_count {
+            packets.push(encoder.next_packet());
+        }
+        Some(self.inner.encode_burst(&packets))
     }
 }

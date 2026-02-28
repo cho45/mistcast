@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 const QUICK_NO_NOISE_BUDGET: Duration = Duration::from_secs(4);
 const QUICK_MARGIN_BUDGET: Duration = Duration::from_secs(7);
 const MARGIN_SIGMA: f32 = 0.025;
-const QUICK_MAX_FRAMES: usize = 7;
+const QUICK_MAX_FRAMES: usize = 4;
 const QUICK_GAP_SAMPLES: usize = 64;
+const QUICK_CHUNK_SAMPLES: usize = 16384;
 
 /// AWGN (加法性ホワイトガウスノイズ) を付与する
 fn add_awgn<R: Rng + ?Sized>(samples: &mut [f32], sigma: f32, rng: &mut R) {
@@ -37,25 +38,32 @@ fn test_transmission_quick(sigma: f32, seed: u64) -> bool {
     let mut decoder = Decoder::new(data.len(), lt_k, dsp_config.clone());
     let mut rng = StdRng::seed_from_u64(seed);
     let gap = vec![0.0f32; QUICK_GAP_SAMPLES];
-    let mut tx_signal = Vec::new();
 
-    // K=4 に対して十分な冗長を持たせる。
+    // フレームを逐次処理し、復号できた時点で即終了する。
     for _ in 0..QUICK_MAX_FRAMES {
         let Some(mut frame) = stream.next() else {
             break;
         };
         add_awgn(&mut frame, sigma, &mut rng);
-        tx_signal.extend_from_slice(&frame);
-        tx_signal.extend_from_slice(&gap);
-    }
 
-    for chunk in tx_signal.chunks(4096) {
-        let progress = decoder.process_samples(chunk);
-        if progress.complete {
-            if let Some(recovered) = decoder.recovered_data() {
-                return &recovered[..data.len()] == data;
+        for chunk in frame.chunks(QUICK_CHUNK_SAMPLES) {
+            let progress = decoder.process_samples(chunk);
+            if progress.complete {
+                if let Some(recovered) = decoder.recovered_data() {
+                    return &recovered[..data.len()] == data;
+                }
+                return false;
             }
-            return false;
+        }
+
+        for chunk in gap.chunks(QUICK_CHUNK_SAMPLES) {
+            let progress = decoder.process_samples(chunk);
+            if progress.complete {
+                if let Some(recovered) = decoder.recovered_data() {
+                    return &recovered[..data.len()] == data;
+                }
+                return false;
+            }
         }
     }
 

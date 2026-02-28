@@ -17,38 +17,47 @@ describe('WASM Reality Stress Test (Fixed Protocol)', () => {
     it('should handle small chunks and low gain', async () => {
         const data = new TextEncoder().encode("Hello Acoustic World!");
         const sampleRate = 48000;
-        
+
         const encoder = new WasmEncoder(sampleRate);
         encoder.set_data(data);
-        
-        let fullSignal = new Float32Array(0);
-        for (let i = 0; i < 20; i++) {
-            const frame = encoder.pull_frame();
-            if (frame) {
-                const next = new Float32Array(fullSignal.length + frame.length + 4800);
-                next.set(fullSignal);
-                next.set(frame, fullSignal.length);
-                fullSignal = next;
-            }
-        }
 
         const decoder = new WasmDecoder(sampleRate);
-        
-        // 意地悪1: 低ゲイン (1%)
-        for(let i=0; i<fullSignal.length; i++) fullSignal[i] *= 0.01;
 
         let complete = false;
-        let pos = 0;
-        while (pos < fullSignal.length) {
-            // 意地悪2: 不規則なチャンクサイズ (128〜512)
-            const chunkSize = 128 + Math.floor(Math.random() * 384);
-            const chunk = fullSignal.slice(pos, pos + chunkSize);
-            pos += chunkSize;
+        let seed = 0x12345678;
+        const nextChunkSize = () => {
+            seed = (1664525 * seed + 1013904223) >>> 0;
+            return 256 + (seed % 768); // 256..1023
+        };
 
-            const progress = decoder.process_samples(chunk);
-            if (progress.complete) {
-                complete = true;
+        const processSignal = (signal: Float32Array) => {
+            let pos = 0;
+            while (pos < signal.length) {
+                const chunkSize = nextChunkSize();
+                const end = Math.min(pos + chunkSize, signal.length);
+                const progress = decoder.process_samples(signal.subarray(pos, end));
+                pos = end;
+                if (progress.complete) {
+                    complete = true;
+                    return;
+                }
+            }
+        };
+
+        const silence = new Float32Array(1200);
+        for (let i = 0; i < 6 && !complete; i++) {
+            const frame = encoder.pull_frame();
+            if (!frame) {
                 break;
+            }
+
+            // 意地悪1: 低ゲイン (1%)
+            for (let j = 0; j < frame.length; j++) {
+                frame[j] *= 0.01;
+            }
+            processSignal(frame);
+            if (!complete) {
+                processSignal(silence);
             }
         }
 

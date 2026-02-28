@@ -83,13 +83,12 @@ describe('Reproduction: 10/10 Verification', () => {
             }
         }
 
-        // RLNC 化により長い停滞は起きにくく、後続パケットで短時間に回復する。
-        const rank9Start = seenRanks.findIndex((r) => r === 9);
-        expect(rank9Start).toBeGreaterThanOrEqual(0);
-        const rank9StallLen = seenRanks
-            .slice(rank9Start)
-            .reduce((n, r) => (r === 9 ? n + 1 : n), 0);
-        expect(rank9StallLen, "rank=9 付近の停滞が長すぎる").toBeLessThanOrEqual(2);
+        // バースト化で rank が複数ずつ進むことがあるため、完了までの反復数で評価する。
+        expect(seenRanks.length, "回復までの反復が長すぎる").toBeLessThanOrEqual(6);
+        expect(
+            seenRanks.every((r, i) => i === 0 || r >= seenRanks[i - 1]),
+            "rank は単調非減少であるべき"
+        ).toBe(true);
         expect(complete, "停滞後に回復して完了すべき").toBe(true);
         const recovered = decoder.recovered_data();
         expect(recovered?.slice(0, data.length)).toEqual(data);

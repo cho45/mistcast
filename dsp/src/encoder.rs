@@ -5,7 +5,7 @@ use crate::{
     coding::fountain::{FountainEncoder, FountainPacket, FountainParams},
     coding::interleaver::BlockInterleaver,
     frame::packet::{Packet, LT_K_MAX},
-    params::PAYLOAD_SIZE,
+    params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
     phy::modulator::Modulator,
     DspConfig,
 };
@@ -14,6 +14,7 @@ use crate::{
 #[derive(Clone)]
 pub struct EncoderConfig {
     pub fountain_k: usize,
+    pub packets_per_sync_burst: usize,
     pub il_rows: usize,
     pub il_cols: usize,
     pub dsp: DspConfig,
@@ -28,6 +29,7 @@ impl EncoderConfig {
         let cols = fec_bits.div_ceil(rows);
         EncoderConfig {
             fountain_k: 10,
+            packets_per_sync_burst: PACKETS_PER_SYNC_BURST,
             il_rows: rows,
             il_cols: cols,
             dsp,
@@ -52,7 +54,7 @@ impl Encoder {
         }
     }
 
-    pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
+    fn encode_packet_bits(&mut self, packet: &FountainPacket) -> Vec<u8> {
         let seq = (packet.seq & (crate::frame::packet::LT_SEQ_MAX as u32)) as u16;
         let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
         let pkt_bytes = pkt.serialize();
@@ -62,9 +64,22 @@ impl Encoder {
         // インターリーバの全スロットを埋めるようにパディング
         let mut padded = coded;
         padded.resize(self.config.il_rows * self.config.il_cols, 0);
+        self.interleaver.interleave(&padded)
+    }
 
-        let interleaved = self.interleaver.interleave(&padded);
+    pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
+        let interleaved = self.encode_packet_bits(packet);
         self.modulator.encode_frame(&interleaved)
+    }
+
+    pub fn encode_burst(&mut self, packets: &[FountainPacket]) -> Vec<f32> {
+        let burst_bits_len = self.config.il_rows * self.config.il_cols * packets.len();
+        let mut burst_bits = Vec::with_capacity(burst_bits_len);
+        for packet in packets {
+            let interleaved = self.encode_packet_bits(packet);
+            burst_bits.extend_from_slice(&interleaved);
+        }
+        self.modulator.encode_frame(&burst_bits)
     }
 
     pub fn encode_stream<'a>(&'a mut self, data: &'a [u8]) -> EncoderStream<'a> {
@@ -93,7 +108,47 @@ pub struct EncoderStream<'a> {
 impl<'a> Iterator for EncoderStream<'a> {
     type Item = Vec<f32>;
     fn next(&mut self) -> Option<Self::Item> {
-        let fountain_pkt = self.fountain_encoder.next_packet();
-        Some(self.encoder.encode_packet(&fountain_pkt))
+        let burst_count = self.encoder.config.packets_per_sync_burst.max(1);
+        let mut packets = Vec::with_capacity(burst_count);
+        for _ in 0..burst_count {
+            packets.push(self.fountain_encoder.next_packet());
+        }
+        Some(self.encoder.encode_burst(&packets))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_burst_amortizes_sync_overhead() {
+        let config = DspConfig::default_48k();
+        let mut enc = Encoder::new(EncoderConfig::new(config));
+        let p0 = FountainPacket {
+            seq: 0,
+            coefficients: vec![],
+            data: vec![0x11; PAYLOAD_SIZE],
+        };
+        let p1 = FountainPacket {
+            seq: 1,
+            coefficients: vec![],
+            data: vec![0x22; PAYLOAD_SIZE],
+        };
+        let p2 = FountainPacket {
+            seq: 2,
+            coefficients: vec![],
+            data: vec![0x33; PAYLOAD_SIZE],
+        };
+
+        let single_total = enc.encode_packet(&p0).len()
+            + enc.encode_packet(&p1).len()
+            + enc.encode_packet(&p2).len();
+        let burst_len = enc.encode_burst(&[p0, p1, p2]).len();
+
+        assert!(
+            burst_len < single_total,
+            "one sync burst should be shorter than three standalone sync frames"
+        );
     }
 }

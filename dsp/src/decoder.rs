@@ -9,7 +9,7 @@ use crate::{
     common::nco::Nco,
     common::rrc_filter::DecimatingRrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
-    params::PAYLOAD_SIZE,
+    params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD, SYNC_WORD_BITS},
     phy::demodulator::Demodulator,
     phy::sync::{SyncDetector, SyncResult},
     DspConfig,
@@ -51,6 +51,7 @@ pub struct Decoder {
     recovered_data: Option<Vec<u8>>,
     agc_peak: f32,
     decimation_factor: usize,
+    packets_per_sync_burst: usize,
     lo_nco: Nco,
 
     // --- 同期状態 ---
@@ -95,6 +96,7 @@ impl Decoder {
             proc_config,
             agc_peak: 0.5,
             decimation_factor,
+            packets_per_sync_burst: PACKETS_PER_SYNC_BURST,
             lo_nco,
             last_search_idx: 0,
             current_sync: None,
@@ -133,12 +135,21 @@ impl Decoder {
         self.sample_buffer_i.extend_from_slice(&i_decimated);
         self.sample_buffer_q.extend_from_slice(&q_decimated);
 
-        let sync_bits_len = 32;
+        let sync_bits_len = SYNC_WORD_BITS;
         let fec_bits_len = self.interleaver.rows() * self.interleaver.cols();
-        let total_bits = sync_bits_len + fec_bits_len;
+        let burst_data_bits_len = fec_bits_len * self.packets_per_sync_burst.max(1);
+        let total_bits = sync_bits_len + burst_data_bits_len;
         let symbol_len = sf * spc;
+        // 1回の process_samples で探索しすぎると detect() が支配的になるため、
+        // 反復数を最小限に抑えてストリーミング側へ制御を返す。
+        let mut iteration_budget = 2usize;
 
         loop {
+            if iteration_budget == 0 {
+                break;
+            }
+            iteration_budget -= 1;
+
             if self.recovered_data.is_some() {
                 break;
             }
@@ -240,11 +251,11 @@ impl Decoder {
                             .collect();
 
                         let mut val = 0u32;
-                        for b in &bits[0..32] {
+                        for b in &bits[0..sync_bits_len] {
                             val = (val << 1) | (*b as u32);
                         }
 
-                        if val == crate::params::SYNC_WORD {
+                        if val == SYNC_WORD {
                             found_header = true;
                             best_sym_shift = sym_shift;
                             best_t_shift = t_shift;
@@ -294,17 +305,20 @@ impl Decoder {
                     .iter()
                     .map(|&l| if l > 0.0 { 0u8 } else { 1u8 })
                     .collect();
-
-                let deinterleaved = self
-                    .interleaver
-                    .deinterleave(&bits[sync_bits_len..total_bits]);
-                let decoded_bits = fec::decode(&deinterleaved);
                 let p_bits_len = PACKET_BYTES * 8;
-
-                if decoded_bits.len() >= p_bits_len {
+                let mut _valid_packet_count = 0usize;
+                let payload_bits = &bits[sync_bits_len..total_bits];
+                for packet_bits in payload_bits.chunks_exact(fec_bits_len) {
+                    let deinterleaved = self.interleaver.deinterleave(packet_bits);
+                    let decoded_bits = fec::decode(&deinterleaved);
+                    if decoded_bits.len() < p_bits_len {
+                        self.parse_error_packets += 1;
+                        continue;
+                    }
                     let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
                     match Packet::deserialize(&d_bytes) {
                         Ok(packet) => {
+                            _valid_packet_count += 1;
                             let pkt_k = packet.lt_k as usize;
                             if pkt_k != self.fountain_decoder.params().k {
                                 self.rebuild_fountain_decoder(pkt_k);
@@ -337,16 +351,10 @@ impl Decoder {
                                     self.invalid_neighbor_packets += 1;
                                 }
                             }
-
                             if let Some(data) = self.fountain_decoder.decode() {
                                 self.recovered_data = Some(data);
+                                break;
                             }
-                            let actual_end = p_start + total_bits * sf * spc;
-                            self.sample_buffer_i.drain(0..actual_end);
-                            self.sample_buffer_q.drain(0..actual_end);
-                            self.last_search_idx = 0;
-                            self.current_sync = None;
-                            continue;
                         }
                         Err(PacketParseError::CrcMismatch { .. }) => {
                             self.crc_error_packets += 1;
@@ -356,6 +364,14 @@ impl Decoder {
                         }
                     }
                 }
+                // lock判定は preamble+sync のみで行う。
+                // CRC失敗パケットは捨てるだけにして、受信窓は常にバースト分前進させる。
+                let actual_end = (p_start + total_bits * sf * spc).min(self.sample_buffer_i.len());
+                self.sample_buffer_i.drain(0..actual_end);
+                self.sample_buffer_q.drain(0..actual_end);
+                self.last_search_idx = 0;
+                self.current_sync = None;
+                continue;
             }
 
             // デコード失敗またはヘッダ未検出: 偽同期として捨てて進める
