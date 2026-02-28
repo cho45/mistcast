@@ -26,7 +26,15 @@ const run = (cmd, args, extraEnv = {}) => {
 
 const buildWasm = () => {
     // Build for web (compatible with vitest + vite-plugin-wasm)
-    run("wasm-pack", ["build", "--target", "web", "--out-dir", "../pkg"]);
+    // WASM_SIMD=0 で明示的に無効化しない限り SIMD を有効にしてビルドする。
+    const enableSimd = process.env.WASM_SIMD !== "0";
+    const simdFlag = "-C target-feature=+simd128";
+    const mergedRustFlags = enableSimd
+        ? [process.env.RUSTFLAGS, simdFlag].filter(Boolean).join(" ")
+        : process.env.RUSTFLAGS;
+    const extraEnv = mergedRustFlags ? { RUSTFLAGS: mergedRustFlags } : {};
+    console.log(`[build-wasm] wasm simd: ${enableSimd ? "enabled" : "disabled"}`);
+    run("wasm-pack", ["build", "--target", "web", "--out-dir", "../pkg"], extraEnv);
 };
 
 buildWasm();

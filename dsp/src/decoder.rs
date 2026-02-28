@@ -1,9 +1,12 @@
 //! 受信パイプライン (統合デコーダ)
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::{
     coding::fec,
     coding::fountain::{EncodedPacket, LtDecoder, LtParams},
     coding::interleaver::BlockInterleaver,
+    common::nco::Nco,
     common::rrc_filter::DecimatingRrcFilter,
     frame::packet::{Packet, PACKET_BYTES},
     params::PAYLOAD_SIZE,
@@ -11,6 +14,8 @@ use crate::{
     phy::sync::{SyncDetector, SyncResult},
     DspConfig,
 };
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use std::arch::wasm32::{f32x4, v128, v128_store};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -35,10 +40,7 @@ pub struct Decoder {
     recovered_data: Option<Vec<u8>>,
     agc_peak: f32,
     decimation_factor: usize,
-    lo_cos: f32,
-    lo_sin: f32,
-    lo_step_cos: f32,
-    lo_step_sin: f32,
+    lo_nco: Nco,
 
     // --- 同期状態 ---
     last_search_idx: usize,
@@ -59,8 +61,7 @@ impl Decoder {
         let fec_bits = raw_bits * 2;
         let il_rows = 16;
         let il_cols = fec_bits.div_ceil(16);
-        let lo_w = 2.0 * std::f32::consts::PI * dsp_config.carrier_freq / dsp_config.sample_rate;
-        let (lo_step_sin, lo_step_cos) = lo_w.sin_cos();
+        let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
 
         Decoder {
             rrc_decim_i: DecimatingRrcFilter::from_config(&dsp_config, decimation_factor),
@@ -76,10 +77,7 @@ impl Decoder {
             proc_config,
             agc_peak: 0.5,
             decimation_factor,
-            lo_cos: 1.0,
-            lo_sin: 0.0,
-            lo_step_cos,
-            lo_step_sin,
+            lo_nco,
             last_search_idx: 0,
             current_sync: None,
             stats_sync_calls: 0,
@@ -101,34 +99,7 @@ impl Decoder {
 
         let mut i_mixed = Vec::with_capacity(samples.len());
         let mut q_mixed = Vec::with_capacity(samples.len());
-        let mut lo_cos = self.lo_cos;
-        let mut lo_sin = self.lo_sin;
-        let step_cos = self.lo_step_cos;
-        let step_sin = self.lo_step_sin;
-
-        for (idx, &s) in samples.iter().enumerate() {
-            self.agc_peak = self.agc_peak * 0.999 + s.abs() * 0.001;
-            let current_gain = if self.agc_peak > 1e-6 {
-                0.5 / self.agc_peak
-            } else {
-                1.0
-            };
-            i_mixed.push(s * current_gain * lo_cos * 2.0);
-            q_mixed.push(s * current_gain * (-lo_sin) * 2.0);
-
-            let next_cos = lo_cos * step_cos - lo_sin * step_sin;
-            let next_sin = lo_sin * step_cos + lo_cos * step_sin;
-            lo_cos = next_cos;
-            lo_sin = next_sin;
-
-            if (idx & 1023) == 1023 {
-                let norm = (lo_cos * lo_cos + lo_sin * lo_sin).sqrt().max(1e-12);
-                lo_cos /= norm;
-                lo_sin /= norm;
-            }
-        }
-        self.lo_cos = lo_cos;
-        self.lo_sin = lo_sin;
+        self.mix_real_to_iq(samples, &mut i_mixed, &mut q_mixed);
 
         let mut i_decimated = Vec::new();
         let mut q_decimated = Vec::new();
@@ -372,6 +343,81 @@ impl Decoder {
         }
     }
 
+    #[inline]
+    fn agc_scale(&mut self, sample: f32) -> f32 {
+        self.agc_peak = self.agc_peak * 0.999 + sample.abs() * 0.001;
+        let gain = if self.agc_peak > 1e-6 {
+            0.5 / self.agc_peak
+        } else {
+            1.0
+        };
+        sample * gain * 2.0
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn mix_real_to_iq(&mut self, samples: &[f32], i_out: &mut Vec<f32>, q_out: &mut Vec<f32>) {
+        i_out.clear();
+        q_out.clear();
+        i_out.reserve(samples.len());
+        q_out.reserve(samples.len());
+
+        let mut idx = 0usize;
+        let mut interleaved = [0.0f32; 16];
+        while idx + 8 <= samples.len() {
+            let s0 = self.agc_scale(samples[idx]);
+            let s1 = self.agc_scale(samples[idx + 1]);
+            let s2 = self.agc_scale(samples[idx + 2]);
+            let s3 = self.agc_scale(samples[idx + 3]);
+            let s4 = self.agc_scale(samples[idx + 4]);
+            let s5 = self.agc_scale(samples[idx + 5]);
+            let s6 = self.agc_scale(samples[idx + 6]);
+            let s7 = self.agc_scale(samples[idx + 7]);
+
+            let x0 = f32x4(s0, 0.0, s1, 0.0);
+            let x1 = f32x4(s2, 0.0, s3, 0.0);
+            let x2 = f32x4(s4, 0.0, s5, 0.0);
+            let x3 = f32x4(s6, 0.0, s7, 0.0);
+            let (n0, n1, n2, n3) = self.lo_nco.step8_interleaved();
+            let y0 = complex_mul_interleaved2_simd(x0, n0);
+            let y1 = complex_mul_interleaved2_simd(x1, n1);
+            let y2 = complex_mul_interleaved2_simd(x2, n2);
+            let y3 = complex_mul_interleaved2_simd(x3, n3);
+
+            unsafe {
+                v128_store(interleaved.as_mut_ptr() as *mut v128, y0);
+                v128_store(interleaved.as_mut_ptr().add(4) as *mut v128, y1);
+                v128_store(interleaved.as_mut_ptr().add(8) as *mut v128, y2);
+                v128_store(interleaved.as_mut_ptr().add(12) as *mut v128, y3);
+            }
+            for pair in interleaved.chunks_exact(2) {
+                i_out.push(pair[0]);
+                q_out.push(pair[1]);
+            }
+            idx += 8;
+        }
+
+        for &sample in &samples[idx..] {
+            let s = self.agc_scale(sample);
+            let lo = self.lo_nco.step();
+            i_out.push(s * lo.re);
+            q_out.push(s * lo.im);
+        }
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    fn mix_real_to_iq(&mut self, samples: &[f32], i_out: &mut Vec<f32>, q_out: &mut Vec<f32>) {
+        i_out.clear();
+        q_out.clear();
+        i_out.reserve(samples.len());
+        q_out.reserve(samples.len());
+        for &sample in samples {
+            let s = self.agc_scale(sample);
+            let lo = self.lo_nco.step();
+            i_out.push(s * lo.re);
+            q_out.push(s * lo.im);
+        }
+    }
+
     pub fn reset(&mut self) {
         self.demodulator.reset();
         self.interleaver.reset();
@@ -379,8 +425,7 @@ impl Decoder {
         self.rrc_decim_q.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
-        self.lo_cos = 1.0;
-        self.lo_sin = 0.0;
+        self.lo_nco.reset();
         self.recovered_data = None;
         self.last_search_idx = 0;
         self.current_sync = None;
