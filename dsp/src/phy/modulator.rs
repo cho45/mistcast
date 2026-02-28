@@ -4,7 +4,7 @@
 //! 1. DBPSK差動符号化: bit[n] → phase[n] = phase[n-1] XOR bit[n]
 //! 2. DSSS拡散: 各シンボルにM系列を掛ける (チップ展開)
 //! 3. RRCパルス整形: 各チップをRRCフィルタで成形
-//! 4. 帯域シフト: キャリアfc=8kHzで変調 (実信号)
+//! 4. 帯域シフト: キャリアfc=12kHzで変調 (実信号)
 
 use crate::common::msequence::MSequence;
 use crate::common::rrc_filter::RrcFilter;
