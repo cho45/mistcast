@@ -48,4 +48,93 @@ describe('Reproduction: 10/10 Verification', () => {
         const recovered = decoder.recovered_data();
         expect(recovered?.slice(0, 16)).toEqual(data);
     });
+
+    it('should reproduce rank stall when part of systematic packets are dropped', async () => {
+        // k=10 を強制するため 160 bytes 送る。
+        const data = new Uint8Array(160);
+        for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
+
+        const sampleRate = 48000;
+        const encoder = new WasmEncoder(sampleRate);
+        encoder.set_data(data);
+        const decoder = new WasmDecoder(sampleRate);
+        decoder.process_samples(new Float32Array(4096));
+
+        let complete = false;
+        const seenRanks: number[] = [];
+
+        for (let i = 0; i < 40; i++) {
+            const frame = encoder.pull_frame();
+            if (!frame) break;
+
+            // systematic seq 5..9 に相当するフレームを意図的にドロップ。
+            if (i >= 5 && i <= 9) continue;
+
+            const signal = new Float32Array(frame.length + 4800);
+            signal.set(frame);
+            const progress = decoder.process_samples(signal);
+            seenRanks.push(progress.rank_packets);
+            console.log(
+                `drop-test i=${i}: recv=${progress.received_packets} rank=${progress.rank_packets} progress=${progress.progress}`
+            );
+            if (progress.complete) {
+                complete = true;
+                break;
+            }
+        }
+
+        // rank=9 に達したあと、しばらく同じ rank が続く停滞を確認。
+        const stallStart = seenRanks.findIndex((r) => r === 9);
+        expect(stallStart).toBeGreaterThanOrEqual(0);
+        const stallLen = seenRanks
+            .slice(stallStart)
+            .reduce((n, r) => (r === 9 ? n + 1 : n), 0);
+        expect(stallLen, "rank=9 の停滞が再現していない").toBeGreaterThanOrEqual(3);
+
+        // その後は後続 fountain packet で回復し、最終的に完了する。
+        expect(complete, "停滞後に回復して完了すべき").toBe(true);
+        const recovered = decoder.recovered_data();
+        expect(recovered?.slice(0, data.length)).toEqual(data);
+    });
+
+    it('should recover for k=2 even when both systematic packets are missed', async () => {
+        const text = "Hello Acoustic World!"; // 21 bytes -> k=2
+        const data = new TextEncoder().encode(text);
+
+        const sampleRate = 48000;
+        const encoder = new WasmEncoder(sampleRate);
+        encoder.set_data(data);
+        const decoder = new WasmDecoder(sampleRate);
+        decoder.process_samples(new Float32Array(4096));
+
+        const seenRanks: number[] = [];
+        let last: ReturnType<typeof decoder.process_samples> | null = null;
+        let complete = false;
+
+        for (let i = 0; i < 24; i++) {
+            const frame = encoder.pull_frame();
+            if (!frame) break;
+
+            // seq=0,1 (systematic) を意図的に欠落させる。
+            if (i < 2) continue;
+
+            const signal = new Float32Array(frame.length + 4800);
+            signal.set(frame);
+            const progress = decoder.process_samples(signal);
+            last = progress;
+            seenRanks.push(progress.rank_packets);
+            console.log(
+                `k2-stall i=${i}: recv=${progress.received_packets} rank=${progress.rank_packets}/${progress.needed_packets} dep=${progress.dependent_packets} dup=${progress.duplicate_packets} complete=${progress.complete}`
+            );
+            if (progress.complete) {
+                complete = true;
+                break;
+            }
+        }
+
+        expect(last).not.toBeNull();
+        expect(last!.needed_packets).toBe(2);
+        expect(complete, "k=2 で systematic 全欠落でも完了すべき").toBe(true);
+        expect(Math.max(...seenRanks), "rank=2 まで到達するはず").toBe(2);
+    });
 });

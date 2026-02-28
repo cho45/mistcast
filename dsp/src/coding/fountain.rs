@@ -307,9 +307,26 @@ pub fn reconstruct_packet_metadata(seq: u32, k: usize, c: f32, delta: f32) -> (u
     if (seq as usize) < k {
         (1, vec![seq as usize])
     } else {
+        let post_systematic = seq - k as u32;
+        let singleton_period = singleton_injection_period(k);
+        if singleton_period > 0 && post_systematic.is_multiple_of(singleton_period) {
+            let idx = ((post_systematic / singleton_period) as usize) % k;
+            return (1, vec![idx]);
+        }
         let degree = robust_soliton_degree(seq, k, c, delta);
         let neighbors = select_neighbors(seq, degree, k);
         (degree, neighbors)
+    }
+}
+
+fn singleton_injection_period(k: usize) -> u32 {
+    match k {
+        0 => 0,
+        1..=2 => 2,
+        3..=4 => 3,
+        5..=8 => 4,
+        9..=16 => 6,
+        _ => 8,
     }
 }
 
@@ -368,5 +385,31 @@ mod tests {
             .decode()
             .expect("Should be able to decode fountain packets");
         assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_k2_missing_both_systematic_packets_eventually_recovers() {
+        let k = 2;
+        let bs = 16;
+        let data: Vec<u8> = (0..(k * bs) as u8).collect();
+        let params = LtParams::new(k, bs);
+        let mut encoder = LtEncoder::new(&data, params.clone());
+        let mut decoder = LtDecoder::new(params);
+
+        // seq=0,1 (systematic) を欠落させる。
+        let _ = encoder.next_packet();
+        let _ = encoder.next_packet();
+
+        // 以降の fountain packet だけでも、singleton 再注入により rank=2 へ到達できること。
+        let mut reached_full_rank = false;
+        for _ in 0..16 {
+            decoder.receive(encoder.next_packet());
+            if decoder.rank() == k {
+                reached_full_rank = true;
+                break;
+            }
+        }
+        assert!(reached_full_rank, "k=2 should recover without seq=0,1");
+        assert!(decoder.decode().is_some());
     }
 }
