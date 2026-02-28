@@ -37,6 +37,9 @@ const decoderProcInputRms = ref(0);
 const decoderProcBlocks = ref(0);
 const rxLogs = ref<string[]>([]);
 const rxTick = ref(0);
+const rxNoChangeTicks = ref(0);
+const rxLogCopied = ref(false);
+let rxLogCopiedTimer: number | null = null;
 
 let backend: Comlink.Remote<MistcastBackend> | null = null;
 let audioContext: AudioContext | null = null;
@@ -128,6 +131,32 @@ function pushRxLog(line: string) {
   }
 }
 
+async function copyRxLogs() {
+  const text = rxLogs.value.join("\n");
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  }
+  rxLogCopied.value = true;
+  if (rxLogCopiedTimer !== null) {
+    window.clearTimeout(rxLogCopiedTimer);
+  }
+  rxLogCopiedTimer = window.setTimeout(() => {
+    rxLogCopied.value = false;
+    rxLogCopiedTimer = null;
+  }, 1200);
+}
+
 function resetDecoderProgressState(clearLogs: boolean) {
   receivedPackets.value = 0;
   totalNeededPackets.value = 0;
@@ -144,6 +173,7 @@ function resetDecoderProgressState(clearLogs: boolean) {
   if (clearLogs) {
     rxLogs.value = [];
     rxTick.value = 0;
+    rxNoChangeTicks.value = 0;
   }
 }
 
@@ -193,8 +223,18 @@ function makeOnProgressCallback() {
     rxTick.value += 1;
     const changed = prevReceived !== receivedPackets.value || prevRank !== rankPackets.value || p.complete;
     if (changed) {
+      rxNoChangeTicks.value = 0;
       pushRxLog(
         `#${rxTick.value} recv=${receivedPackets.value} rank=${rankPackets.value}/${totalNeededPackets.value} stall=${stalledPackets.value} dup=${duplicatePackets.value} crc=${crcErrorPackets.value} parse=${parseErrorPackets.value} invN=${invalidNeighborPackets.value} prog=${(progressPercent.value * 100).toFixed(1)}% lastSeq=${lastPacketSeq.value} lastRankUp=${lastRankUpSeq.value}${p.complete ? " COMPLETE" : ""}`
+      );
+      return;
+    }
+
+    rxNoChangeTicks.value += 1;
+    // 受信が進まない期間も、デコーダが生きているかを可視化するハートビートを残す。
+    if (rxNoChangeTicks.value % 64 === 0) {
+      pushRxLog(
+        `#${rxTick.value} heartbeat no-progress=${rxNoChangeTicks.value} recv=${receivedPackets.value} rank=${rankPackets.value}/${totalNeededPackets.value} rms=${decoderProcInputRms.value.toFixed(5)} avgMs=${decoderProcAvgMs.value.toFixed(3)} overrun=${decoderProcOverruns.value}`
       );
     }
   });
@@ -348,6 +388,9 @@ async function reset() {
 }
 
 onBeforeUnmount(() => {
+  if (rxLogCopiedTimer !== null) {
+    window.clearTimeout(rxLogCopiedTimer);
+  }
   safeDisconnect(micSource);
   safeDisconnect(encoderNode);
   safeDisconnect(rxInputGain);
@@ -407,6 +450,16 @@ onBeforeUnmount(() => {
               <code v-else>[Mic] -acoustic- [Decoder]</code>
             </div>
 
+            <div class="display">
+              <p class="display-title">Decoded Result</p>
+              <pre v-if="outputText">{{ outputText }}</pre>
+              <div v-else-if="outputImageUrl" class="image-result">
+                <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
+                <p class="image-meta">{{ outputImageMime }}</p>
+              </div>
+              <p v-else class="placeholder">Waiting for synchronization...</p>
+            </div>
+
             <div class="progress-block">
               <div class="progress-head">
                 <span>Rank {{ rankPackets }} / {{ totalNeededPackets || "?" }}</span>
@@ -443,17 +496,11 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="rx-log" v-if="rxLogs.length > 0">
-              <pre>{{ rxLogs.join('\n') }}</pre>
-            </div>
-
-            <div class="display">
-              <p class="display-title">Decoded Result</p>
-              <pre v-if="outputText">{{ outputText }}</pre>
-              <div v-else-if="outputImageUrl" class="image-result">
-                <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
-                <p class="image-meta">{{ outputImageMime }}</p>
+              <div class="rx-log-header">
+                <span>Rx Log</span>
+                <button @click="copyRxLogs" class="btn btn-xs">{{ rxLogCopied ? "Copied" : "Copy" }}</button>
               </div>
-              <p v-else class="placeholder">Waiting for synchronization...</p>
+              <pre>{{ rxLogs.join('\n') }}</pre>
             </div>
           </section>
         </div>
@@ -789,6 +836,27 @@ code {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: #fbfcfe;
+}
+
+.rx-log-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.35rem 0.45rem;
+  border-bottom: 1px solid var(--line);
+  background: #f2f7fc;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.btn-xs {
+  padding: 0.18rem 0.45rem;
+  border-radius: 7px;
+  font-size: 0.72rem;
 }
 
 .rx-log pre {

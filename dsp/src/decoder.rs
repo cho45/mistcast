@@ -22,9 +22,11 @@ use std::time::Instant;
 
 const TRACKING_TIMING_LOOP_GAIN: f32 = 0.18;
 const TRACKING_PHASE_LOOP_GAIN: f32 = 0.04;
-const TRACKING_TIMING_LIMIT_CHIP: f32 = 0.5;
+const TRACKING_TIMING_LIMIT_CHIP: f32 = 2.0;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const TRACKING_PHASE_STEP_CLAMP: f32 = 0.15;
+const HEADER_PROBE_SYMBOL_SPAN: i32 = 3;
+const HEADER_PROBE_CHIP_SPAN: i32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
@@ -228,9 +230,11 @@ impl Decoder {
             let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
             let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
-            'probe: for sym_shift in -2i32..=2i32 {
+            'probe: for sym_shift in -HEADER_PROBE_SYMBOL_SPAN..=HEADER_PROBE_SYMBOL_SPAN {
                 let base_start = start as i32 + sym_shift * symbol_len as i32;
-                for t_shift in -((spc as i32) * 2)..=((spc as i32) * 2) {
+                for t_shift in -((spc as i32) * HEADER_PROBE_CHIP_SPAN)
+                    ..=((spc as i32) * HEADER_PROBE_CHIP_SPAN)
+                {
                     let p_start_i32 = base_start + t_shift;
                     if p_start_i32 < 0 {
                         continue;
@@ -270,12 +274,17 @@ impl Decoder {
                 let p_start =
                     (start as i32 + best_sym_shift * symbol_len as i32 + best_t_shift) as usize;
                 let payload_start = p_start + sync_symbol_len * symbol_len;
-                let Some(payload_bits) = self.decode_bits_with_tracking(
-                    payload_start,
-                    burst_data_bits_len,
-                    best_tracking_after_sync,
-                    &pn,
-                ) else {
+                let p_bits_len = PACKET_BYTES * 8;
+                let Some((decoded_packets, crc_errors, parse_errors)) = self
+                    .decode_payload_with_timing_retries(
+                        payload_start,
+                        burst_data_bits_len,
+                        best_tracking_after_sync,
+                        &pn,
+                        fec_bits_len,
+                        p_bits_len,
+                    )
+                else {
                     let skip = (start + symbol_len).min(self.sample_buffer_i.len());
                     self.sample_buffer_i.drain(0..skip);
                     self.sample_buffer_q.drain(0..skip);
@@ -283,62 +292,54 @@ impl Decoder {
                     self.current_sync = None;
                     continue;
                 };
-                let p_bits_len = PACKET_BYTES * 8;
-                let mut _valid_packet_count = 0usize;
-                for packet_bits in payload_bits.chunks_exact(fec_bits_len) {
-                    let deinterleaved = self.interleaver.deinterleave(packet_bits);
-                    let decoded_bits = fec::decode(&deinterleaved);
-                    if decoded_bits.len() < p_bits_len {
-                        self.parse_error_packets += 1;
-                        continue;
+                self.crc_error_packets += crc_errors;
+                self.parse_error_packets += parse_errors;
+
+                if decoded_packets.is_empty() {
+                    // 同期語一致後に payload が全滅したら偽ロック/境界ずれを疑い、
+                    // フレーム全捨てを避けて再捕捉の機会を増やす。
+                    let skip = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
+                    self.sample_buffer_i.drain(0..skip);
+                    self.sample_buffer_q.drain(0..skip);
+                    self.last_search_idx = 0;
+                    self.current_sync = None;
+                    continue;
+                }
+
+                for packet in decoded_packets {
+                    let pkt_k = packet.lt_k as usize;
+                    if pkt_k != self.fountain_decoder.params().k {
+                        self.rebuild_fountain_decoder(pkt_k);
                     }
-                    let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-                    match Packet::deserialize(&d_bytes) {
-                        Ok(packet) => {
-                            _valid_packet_count += 1;
-                            let pkt_k = packet.lt_k as usize;
-                            if pkt_k != self.fountain_decoder.params().k {
-                                self.rebuild_fountain_decoder(pkt_k);
-                            }
-                            let seq = packet.lt_seq as u32;
-                            let coefficients =
-                                crate::coding::fountain::reconstruct_packet_coefficients(
-                                    seq,
-                                    self.fountain_decoder.params().k,
-                                );
-                            let outcome =
-                                self.fountain_decoder.receive_with_outcome(FountainPacket {
-                                    seq,
-                                    coefficients,
-                                    data: packet.payload.to_vec(),
-                                });
-                            match outcome {
-                                ReceiveOutcome::AcceptedRankUp => {
-                                    self.last_packet_seq = Some(seq);
-                                    self.last_rank_up_seq = Some(seq);
-                                }
-                                ReceiveOutcome::AcceptedNoRankUp => {
-                                    self.last_packet_seq = Some(seq);
-                                    self.dependent_packets += 1;
-                                }
-                                ReceiveOutcome::DuplicateSeq => {
-                                    self.duplicate_packets += 1;
-                                }
-                                ReceiveOutcome::InvalidPacket => {
-                                    self.invalid_neighbor_packets += 1;
-                                }
-                            }
-                            if let Some(data) = self.fountain_decoder.decode() {
-                                self.recovered_data = Some(data);
-                                break;
-                            }
+                    let seq = packet.lt_seq as u32;
+                    let coefficients = crate::coding::fountain::reconstruct_packet_coefficients(
+                        seq,
+                        self.fountain_decoder.params().k,
+                    );
+                    let outcome = self.fountain_decoder.receive_with_outcome(FountainPacket {
+                        seq,
+                        coefficients,
+                        data: packet.payload.to_vec(),
+                    });
+                    match outcome {
+                        ReceiveOutcome::AcceptedRankUp => {
+                            self.last_packet_seq = Some(seq);
+                            self.last_rank_up_seq = Some(seq);
                         }
-                        Err(PacketParseError::CrcMismatch { .. }) => {
-                            self.crc_error_packets += 1;
+                        ReceiveOutcome::AcceptedNoRankUp => {
+                            self.last_packet_seq = Some(seq);
+                            self.dependent_packets += 1;
                         }
-                        Err(PacketParseError::InvalidLength { .. }) => {
-                            self.parse_error_packets += 1;
+                        ReceiveOutcome::DuplicateSeq => {
+                            self.duplicate_packets += 1;
                         }
+                        ReceiveOutcome::InvalidPacket => {
+                            self.invalid_neighbor_packets += 1;
+                        }
+                    }
+                    if let Some(data) = self.fountain_decoder.decode() {
+                        self.recovered_data = Some(data);
+                        break;
                     }
                 }
                 // lock判定は preamble+sync のみで行う。
@@ -354,7 +355,7 @@ impl Decoder {
 
             // デコード失敗またはヘッダ未検出: 偽同期として捨てて進める
             let _ = best_invert;
-            let skip = (start + symbol_len).min(self.sample_buffer_i.len());
+            let skip = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
             self.sample_buffer_i.drain(0..skip);
             self.sample_buffer_q.drain(0..skip);
             self.last_search_idx = 0;
@@ -550,6 +551,72 @@ impl Decoder {
                 timing_offset,
             },
         ))
+    }
+
+    fn decode_payload_with_timing_retries(
+        &self,
+        payload_start: usize,
+        burst_data_bits_len: usize,
+        initial_state: TrackingState,
+        pn: &[f32],
+        fec_bits_len: usize,
+        p_bits_len: usize,
+    ) -> Option<(Vec<Packet>, usize, usize)> {
+        let spc = self.proc_config.samples_per_chip().max(1) as f32;
+        let timing_limit = spc * TRACKING_TIMING_LIMIT_CHIP;
+        let timing_biases = [-0.75f32 * spc, 0.0, 0.75f32 * spc];
+
+        let mut best: Option<(Vec<Packet>, usize, usize)> = None;
+        for bias in timing_biases {
+            let mut st = initial_state;
+            st.timing_offset = (st.timing_offset + bias).clamp(-timing_limit, timing_limit);
+            let Some(payload_bits) =
+                self.decode_bits_with_tracking(payload_start, burst_data_bits_len, st, pn)
+            else {
+                continue;
+            };
+            let candidate = self.parse_payload_packets(&payload_bits, fec_bits_len, p_bits_len);
+            let replace = match &best {
+                None => true,
+                Some((best_packets, best_crc, best_parse)) => {
+                    candidate.0.len() > best_packets.len()
+                        || (candidate.0.len() == best_packets.len()
+                            && (candidate.1 < *best_crc
+                                || (candidate.1 == *best_crc && candidate.2 < *best_parse)))
+                }
+            };
+            if replace {
+                best = Some(candidate);
+            }
+        }
+
+        best
+    }
+
+    fn parse_payload_packets(
+        &self,
+        payload_bits: &[u8],
+        fec_bits_len: usize,
+        p_bits_len: usize,
+    ) -> (Vec<Packet>, usize, usize) {
+        let mut decoded_packets = Vec::new();
+        let mut crc_errors = 0usize;
+        let mut parse_errors = 0usize;
+        for packet_bits in payload_bits.chunks_exact(fec_bits_len) {
+            let deinterleaved = self.interleaver.deinterleave(packet_bits);
+            let decoded_bits = fec::decode(&deinterleaved);
+            if decoded_bits.len() < p_bits_len {
+                parse_errors += 1;
+                continue;
+            }
+            let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
+            match Packet::deserialize(&d_bytes) {
+                Ok(packet) => decoded_packets.push(packet),
+                Err(PacketParseError::CrcMismatch { .. }) => crc_errors += 1,
+                Err(PacketParseError::InvalidLength { .. }) => parse_errors += 1,
+            }
+        }
+        (decoded_packets, crc_errors, parse_errors)
     }
 
     fn progress(&self) -> DecodeProgress {
