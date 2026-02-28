@@ -79,7 +79,27 @@ const SIMD_BINDINGS: WasmBindings = {
 
 type RecyclePortInboundMessage = 
   | { type: "recycle"; data: Float32Array }
-  | { type: "input"; data: Float32Array };
+  | { type: "input"; data: Float32Array }
+  | {
+      type: "stats";
+      blocks: number;
+      avgProcessMs: number;
+      maxProcessMs: number;
+      lastProcessMs: number;
+      blockDurationMs: number;
+      overruns: number;
+      inputRms: number;
+    };
+
+type DecoderProcessorStats = {
+  blocks: number;
+  avgProcessMs: number;
+  maxProcessMs: number;
+  lastProcessMs: number;
+  blockDurationMs: number;
+  overruns: number;
+  inputRms: number;
+};
 
 export class MistcastBackend {
   private encoder: WasmEncoderLike | null = null;
@@ -93,6 +113,15 @@ export class MistcastBackend {
 
   private onPacket: ((data: Uint8Array) => void) | null = null;
   private onProgress: ((p: any) => void) | null = null;
+  private decoderProcessorStats: DecoderProcessorStats = {
+    blocks: 0,
+    avgProcessMs: 0,
+    maxProcessMs: 0,
+    lastProcessMs: 0,
+    blockDurationMs: 0,
+    overruns: 0,
+    inputRms: 0,
+  };
 
   private async ensureWasm() {
     if (!this.wasmBindings) {
@@ -153,6 +182,16 @@ export class MistcastBackend {
       if (!msg || typeof msg !== "object") return;
       if (msg.type === "input" && msg.data instanceof Float32Array) {
         this.processSamples(msg.data);
+      } else if (msg.type === "stats") {
+        this.decoderProcessorStats = {
+          blocks: msg.blocks,
+          avgProcessMs: msg.avgProcessMs,
+          maxProcessMs: msg.maxProcessMs,
+          lastProcessMs: msg.lastProcessMs,
+          blockDurationMs: msg.blockDurationMs,
+          overruns: msg.overruns,
+          inputRms: msg.inputRms,
+        };
       }
     };
     this.audioInPort.start();
@@ -213,6 +252,15 @@ export class MistcastBackend {
     console.log(`[Worker] Decoder setup (adaptive-k protocol, rate=${sampleRate})`);
     
     this.decoder = new bindings.WasmDecoder(sampleRate);
+    this.decoderProcessorStats = {
+      blocks: 0,
+      avgProcessMs: 0,
+      maxProcessMs: 0,
+      lastProcessMs: 0,
+      blockDurationMs: 0,
+      overruns: 0,
+      inputRms: 0,
+    };
     this.onPacket = onPacket;
     this.onProgress = onProgress;
   }
@@ -235,6 +283,7 @@ export class MistcastBackend {
         lastRankUpSeq: progress.last_rank_up_seq,
         progress: progress.progress,
         complete: progress.complete,
+        decoderProc: this.decoderProcessorStats,
     };
 
     if (this.onProgress) {
@@ -247,7 +296,7 @@ export class MistcastBackend {
       if (data && this.onPacket) {
         this.onPacket(data);
       }
-      this.decoder = null; 
+      this.decoder = null;
     }
     
     return result;
@@ -255,9 +304,18 @@ export class MistcastBackend {
 
   async resetDecoder() {
     if (this.decoder) {
-        this.decoder.reset();
-        this.decoder = null;
+      this.decoder.reset();
+      this.decoder = null;
     }
+    this.decoderProcessorStats = {
+      blocks: 0,
+      avgProcessMs: 0,
+      maxProcessMs: 0,
+      lastProcessMs: 0,
+      blockDurationMs: 0,
+      overruns: 0,
+      inputRms: 0,
+    };
   }
 }
 

@@ -17,6 +17,12 @@ declare abstract class AudioWorkletProcessor {
 
 const workletGlobal = globalThis as unknown as { sampleRate: number; currentTime: number };
 
+const nowMs = (): number => {
+  const perf = (globalThis as unknown as { performance?: { now?: () => number } }).performance;
+  if (perf?.now) return perf.now();
+  return Date.now();
+};
+
 /**
  * EncoderProcessor: Workerから届いた「送信波形」を再生するノード
  * 自身の node.port を通じてメッセージを受け取る
@@ -87,22 +93,84 @@ export class EncoderProcessor extends AudioWorkletProcessor {
  */
 export class DecoderProcessor extends AudioWorkletProcessor {
   private readonly CHUNK_SIZE = 4096;
+  private readonly REPORT_EVERY_BLOCKS = 64;
   private buffer = new Float32Array(this.CHUNK_SIZE);
   private pos = 0;
+  private statsBlocks = 0;
+  private statsTotalMs = 0;
+  private statsMaxMs = 0;
+  private statsOverruns = 0;
+  private statsLastMs = 0;
+  private statsInputRms = 0;
 
-  process(inputs: Float32Array[][]): boolean {
+  constructor() {
+    super();
+    this.port.onmessage = (e: MessageEvent) => {
+      const msg = e.data as { type?: string } | null;
+      if (msg?.type === "reset") {
+        this.pos = 0;
+        this.buffer.fill(0);
+        this.statsBlocks = 0;
+        this.statsTotalMs = 0;
+        this.statsMaxMs = 0;
+        this.statsOverruns = 0;
+        this.statsLastMs = 0;
+        this.statsInputRms = 0;
+      }
+    };
+  }
+
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
+    const t0 = nowMs();
     const inputBus = inputs[0];
     const inL = inputBus?.[0];
+
+    const outputBus = outputs[0];
+    const outL = outputBus?.[0];
+    const outR = outputBus?.[1] ?? outL;
+    if (outL) {
+      outL.fill(0);
+      if (outR && outR !== outL) outR.fill(0);
+    }
+
     if (!inL) return true;
 
+    let rmsAcc = 0;
     for (let i = 0; i < inL.length; i++) {
-      this.buffer[this.pos++] = inL[i];
+      const v = inL[i];
+      this.buffer[this.pos++] = v;
+      rmsAcc += v * v;
       if (this.pos >= this.CHUNK_SIZE) {
         const transferBuffer = new Float32Array(this.buffer);
         // 標準の port を使用
         this.port.postMessage({ type: "input", data: transferBuffer }, [transferBuffer.buffer]);
         this.pos = 0;
       }
+    }
+
+    const elapsedMs = nowMs() - t0;
+    const blockMs = (inL.length / workletGlobal.sampleRate) * 1000;
+    const inputRms = Math.sqrt(rmsAcc / inL.length);
+    this.statsBlocks += 1;
+    this.statsTotalMs += elapsedMs;
+    this.statsMaxMs = Math.max(this.statsMaxMs, elapsedMs);
+    this.statsLastMs = elapsedMs;
+    this.statsInputRms = inputRms;
+    if (elapsedMs > blockMs) {
+      this.statsOverruns += 1;
+    }
+
+    if (this.statsBlocks % this.REPORT_EVERY_BLOCKS === 0) {
+      this.port.postMessage({
+        type: "stats",
+        blocks: this.statsBlocks,
+        avgProcessMs: this.statsTotalMs / this.statsBlocks,
+        maxProcessMs: this.statsMaxMs,
+        lastProcessMs: this.statsLastMs,
+        blockDurationMs: blockMs,
+        overruns: this.statsOverruns,
+        inputRms: this.statsInputRms,
+      });
     }
 
     return true;

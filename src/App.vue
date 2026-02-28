@@ -28,6 +28,13 @@ const invalidNeighborPackets = ref(0);
 const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
+const decoderProcAvgMs = ref(0);
+const decoderProcMaxMs = ref(0);
+const decoderProcLastMs = ref(0);
+const decoderProcBlockMs = ref(0);
+const decoderProcOverruns = ref(0);
+const decoderProcInputRms = ref(0);
+const decoderProcBlocks = ref(0);
 const rxLogs = ref<string[]>([]);
 const rxTick = ref(0);
 
@@ -36,6 +43,7 @@ let audioContext: AudioContext | null = null;
 let encoderNode: AudioWorkletNode | null = null;
 let decoderNode: AudioWorkletNode | null = null;
 let rxInputGain: GainNode | null = null;
+let decoderStreamSink: MediaStreamAudioDestinationNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 let micStream: MediaStream | null = null;
 
@@ -120,6 +128,35 @@ function pushRxLog(line: string) {
   }
 }
 
+function resetDecoderProgressState(clearLogs: boolean) {
+  receivedPackets.value = 0;
+  totalNeededPackets.value = 0;
+  rankPackets.value = 0;
+  stalledPackets.value = 0;
+  dependentPackets.value = 0;
+  duplicatePackets.value = 0;
+  crcErrorPackets.value = 0;
+  parseErrorPackets.value = 0;
+  invalidNeighborPackets.value = 0;
+  lastPacketSeq.value = -1;
+  lastRankUpSeq.value = -1;
+  progressPercent.value = 0;
+  if (clearLogs) {
+    rxLogs.value = [];
+    rxTick.value = 0;
+  }
+}
+
+function resetDecoderProcessorStats() {
+  decoderProcAvgMs.value = 0;
+  decoderProcMaxMs.value = 0;
+  decoderProcLastMs.value = 0;
+  decoderProcBlockMs.value = 0;
+  decoderProcOverruns.value = 0;
+  decoderProcInputRms.value = 0;
+  decoderProcBlocks.value = 0;
+}
+
 function makeOnPacketCallback() {
   return Comlink.proxy((recovered: Uint8Array) => {
     setDecodedOutput(recovered);
@@ -143,6 +180,16 @@ function makeOnProgressCallback() {
     lastPacketSeq.value = p.lastPacketSeq ?? -1;
     lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
     progressPercent.value = p.progress;
+    const proc = p.decoderProc;
+    if (proc) {
+      decoderProcAvgMs.value = proc.avgProcessMs ?? 0;
+      decoderProcMaxMs.value = proc.maxProcessMs ?? 0;
+      decoderProcLastMs.value = proc.lastProcessMs ?? 0;
+      decoderProcBlockMs.value = proc.blockDurationMs ?? 0;
+      decoderProcOverruns.value = proc.overruns ?? 0;
+      decoderProcInputRms.value = proc.inputRms ?? 0;
+      decoderProcBlocks.value = proc.blocks ?? 0;
+    }
     rxTick.value += 1;
     const changed = prevReceived !== receivedPackets.value || prevRank !== rankPackets.value || p.complete;
     if (changed) {
@@ -204,7 +251,7 @@ async function init() {
 
   decoderNode = new AudioWorkletNode(audioContext, 'decoder-processor', {
     numberOfInputs: 1,
-    numberOfOutputs: 0,
+    numberOfOutputs: 1,
     channelCount: 1,
     channelCountMode: "explicit",
     channelInterpretation: "discrete",
@@ -214,6 +261,10 @@ async function init() {
   rxInputGain = audioContext.createGain();
   rxInputGain.gain.value = 1.0;
   rxInputGain.connect(decoderNode);
+  // 無音Gain(0)->destination はブラウザ最適化で処理停止されることがあるため、
+  // スピーカーへ出さない MediaStreamDestination を常時シンクとして使う。
+  decoderStreamSink = audioContext.createMediaStreamDestination();
+  decoderNode.connect(decoderStreamSink);
 
   encoderNode.connect(audioContext.destination);
   routeDecoderInput("encoder");
@@ -229,22 +280,8 @@ async function startSendingData(data: Uint8Array) {
 
   status.value = "Preparing...";
   clearOutput();
-  receivedPackets.value = 0;
-  rankPackets.value = 0;
-  stalledPackets.value = 0;
-  dependentPackets.value = 0;
-  duplicatePackets.value = 0;
-  crcErrorPackets.value = 0;
-  parseErrorPackets.value = 0;
-  invalidNeighborPackets.value = 0;
-  lastPacketSeq.value = -1;
-  lastRankUpSeq.value = -1;
-  progressPercent.value = 0;
-  rxLogs.value = [];
-  rxTick.value = 0;
-
-  // デコーダは常時待機させる（受信専用機でも動作させるため）。
-  await startDecoderStandby();
+  // 送信開始で受信パケット表示はリセットするが、DecoderProcessor統計は保持する。
+  resetDecoderProgressState(true);
 
   status.value = "Transmitting...";
   await backend.startEncoder(data, audioContext.sampleRate);
@@ -301,30 +338,20 @@ async function toggleMic() {
 }
 
 async function reset() {
-    await backend?.resetDecoder();
-    await startDecoderStandby();
-    clearOutput();
-    receivedPackets.value = 0;
-    rankPackets.value = 0;
-    stalledPackets.value = 0;
-    dependentPackets.value = 0;
-    duplicatePackets.value = 0;
-    crcErrorPackets.value = 0;
-    parseErrorPackets.value = 0;
-    invalidNeighborPackets.value = 0;
-    lastPacketSeq.value = -1;
-    lastRankUpSeq.value = -1;
-    progressPercent.value = 0;
-    totalNeededPackets.value = 0;
-    rxLogs.value = [];
-    rxTick.value = 0;
-    status.value = "Ready (Rx standby)";
+  decoderNode?.port.postMessage({ type: "reset" });
+  await backend?.resetDecoder();
+  await startDecoderStandby();
+  clearOutput();
+  resetDecoderProgressState(true);
+  resetDecoderProcessorStats();
+  status.value = "Ready (Rx standby)";
 }
 
 onBeforeUnmount(() => {
   safeDisconnect(micSource);
   safeDisconnect(encoderNode);
   safeDisconnect(rxInputGain);
+  safeDisconnect(decoderNode, decoderStreamSink);
   safeDisconnect(decoderNode);
   micStream?.getTracks().forEach((t) => t.stop());
   clearOutput();
@@ -400,6 +427,19 @@ onBeforeUnmount(() => {
               <div class="metric"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
               <div class="metric"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
               <div class="metric"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
+            </div>
+
+            <div class="proc-stats">
+              <p class="proc-title">DecoderProcessor Timing</p>
+              <div class="proc-grid">
+                <div><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
+                <div><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
+                <div><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
+                <div><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
+                <div><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
+                <div><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
+                <div><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
+              </div>
             </div>
 
             <div class="rx-log" v-if="rxLogs.length > 0">
@@ -704,6 +744,44 @@ code {
   font-size: 0.95rem;
 }
 
+.proc-stats {
+  margin-top: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 0.6rem;
+  min-width: 0;
+}
+
+.proc-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.proc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem 0.5rem;
+}
+
+.proc-grid div {
+  min-width: 0;
+}
+
+.proc-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.proc-grid strong {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .rx-log {
   margin-top: 0.85rem;
   max-height: 220px;
@@ -811,6 +889,10 @@ code {
 
   .metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .proc-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 </style>
