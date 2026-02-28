@@ -4,8 +4,7 @@ use crate::{
     coding::fec,
     coding::fountain::{EncodedPacket, LtDecoder, LtParams},
     coding::interleaver::BlockInterleaver,
-    common::decimator::FirDecimator,
-    common::rrc_filter::RrcFilter,
+    common::rrc_filter::DecimatingRrcFilter,
     frame::packet::{Packet, PACKET_BYTES},
     params::PAYLOAD_SIZE,
     phy::demodulator::Demodulator,
@@ -25,11 +24,8 @@ pub struct DecodeProgress {
 pub struct Decoder {
     config: DspConfig,
     proc_config: DspConfig,
-    sample_idx: usize,
-    rrc_i: RrcFilter,
-    rrc_q: RrcFilter,
-    decimator_i: FirDecimator,
-    decimator_q: FirDecimator,
+    rrc_decim_i: DecimatingRrcFilter,
+    rrc_decim_q: DecimatingRrcFilter,
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
     sync_detector: SyncDetector,
@@ -63,26 +59,14 @@ impl Decoder {
         let fec_bits = raw_bits * 2;
         let il_rows = 16;
         let il_cols = fec_bits.div_ceil(16);
-        let decim_cutoff_norm = 0.45 / decimation_factor as f32;
         let lo_w = 2.0 * std::f32::consts::PI * dsp_config.carrier_freq / dsp_config.sample_rate;
         let (lo_step_sin, lo_step_cos) = lo_w.sin_cos();
 
         Decoder {
-            rrc_i: RrcFilter::from_config(&dsp_config),
-            rrc_q: RrcFilter::from_config(&dsp_config),
-            decimator_i: FirDecimator::new_lowpass_hamming(
-                decimation_factor,
-                63,
-                decim_cutoff_norm,
-            ),
-            decimator_q: FirDecimator::new_lowpass_hamming(
-                decimation_factor,
-                63,
-                decim_cutoff_norm,
-            ),
+            rrc_decim_i: DecimatingRrcFilter::from_config(&dsp_config, decimation_factor),
+            rrc_decim_q: DecimatingRrcFilter::from_config(&dsp_config, decimation_factor),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
-            sample_idx: 0,
             sync_detector: SyncDetector::new(proc_config.clone()),
             demodulator: Demodulator::new(proc_config.clone()),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
@@ -129,8 +113,8 @@ impl Decoder {
             } else {
                 1.0
             };
-            i_mixed.push(self.rrc_i.process(s * current_gain * lo_cos * 2.0));
-            q_mixed.push(self.rrc_q.process(s * current_gain * (-lo_sin) * 2.0));
+            i_mixed.push(s * current_gain * lo_cos * 2.0);
+            q_mixed.push(s * current_gain * (-lo_sin) * 2.0);
 
             let next_cos = lo_cos * step_cos - lo_sin * step_sin;
             let next_sin = lo_sin * step_cos + lo_cos * step_sin;
@@ -145,12 +129,11 @@ impl Decoder {
         }
         self.lo_cos = lo_cos;
         self.lo_sin = lo_sin;
-        self.sample_idx += samples.len();
 
         let mut i_decimated = Vec::new();
         let mut q_decimated = Vec::new();
-        self.decimator_i.process_into(&i_mixed, &mut i_decimated);
-        self.decimator_q.process_into(&q_mixed, &mut q_decimated);
+        self.rrc_decim_i.process_block(&i_mixed, &mut i_decimated);
+        self.rrc_decim_q.process_block(&q_mixed, &mut q_decimated);
         self.sample_buffer_i.extend_from_slice(&i_decimated);
         self.sample_buffer_q.extend_from_slice(&q_decimated);
 
@@ -392,13 +375,10 @@ impl Decoder {
     pub fn reset(&mut self) {
         self.demodulator.reset();
         self.interleaver.reset();
-        self.rrc_i.reset();
-        self.rrc_q.reset();
-        self.decimator_i.reset();
-        self.decimator_q.reset();
+        self.rrc_decim_i.reset();
+        self.rrc_decim_q.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
-        self.sample_idx = 0;
         self.lo_cos = 1.0;
         self.lo_sin = 0.0;
         self.recovered_data = None;

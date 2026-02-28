@@ -76,6 +76,18 @@ pub struct RrcFilter {
     pos: usize,
 }
 
+/// RRCマッチドフィルタ + デシメーションを統合した逐次フィルタ。
+///
+/// 入力ごとに状態は更新するが、出力は `decimation` サンプルに1回だけ生成する。
+/// これにより「RRC -> LPF -> decimation」の2段を1段化できる。
+pub struct DecimatingRrcFilter {
+    coeffs: Vec<f32>,
+    buffer: Vec<f32>,
+    pos: usize,
+    decimation: usize,
+    phase: usize,
+}
+
 impl RrcFilter {
     /// `DspConfig` からフィルタを作成する
     pub fn from_config(config: &DspConfig) -> Self {
@@ -136,6 +148,77 @@ impl RrcFilter {
 
     pub fn num_taps(&self) -> usize {
         self.coeffs.len()
+    }
+}
+
+impl DecimatingRrcFilter {
+    pub fn from_config(config: &DspConfig, decimation: usize) -> Self {
+        assert!(decimation > 0, "decimation must be > 0");
+        let coeffs = rrc_coeffs(
+            config.rrc_num_taps(),
+            config.rrc_alpha,
+            config.chip_rate,
+            config.sample_rate,
+        );
+        let taps = coeffs.len();
+        Self {
+            coeffs,
+            buffer: vec![0.0f32; taps],
+            pos: 0,
+            decimation,
+            phase: 0,
+        }
+    }
+
+    #[inline]
+    fn push_and_maybe_output(&mut self, sample: f32) -> Option<f32> {
+        self.buffer[self.pos] = sample;
+        self.pos += 1;
+        if self.pos >= self.buffer.len() {
+            self.pos = 0;
+        }
+
+        if self.phase != 0 {
+            self.phase += 1;
+            if self.phase >= self.decimation {
+                self.phase = 0;
+            }
+            return None;
+        }
+
+        let n = self.coeffs.len();
+        let mut out = 0.0f32;
+        let mut idx = self.pos;
+        for k in 0..n {
+            idx = if idx == 0 { n - 1 } else { idx - 1 };
+            out += self.coeffs[k] * self.buffer[idx];
+        }
+
+        self.phase += 1;
+        if self.phase >= self.decimation {
+            self.phase = 0;
+        }
+
+        Some(out)
+    }
+
+    pub fn process_block(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        output.clear();
+        if input.is_empty() {
+            return;
+        }
+        output.reserve(input.len() / self.decimation + 1);
+        for &x in input {
+            if let Some(y) = self.push_and_maybe_output(x) {
+                output.push(y);
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.pos = 0;
+        self.phase = 0;
     }
 }
 
@@ -279,5 +362,36 @@ mod tests {
         assert_eq!(output.len(), input.len());
         let max = output.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         assert!(max > 0.0);
+    }
+
+    #[test]
+    fn test_decimating_rrc_matches_subsampled_rrc() {
+        let config = test_config();
+        let decimation = 3usize;
+        let mut full = RrcFilter::from_config(&config);
+        let mut decim = DecimatingRrcFilter::from_config(&config, decimation);
+
+        let mut input = Vec::with_capacity(4096);
+        for i in 0..4096 {
+            let t = i as f32 / config.sample_rate;
+            input.push(
+                0.7 * (2.0 * std::f32::consts::PI * 800.0 * t).sin()
+                    + 0.2 * (2.0 * std::f32::consts::PI * 2300.0 * t).cos(),
+            );
+        }
+
+        let full_out = full.process_block(&input);
+        let expected: Vec<f32> = full_out.into_iter().step_by(decimation).collect();
+
+        let mut got = Vec::new();
+        decim.process_block(&input, &mut got);
+
+        assert_eq!(got.len(), expected.len());
+        let max_err = got
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(max_err < 1e-5, "max_err={}", max_err);
     }
 }
