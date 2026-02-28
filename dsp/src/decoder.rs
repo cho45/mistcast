@@ -305,6 +305,10 @@ impl Decoder {
                     let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
                     match Packet::deserialize(&d_bytes) {
                         Ok(packet) => {
+                            let pkt_k = packet.lt_k as usize;
+                            if pkt_k != self.lt_decoder.params().k {
+                                self.rebuild_lt_decoder(pkt_k);
+                            }
                             let seq = packet.lt_seq as u32;
                             let (degree, neighbors) =
                                 crate::coding::fountain::reconstruct_packet_metadata(
@@ -409,6 +413,19 @@ impl Decoder {
         }
     }
 
+    fn rebuild_lt_decoder(&mut self, lt_k: usize) {
+        let params = LtParams::new(lt_k, PAYLOAD_SIZE);
+        self.lt_decoder = LtDecoder::new(params);
+        self.recovered_data = None;
+        self.last_packet_seq = None;
+        self.last_rank_up_seq = None;
+        self.dependent_packets = 0;
+        self.duplicate_packets = 0;
+        self.crc_error_packets = 0;
+        self.parse_error_packets = 0;
+        self.invalid_neighbor_packets = 0;
+    }
+
     #[inline]
     fn agc_scale(&mut self, sample: f32) -> f32 {
         self.agc_peak = self.agc_peak * 0.999 + sample.abs() * 0.001;
@@ -502,8 +519,7 @@ impl Decoder {
         self.crc_error_packets = 0;
         self.parse_error_packets = 0;
         self.invalid_neighbor_packets = 0;
-        let params = self.lt_decoder.params().clone();
-        self.lt_decoder = LtDecoder::new(params);
+        self.rebuild_lt_decoder(self.lt_decoder.params().k);
     }
 
     pub fn recovered_data(&self) -> Option<&[u8]> {

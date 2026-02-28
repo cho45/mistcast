@@ -147,7 +147,16 @@ impl WasmEncoder {
         }
     }
     pub fn set_data(&mut self, data: &[u8]) {
-        let params = coding::fountain::LtParams::new(params::FIXED_K, params::PAYLOAD_SIZE);
+        let max_k = crate::frame::packet::LT_K_MAX;
+        let needed_k = data.len().div_ceil(params::PAYLOAD_SIZE).max(1);
+        assert!(
+            needed_k <= max_k,
+            "input is too large for current packet header: need k={}, max k={}",
+            needed_k,
+            max_k
+        );
+        self.inner.set_lt_k(needed_k);
+        let params = coding::fountain::LtParams::new(needed_k, params::PAYLOAD_SIZE);
         self.lt_encoder = Some(coding::fountain::LtEncoder::new(data, params));
     }
     pub fn pull_frame(&mut self) -> Option<Vec<f32>> {

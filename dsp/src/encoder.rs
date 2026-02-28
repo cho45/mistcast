@@ -4,7 +4,7 @@ use crate::{
     coding::fec,
     coding::fountain::{EncodedPacket, LtEncoder, LtParams},
     coding::interleaver::BlockInterleaver,
-    frame::packet::Packet,
+    frame::packet::{Packet, LT_K_MAX},
     params::PAYLOAD_SIZE,
     phy::modulator::Modulator,
     DspConfig,
@@ -53,7 +53,8 @@ impl Encoder {
     }
 
     pub fn encode_packet(&mut self, packet: &EncodedPacket) -> Vec<f32> {
-        let pkt = Packet::new(packet.seq as u16, &packet.data);
+        let seq = (packet.seq & (crate::frame::packet::LT_SEQ_MAX as u32)) as u16;
+        let pkt = Packet::new(seq, self.config.lt_k, &packet.data);
         let pkt_bytes = pkt.serialize();
         let bits = fec::bytes_to_bits(&pkt_bytes);
         let coded = fec::encode(&bits);
@@ -73,6 +74,14 @@ impl Encoder {
             encoder: self,
             lt_encoder,
         }
+    }
+
+    pub fn set_lt_k(&mut self, lt_k: usize) {
+        assert!(
+            (1..=LT_K_MAX).contains(&lt_k),
+            "lt_k must be in 1..={LT_K_MAX}"
+        );
+        self.config.lt_k = lt_k;
     }
 }
 

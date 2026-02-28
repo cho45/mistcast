@@ -210,7 +210,7 @@ export class MistcastBackend {
                      onProgress: (p: any) => void) {
     await this.init();
     const bindings = this.requireBindings();
-    console.log(`[Worker] Decoder setup (fixed protocol, rate=${sampleRate})`);
+    console.log(`[Worker] Decoder setup (adaptive-k protocol, rate=${sampleRate})`);
     
     this.decoder = new bindings.WasmDecoder(sampleRate);
     this.onPacket = onPacket;

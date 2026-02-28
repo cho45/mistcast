@@ -86,7 +86,7 @@ async function startSending() {
 
   const data = new TextEncoder().encode(inputText.value);
   
-  // デコーダは FIXED_K=10 で待ち受けるため、データ長以外の情報は不要。
+  // デコーダはパケット内のk情報から自動追従する。
   await backend.startDecoder(
     audioContext.sampleRate, 
     Comlink.proxy((recovered: Uint8Array) => {
@@ -200,7 +200,7 @@ async function reset() {
         </div>
 
         <div class="recv-section">
-          <h3>Receiver (Fixed K=10)</h3>
+          <h3>Receiver (Adaptive K)</h3>
           <div class="btn-group">
             <button @click="toggleMic" :class="{ 'btn-active': isMicActive }" class="btn">
               {{ isMicActive ? 'Disable Mic' : 'Enable Microphone' }}
