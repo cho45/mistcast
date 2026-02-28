@@ -4,11 +4,11 @@
 use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::{
     coding::fec,
-    coding::fountain::{EncodedPacket, LtDecoder, LtParams},
+    coding::fountain::{EncodedPacket, LtDecoder, LtParams, ReceiveOutcome},
     coding::interleaver::BlockInterleaver,
     common::nco::Nco,
     common::rrc_filter::DecimatingRrcFilter,
-    frame::packet::{Packet, PACKET_BYTES},
+    frame::packet::{Packet, PacketParseError, PACKET_BYTES},
     params::PAYLOAD_SIZE,
     phy::demodulator::Demodulator,
     phy::sync::{SyncDetector, SyncResult},
@@ -26,6 +26,11 @@ pub struct DecodeProgress {
     pub needed_packets: usize,
     pub rank_packets: usize,
     pub stalled_packets: usize,
+    pub dependent_packets: usize,
+    pub duplicate_packets: usize,
+    pub crc_error_packets: usize,
+    pub parse_error_packets: usize,
+    pub invalid_neighbor_packets: usize,
     pub last_packet_seq: i32,
     pub last_rank_up_seq: i32,
     pub progress: f32,
@@ -53,6 +58,11 @@ pub struct Decoder {
     current_sync: Option<SyncResult>,
     last_packet_seq: Option<u32>,
     last_rank_up_seq: Option<u32>,
+    dependent_packets: usize,
+    duplicate_packets: usize,
+    crc_error_packets: usize,
+    parse_error_packets: usize,
+    invalid_neighbor_packets: usize,
 
     // --- 統計用 ---
     pub stats_sync_calls: usize,
@@ -90,6 +100,11 @@ impl Decoder {
             current_sync: None,
             last_packet_seq: None,
             last_rank_up_seq: None,
+            dependent_packets: 0,
+            duplicate_packets: 0,
+            crc_error_packets: 0,
+            parse_error_packets: 0,
+            invalid_neighbor_packets: 0,
             stats_sync_calls: 0,
             stats_sync_time: Duration::ZERO,
             stats_total_samples: 0,
@@ -288,41 +303,55 @@ impl Decoder {
 
                 if decoded_bits.len() >= p_bits_len {
                     let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-                    if let Some(packet) = Packet::deserialize(&d_bytes) {
-                        let seq = packet.lt_seq as u32;
-                        let (degree, neighbors) =
-                            crate::coding::fountain::reconstruct_packet_metadata(
+                    match Packet::deserialize(&d_bytes) {
+                        Ok(packet) => {
+                            let seq = packet.lt_seq as u32;
+                            let (degree, neighbors) =
+                                crate::coding::fountain::reconstruct_packet_metadata(
+                                    seq,
+                                    self.lt_decoder.params().k,
+                                    self.lt_decoder.params().c,
+                                    self.lt_decoder.params().delta,
+                                );
+                            let outcome = self.lt_decoder.receive_with_outcome(EncodedPacket {
                                 seq,
-                                self.lt_decoder.params().k,
-                                self.lt_decoder.params().c,
-                                self.lt_decoder.params().delta,
-                            );
-                        let before_received = self.lt_decoder.received_count();
-                        let before_rank = self.lt_decoder.rank();
-                        self.lt_decoder.receive(EncodedPacket {
-                            seq,
-                            degree,
-                            neighbors,
-                            data: packet.payload.to_vec(),
-                        });
-                        let after_received = self.lt_decoder.received_count();
-                        let after_rank = self.lt_decoder.rank();
-                        if after_received > before_received {
-                            self.last_packet_seq = Some(seq);
-                            if after_rank > before_rank {
-                                self.last_rank_up_seq = Some(seq);
+                                degree,
+                                neighbors,
+                                data: packet.payload.to_vec(),
+                            });
+                            match outcome {
+                                ReceiveOutcome::AcceptedRankUp => {
+                                    self.last_packet_seq = Some(seq);
+                                    self.last_rank_up_seq = Some(seq);
+                                }
+                                ReceiveOutcome::AcceptedNoRankUp => {
+                                    self.last_packet_seq = Some(seq);
+                                    self.dependent_packets += 1;
+                                }
+                                ReceiveOutcome::DuplicateSeq => {
+                                    self.duplicate_packets += 1;
+                                }
+                                ReceiveOutcome::InvalidNeighbors => {
+                                    self.invalid_neighbor_packets += 1;
+                                }
                             }
-                        }
 
-                        if let Some(data) = self.lt_decoder.decode() {
-                            self.recovered_data = Some(data);
+                            if let Some(data) = self.lt_decoder.decode() {
+                                self.recovered_data = Some(data);
+                            }
+                            let actual_end = p_start + total_bits * sf * spc;
+                            self.sample_buffer_i.drain(0..actual_end);
+                            self.sample_buffer_q.drain(0..actual_end);
+                            self.last_search_idx = 0;
+                            self.current_sync = None;
+                            continue;
                         }
-                        let actual_end = p_start + total_bits * sf * spc;
-                        self.sample_buffer_i.drain(0..actual_end);
-                        self.sample_buffer_q.drain(0..actual_end);
-                        self.last_search_idx = 0;
-                        self.current_sync = None;
-                        continue;
+                        Err(PacketParseError::CrcMismatch { .. }) => {
+                            self.crc_error_packets += 1;
+                        }
+                        Err(PacketParseError::InvalidLength { .. }) => {
+                            self.parse_error_packets += 1;
+                        }
                     }
                 }
             }
@@ -368,6 +397,11 @@ impl Decoder {
             needed_packets: needed,
             rank_packets: rank,
             stalled_packets: received.saturating_sub(rank),
+            dependent_packets: self.dependent_packets,
+            duplicate_packets: self.duplicate_packets,
+            crc_error_packets: self.crc_error_packets,
+            parse_error_packets: self.parse_error_packets,
+            invalid_neighbor_packets: self.invalid_neighbor_packets,
             last_packet_seq: self.last_packet_seq.map(|v| v as i32).unwrap_or(-1),
             last_rank_up_seq: self.last_rank_up_seq.map(|v| v as i32).unwrap_or(-1),
             progress: self.lt_decoder.progress(),
@@ -463,6 +497,11 @@ impl Decoder {
         self.current_sync = None;
         self.last_packet_seq = None;
         self.last_rank_up_seq = None;
+        self.dependent_packets = 0;
+        self.duplicate_packets = 0;
+        self.crc_error_packets = 0;
+        self.parse_error_packets = 0;
+        self.invalid_neighbor_packets = 0;
         let params = self.lt_decoder.params().clone();
         self.lt_decoder = LtDecoder::new(params);
     }

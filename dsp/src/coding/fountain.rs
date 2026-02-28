@@ -149,6 +149,14 @@ pub struct LtDecoder {
     current_rank: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiveOutcome {
+    AcceptedRankUp,
+    AcceptedNoRankUp,
+    DuplicateSeq,
+    InvalidNeighbors,
+}
+
 impl LtDecoder {
     pub fn params(&self) -> &LtParams {
         &self.params
@@ -161,14 +169,28 @@ impl LtDecoder {
         }
     }
 
-    pub fn receive(&mut self, packet: EncodedPacket) {
-        if packet.neighbors.iter().all(|&idx| idx < self.params.k) {
-            let seq = packet.seq;
-            if let Entry::Vacant(e) = self.received.entry(seq) {
+    pub fn receive_with_outcome(&mut self, packet: EncodedPacket) -> ReceiveOutcome {
+        if !packet.neighbors.iter().all(|&idx| idx < self.params.k) {
+            return ReceiveOutcome::InvalidNeighbors;
+        }
+
+        let before_rank = self.current_rank;
+        match self.received.entry(packet.seq) {
+            Entry::Occupied(_) => ReceiveOutcome::DuplicateSeq,
+            Entry::Vacant(e) => {
                 e.insert(packet);
                 self.update_rank();
+                if self.current_rank > before_rank {
+                    ReceiveOutcome::AcceptedRankUp
+                } else {
+                    ReceiveOutcome::AcceptedNoRankUp
+                }
             }
         }
+    }
+
+    pub fn receive(&mut self, packet: EncodedPacket) {
+        let _ = self.receive_with_outcome(packet);
     }
 
     fn update_rank(&mut self) {

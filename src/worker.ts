@@ -14,6 +14,11 @@ type WasmDecoderLike = {
     needed_packets: number;
     rank_packets: number;
     stalled_packets: number;
+    dependent_packets: number;
+    duplicate_packets: number;
+    crc_error_packets: number;
+    parse_error_packets: number;
+    invalid_neighbor_packets: number;
     last_packet_seq: number;
     last_rank_up_seq: number;
     progress: number;
@@ -221,6 +226,11 @@ export class MistcastBackend {
         needed: progress.needed_packets,
         rank: progress.rank_packets,
         stalled: progress.stalled_packets,
+        dependent: progress.dependent_packets,
+        duplicate: progress.duplicate_packets,
+        crcErrors: progress.crc_error_packets,
+        parseErrors: progress.parse_error_packets,
+        invalidNeighbors: progress.invalid_neighbor_packets,
         lastPacketSeq: progress.last_packet_seq,
         lastRankUpSeq: progress.last_rank_up_seq,
         progress: progress.progress,

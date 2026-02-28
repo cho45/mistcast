@@ -34,6 +34,11 @@ vi.mock('../pkg/dsp', () => {
       needed_packets: 11,
       rank_packets: 1,
       stalled_packets: 0,
+      dependent_packets: 0,
+      duplicate_packets: 0,
+      crc_error_packets: 0,
+      parse_error_packets: 0,
+      invalid_neighbor_packets: 0,
       last_packet_seq: 0,
       last_rank_up_seq: 0,
       progress: 0.1
@@ -68,6 +73,11 @@ vi.mock('../pkg-simd/dsp', () => {
       needed_packets: 11,
       rank_packets: 1,
       stalled_packets: 0,
+      dependent_packets: 0,
+      duplicate_packets: 0,
+      crc_error_packets: 0,
+      parse_error_packets: 0,
+      invalid_neighbor_packets: 0,
       last_packet_seq: 0,
       last_rank_up_seq: 0,
       progress: 0.1

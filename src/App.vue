@@ -17,6 +17,11 @@ const receivedPackets = ref(0);
 const totalNeededPackets = ref(0);
 const rankPackets = ref(0);
 const stalledPackets = ref(0);
+const dependentPackets = ref(0);
+const duplicatePackets = ref(0);
+const crcErrorPackets = ref(0);
+const parseErrorPackets = ref(0);
+const invalidNeighborPackets = ref(0);
 const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
@@ -68,6 +73,11 @@ async function startSending() {
   receivedPackets.value = 0;
   rankPackets.value = 0;
   stalledPackets.value = 0;
+  dependentPackets.value = 0;
+  duplicatePackets.value = 0;
+  crcErrorPackets.value = 0;
+  parseErrorPackets.value = 0;
+  invalidNeighborPackets.value = 0;
   lastPacketSeq.value = -1;
   lastRankUpSeq.value = -1;
   progressPercent.value = 0;
@@ -93,6 +103,11 @@ async function startSending() {
         totalNeededPackets.value = p.needed;
         rankPackets.value = p.rank ?? 0;
         stalledPackets.value = p.stalled ?? Math.max(0, receivedPackets.value - rankPackets.value);
+        dependentPackets.value = p.dependent ?? stalledPackets.value;
+        duplicatePackets.value = p.duplicate ?? 0;
+        crcErrorPackets.value = p.crcErrors ?? 0;
+        parseErrorPackets.value = p.parseErrors ?? 0;
+        invalidNeighborPackets.value = p.invalidNeighbors ?? 0;
         lastPacketSeq.value = p.lastPacketSeq ?? -1;
         lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
         progressPercent.value = p.progress;
@@ -100,7 +115,7 @@ async function startSending() {
         const changed = prevReceived !== receivedPackets.value || prevRank !== rankPackets.value || p.complete;
         if (changed) {
           pushRxLog(
-            `#${rxTick.value} recv=${receivedPackets.value}/${totalNeededPackets.value} rank=${rankPackets.value} stall=${stalledPackets.value} prog=${(progressPercent.value * 100).toFixed(1)}% lastSeq=${lastPacketSeq.value} lastRankUp=${lastRankUpSeq.value}${p.complete ? " COMPLETE" : ""}`
+            `#${rxTick.value} recv=${receivedPackets.value} rank=${rankPackets.value}/${totalNeededPackets.value} stall=${stalledPackets.value} dup=${duplicatePackets.value} crc=${crcErrorPackets.value} parse=${parseErrorPackets.value} invN=${invalidNeighborPackets.value} prog=${(progressPercent.value * 100).toFixed(1)}% lastSeq=${lastPacketSeq.value} lastRankUp=${lastRankUpSeq.value}${p.complete ? " COMPLETE" : ""}`
           );
         }
     })
@@ -148,6 +163,11 @@ async function reset() {
     receivedPackets.value = 0;
     rankPackets.value = 0;
     stalledPackets.value = 0;
+    dependentPackets.value = 0;
+    duplicatePackets.value = 0;
+    crcErrorPackets.value = 0;
+    parseErrorPackets.value = 0;
+    invalidNeighborPackets.value = 0;
     lastPacketSeq.value = -1;
     lastRankUpSeq.value = -1;
     progressPercent.value = 0;
@@ -190,11 +210,16 @@ async function reset() {
           
           <div class="progress-container" v-if="totalNeededPackets > 0">
             <div class="progress-text">
-              Packets: {{ receivedPackets }} / {{ totalNeededPackets }} ({{ (progressPercent * 100).toFixed(1) }}%)
+              Rank: {{ rankPackets }} / {{ totalNeededPackets }} ({{ (progressPercent * 100).toFixed(1) }}%)
             </div>
             <div class="progress-text detail">
-              Rank: {{ rankPackets }} / {{ totalNeededPackets }}
+              Accepted: {{ receivedPackets }}
               | Stall: {{ stalledPackets }}
+              | Dep: {{ dependentPackets }}
+              | Dup: {{ duplicatePackets }}
+              | CRC: {{ crcErrorPackets }}
+              | Parse: {{ parseErrorPackets }}
+              | InvNbr: {{ invalidNeighborPackets }}
               | Last Seq: {{ lastPacketSeq }}
               | Last Rank-Up Seq: {{ lastRankUpSeq }}
             </div>

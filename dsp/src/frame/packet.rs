@@ -26,6 +26,12 @@ pub struct Packet {
     pub payload: [u8; PAYLOAD_SIZE],
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PacketParseError {
+    InvalidLength { actual: usize },
+    CrcMismatch { expected: u16, actual: u16 },
+}
+
 impl Packet {
     /// ペイロードを指定してパケットを作成する
     pub fn new(lt_seq: u16, payload: &[u8]) -> Self {
@@ -50,23 +56,31 @@ impl Packet {
     }
 
     /// バイト列からパケットをデシリアライズする
-    pub fn deserialize(data: &[u8]) -> Option<Self> {
+    pub fn deserialize(data: &[u8]) -> Result<Self, PacketParseError> {
         if data.len() != PACKET_BYTES {
-            return None;
+            return Err(PacketParseError::InvalidLength { actual: data.len() });
         }
 
         // CRC検証
         let (payload_data, crc_bytes) = data.split_at(PACKET_BYTES - CRC_SIZE);
         let expected_crc = ((crc_bytes[0] as u16) << 8) | crc_bytes[1] as u16;
-        if crc::crc16(payload_data) != expected_crc {
-            return None;
+        let actual_crc = crc::crc16(payload_data);
+        if actual_crc != expected_crc {
+            return Err(PacketParseError::CrcMismatch {
+                expected: expected_crc,
+                actual: actual_crc,
+            });
         }
 
-        let lt_seq = u16::from_be_bytes(data[0..2].try_into().ok()?);
+        let lt_seq = u16::from_be_bytes(
+            data[0..2]
+                .try_into()
+                .map_err(|_| PacketParseError::InvalidLength { actual: data.len() })?,
+        );
         let mut payload = [0u8; PAYLOAD_SIZE];
         payload.copy_from_slice(&data[2..2 + PAYLOAD_SIZE]);
 
-        Some(Packet { lt_seq, payload })
+        Ok(Packet { lt_seq, payload })
     }
 }
 
@@ -93,7 +107,10 @@ mod tests {
         let mut bytes = pkt.serialize();
         bytes[0] ^= 0xFF; // 先頭バイトを破損
         assert!(
-            Packet::deserialize(&bytes).is_none(),
+            matches!(
+                Packet::deserialize(&bytes),
+                Err(PacketParseError::CrcMismatch { .. })
+            ),
             "破損パケットのデシリアライズが失敗すること"
         );
     }
