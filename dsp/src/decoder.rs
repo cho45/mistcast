@@ -10,7 +10,6 @@ use crate::{
     common::rrc_filter::DecimatingRrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
     params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD, SYNC_WORD_BITS},
-    phy::demodulator::Demodulator,
     phy::sync::{SyncDetector, SyncResult},
     DifferentialModulation, DspConfig,
 };
@@ -52,7 +51,6 @@ pub struct Decoder {
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
     sync_detector: SyncDetector,
-    demodulator: Demodulator,
     interleaver: BlockInterleaver,
     fountain_decoder: FountainDecoder,
     recovered_data: Option<Vec<u8>>,
@@ -78,6 +76,13 @@ pub struct Decoder {
     pub stats_total_samples: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TrackingState {
+    phase_ref: Complex32,
+    prev_symbol: Complex32,
+    timing_offset: f32,
+}
+
 impl Decoder {
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let decimation_factor = choose_decimation_factor(&dsp_config);
@@ -95,10 +100,6 @@ impl Decoder {
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
             sync_detector: SyncDetector::new(proc_config.clone()),
-            demodulator: Demodulator::new_with_mode(
-                proc_config.clone(),
-                DifferentialModulation::Dbpsk,
-            ),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
@@ -219,6 +220,13 @@ impl Decoder {
             let mut best_sym_shift = 0;
             let mut best_t_shift = 0;
             let mut best_invert = false;
+            let mut best_tracking_after_sync = TrackingState {
+                phase_ref: Complex32::new(1.0, 0.0),
+                prev_symbol: Complex32::new(1.0, 0.0),
+                timing_offset: 0.0,
+            };
+            let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
+            let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
             'probe: for sym_shift in -2i32..=2i32 {
                 let base_start = start as i32 + sym_shift * symbol_len as i32;
@@ -232,47 +240,26 @@ impl Decoder {
                     let (ref_i, ref_q) = self.despread_at(ref_sym_start);
 
                     for invert in [false, true] {
-                        self.demodulator.reset();
-                        if invert {
-                            self.demodulator.set_reference_phase(-ref_i, -ref_q);
+                        let initial_ref = if invert {
+                            Complex32::new(-ref_i, -ref_q)
                         } else {
-                            self.demodulator.set_reference_phase(ref_i, ref_q);
-                        }
-
-                        let mut sync_chips_i = Vec::with_capacity(sync_symbol_len * sf);
-                        let mut sync_chips_q = Vec::with_capacity(sync_symbol_len * sf);
-                        for c_idx in 0..(sync_symbol_len * sf) {
-                            let cp = p_start + c_idx * spc + (spc / 2);
-                            if cp >= self.sample_buffer_i.len() {
-                                sync_chips_i.clear();
-                                sync_chips_q.clear();
-                                break;
-                            }
-                            sync_chips_i.push(self.sample_buffer_i[cp]);
-                            sync_chips_q.push(self.sample_buffer_q[cp]);
-                        }
-                        if sync_chips_i.len() != sync_symbol_len * sf {
+                            Complex32::new(ref_i, ref_q)
+                        };
+                        let Some((val, tracking_after_sync)) = self.decode_sync_word_with_tracking(
+                            p_start,
+                            sync_bits_len,
+                            initial_ref,
+                            &pn,
+                        ) else {
                             continue;
-                        }
-
-                        let mut bits = self
-                            .demodulator
-                            .demodulate_chips(&sync_chips_i, &sync_chips_q);
-                        if bits.len() < sync_bits_len {
-                            continue;
-                        }
-                        bits.truncate(sync_bits_len);
-
-                        let mut val = 0u32;
-                        for b in bits {
-                            val = (val << 1) | (b as u32);
-                        }
+                        };
 
                         if val == SYNC_WORD {
                             found_header = true;
                             best_sym_shift = sym_shift;
                             best_t_shift = t_shift;
                             best_invert = invert;
+                            best_tracking_after_sync = tracking_after_sync;
                             break 'probe;
                         }
                     }
@@ -282,17 +269,13 @@ impl Decoder {
             if found_header {
                 let p_start =
                     (start as i32 + best_sym_shift * symbol_len as i32 + best_t_shift) as usize;
-                let last_sync_sym_start = p_start + (sync_symbol_len - 1) * symbol_len;
-                let (sync_last_i, sync_last_q) = self.despread_at(last_sync_sym_start);
-                let initial_ref = if best_invert {
-                    Complex32::new(-sync_last_i, -sync_last_q)
-                } else {
-                    Complex32::new(sync_last_i, sync_last_q)
-                };
                 let payload_start = p_start + sync_symbol_len * symbol_len;
-                let Some(payload_bits) =
-                    self.decode_bits_with_tracking(payload_start, burst_data_bits_len, initial_ref)
-                else {
+                let Some(payload_bits) = self.decode_bits_with_tracking(
+                    payload_start,
+                    burst_data_bits_len,
+                    best_tracking_after_sync,
+                    &pn,
+                ) else {
                     let skip = (start + symbol_len).min(self.sample_buffer_i.len());
                     self.sample_buffer_i.drain(0..skip);
                     self.sample_buffer_q.drain(0..skip);
@@ -370,6 +353,7 @@ impl Decoder {
             }
 
             // デコード失敗またはヘッダ未検出: 偽同期として捨てて進める
+            let _ = best_invert;
             let skip = (start + symbol_len).min(self.sample_buffer_i.len());
             self.sample_buffer_i.drain(0..skip);
             self.sample_buffer_q.drain(0..skip);
@@ -431,39 +415,34 @@ impl Decoder {
         &self,
         start_sample: usize,
         num_bits: usize,
-        initial_phase_ref: Complex32,
+        initial_state: TrackingState,
+        pn: &[f32],
     ) -> Option<Vec<u8>> {
         let sf = self.config.spread_factor();
         let spc = self.proc_config.samples_per_chip().max(1);
         let symbol_len = sf * spc;
         let bits_per_symbol = MODULATION.bits_per_symbol();
         let symbols_needed = num_bits.div_ceil(bits_per_symbol);
-        let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
-        let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
-        let mut phase_ref = if initial_phase_ref.norm_sqr() > 1e-8 {
-            initial_phase_ref / initial_phase_ref.norm()
-        } else {
-            Complex32::new(1.0, 0.0)
-        };
-        let mut prev_symbol = phase_ref;
-        let mut timing_offset = 0.0f32;
+        let mut phase_ref = initial_state.phase_ref;
+        let mut prev_symbol = initial_state.prev_symbol;
+        let mut timing_offset = initial_state.timing_offset;
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
         let mut bits = Vec::with_capacity(num_bits);
 
         for s_idx in 0..symbols_needed {
             let symbol_start = start_sample + s_idx * symbol_len;
-            let on = self.despread_symbol_with_timing(symbol_start, &pn, timing_offset, 0.0)?;
+            let on = self.despread_symbol_with_timing(symbol_start, pn, timing_offset, 0.0)?;
             let early = self.despread_symbol_with_timing(
                 symbol_start,
-                &pn,
+                pn,
                 timing_offset,
                 -early_late_delta,
             )?;
             let late = self.despread_symbol_with_timing(
                 symbol_start,
-                &pn,
+                pn,
                 timing_offset,
                 early_late_delta,
             )?;
@@ -494,6 +473,83 @@ impl Decoder {
 
         bits.truncate(num_bits);
         Some(bits)
+    }
+
+    fn decode_sync_word_with_tracking(
+        &self,
+        start_sample: usize,
+        num_bits: usize,
+        initial_phase_ref: Complex32,
+        pn: &[f32],
+    ) -> Option<(u32, TrackingState)> {
+        let spc = self.proc_config.samples_per_chip().max(1);
+        let symbol_len = self.config.spread_factor() * spc;
+
+        let mut phase_ref = if initial_phase_ref.norm_sqr() > 1e-8 {
+            initial_phase_ref / initial_phase_ref.norm()
+        } else {
+            Complex32::new(1.0, 0.0)
+        };
+        let mut prev_symbol = phase_ref;
+        let mut timing_offset = 0.0f32;
+        let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
+        let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
+        let mut word = 0u32;
+
+        for s_idx in 0..num_bits {
+            let symbol_start = start_sample + s_idx * symbol_len;
+            let on = self.despread_symbol_with_timing(symbol_start, pn, timing_offset, 0.0)?;
+            let early = self.despread_symbol_with_timing(
+                symbol_start,
+                pn,
+                timing_offset,
+                -early_late_delta,
+            )?;
+            let late = self.despread_symbol_with_timing(
+                symbol_start,
+                pn,
+                timing_offset,
+                early_late_delta,
+            )?;
+
+            let on_rot = on * phase_ref.conj();
+            let diff = on_rot * prev_symbol.conj();
+            let bit = if diff.re >= 0.0 { 0 } else { 1 };
+            word = (word << 1) | bit;
+            let decided = if bit == 0 {
+                Complex32::new(1.0, 0.0)
+            } else {
+                Complex32::new(-1.0, 0.0)
+            };
+
+            let dphi = phase_step_from_diff(diff, decided);
+            let (sin_dphi, cos_dphi) = dphi.sin_cos();
+            phase_ref *= Complex32::new(cos_dphi, sin_dphi);
+            let phase_norm = phase_ref.norm().max(1e-6);
+            phase_ref /= phase_norm;
+
+            let early_mag = early.norm();
+            let late_mag = late.norm();
+            let timing_err = timing_error_from_early_late(early_mag, late_mag);
+            timing_offset = (timing_offset + TRACKING_TIMING_LOOP_GAIN * timing_err)
+                .clamp(-timing_limit, timing_limit);
+
+            let on_norm = on_rot.norm();
+            if on_norm > 1e-4 {
+                prev_symbol = on_rot / on_norm;
+            } else {
+                prev_symbol = decided;
+            }
+        }
+
+        Some((
+            word,
+            TrackingState {
+                phase_ref,
+                prev_symbol,
+                timing_offset,
+            },
+        ))
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -606,7 +662,6 @@ impl Decoder {
     }
 
     pub fn reset(&mut self) {
-        self.demodulator.reset();
         self.interleaver.reset();
         self.rrc_decim_i.reset();
         self.rrc_decim_q.reset();
@@ -855,6 +910,21 @@ mod tests {
 
         let recovered = decode_signal(data, k, rx_cfg, &signal)
             .expect("decoder should recover under mild carrier offset");
+        assert_eq!(&recovered[..data.len()], data);
+    }
+
+    #[test]
+    fn test_sync_word_tracking_tolerates_offset_and_cfo() {
+        let data = b"sync word header";
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let mut signal = vec![0.0f32; 137];
+        signal.extend(build_test_signal(data, k, 3, 64));
+
+        let mut rx_cfg = DspConfig::default_48k();
+        rx_cfg.carrier_freq += 5.0;
+
+        let recovered = decode_signal(data, k, rx_cfg, &signal)
+            .expect("decoder should recover with offset start + mild CFO");
         assert_eq!(&recovered[..data.len()], data);
     }
 
