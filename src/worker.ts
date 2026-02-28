@@ -1,29 +1,119 @@
 import { expose } from "comlink";
-import initWasm, { WasmEncoder, WasmDecoder } from "../pkg/dsp";
+import initBase, { WasmEncoder as WasmEncoderBase, WasmDecoder as WasmDecoderBase } from "../pkg/dsp";
+import initSimd, { WasmEncoder as WasmEncoderSimd, WasmDecoder as WasmDecoderSimd } from "../pkg-simd/dsp";
 import { RecycleTransferSender } from "./recycle-transfer-bridge";
+
+type WasmEncoderLike = {
+  set_data(data: Uint8Array): void;
+  pull_frame(): Float32Array | null | undefined;
+};
+
+type WasmDecoderLike = {
+  process_samples(samples: Float32Array): {
+    received_packets: number;
+    needed_packets: number;
+    progress: number;
+    complete: boolean;
+  };
+  recovered_data(): Uint8Array | null | undefined;
+  reset(): void;
+};
+
+type WasmEncoderCtor = new (sampleRate: number) => WasmEncoderLike;
+type WasmDecoderCtor = new (sampleRate: number) => WasmDecoderLike;
+type WasmInitFn = () => Promise<unknown>;
+type WasmBindings = {
+  init: WasmInitFn;
+  WasmEncoder: WasmEncoderCtor;
+  WasmDecoder: WasmDecoderCtor;
+  flavor: "base" | "simd";
+};
+
+const SIMD_PROBE_WASM = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d,
+  0x01, 0x00, 0x00, 0x00,
+  0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+  0x03, 0x02, 0x01, 0x00,
+  0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00,
+  0x0a, 0x19, 0x01, 0x17, 0x00,
+  0xfd, 0x0c,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xfd, 0x15, 0x00,
+  0x0b,
+]);
+
+const supportsWasmSimd = () => {
+  if (typeof WebAssembly === "undefined" || typeof WebAssembly.validate !== "function") {
+    return false;
+  }
+  try {
+    return WebAssembly.validate(SIMD_PROBE_WASM);
+  } catch {
+    return false;
+  }
+};
+
+const BASE_BINDINGS: WasmBindings = {
+  init: initBase as WasmInitFn,
+  WasmEncoder: WasmEncoderBase as unknown as WasmEncoderCtor,
+  WasmDecoder: WasmDecoderBase as unknown as WasmDecoderCtor,
+  flavor: "base",
+};
+
+const SIMD_BINDINGS: WasmBindings = {
+  init: initSimd as WasmInitFn,
+  WasmEncoder: WasmEncoderSimd as unknown as WasmEncoderCtor,
+  WasmDecoder: WasmDecoderSimd as unknown as WasmDecoderCtor,
+  flavor: "simd",
+};
 
 type RecyclePortInboundMessage = 
   | { type: "recycle"; data: Float32Array }
   | { type: "input"; data: Float32Array };
 
 export class MistcastBackend {
-  private encoder: WasmEncoder | null = null;
-  private decoder: WasmDecoder | null = null;
+  private encoder: WasmEncoderLike | null = null;
+  private decoder: WasmDecoderLike | null = null;
   private audioOutPort: MessagePort | null = null;
   private audioInPort: MessagePort | null = null;
   private audioPacketSender: RecycleTransferSender | null = null;
   private wasmInitialized = false;
+  private wasmBindings: WasmBindings | null = null;
   private isEncoding = false;
 
   private onPacket: ((data: Uint8Array) => void) | null = null;
   private onProgress: ((p: any) => void) | null = null;
 
-  async init() {
-    if (!this.wasmInitialized) {
-      await initWasm();
-      this.wasmInitialized = true;
-      console.log("[Worker] WASM Initialized");
+  private async ensureWasm() {
+    if (!this.wasmBindings) {
+      this.wasmBindings = supportsWasmSimd() ? SIMD_BINDINGS : BASE_BINDINGS;
     }
+    if (this.wasmInitialized) return;
+
+    if (this.wasmBindings.flavor === "simd") {
+      try {
+        await this.wasmBindings.init();
+      } catch (e) {
+        console.warn("[Worker] SIMD wasm init failed. Falling back to base.", e);
+        this.wasmBindings = BASE_BINDINGS;
+        await this.wasmBindings.init();
+      }
+    } else {
+      await this.wasmBindings.init();
+    }
+
+    this.wasmInitialized = true;
+    console.log(`[Worker] WASM Initialized (${this.wasmBindings.flavor})`);
+  }
+
+  private requireBindings(): WasmBindings {
+    if (!this.wasmBindings) throw new Error("WASM is not initialized");
+    return this.wasmBindings;
+  }
+
+  async init() {
+    await this.ensureWasm();
   }
 
   async setAudioOutPort(port: MessagePort) {
@@ -61,13 +151,14 @@ export class MistcastBackend {
 
   async startEncoder(data: Uint8Array, sampleRate: number) {
     await this.init();
+    const bindings = this.requireBindings();
     
     // 前回の送信状態をリセット
     this.isEncoding = false;
     this.audioOutPort?.postMessage({ type: "reset" });
 
     if (!this.encoder) {
-        this.encoder = new WasmEncoder(sampleRate);
+        this.encoder = new bindings.WasmEncoder(sampleRate);
     }
     this.encoder.set_data(data);
     console.log(`[Worker] Encoder started (size=${data.length}, rate=${sampleRate})`);
@@ -109,9 +200,10 @@ export class MistcastBackend {
                      onPacket: (data: Uint8Array) => void,
                      onProgress: (p: any) => void) {
     await this.init();
+    const bindings = this.requireBindings();
     console.log(`[Worker] Decoder setup (fixed protocol, rate=${sampleRate})`);
     
-    this.decoder = new WasmDecoder(sampleRate);
+    this.decoder = new bindings.WasmDecoder(sampleRate);
     this.onPacket = onPacket;
     this.onProgress = onProgress;
   }

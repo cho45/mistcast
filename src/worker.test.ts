@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
   expose: vi.fn(),
-  init: vi.fn(async () => {}),
+  initBase: vi.fn(async () => {}),
+  initSimd: vi.fn(async () => {}),
   WasmEncoder: vi.fn(),
   WasmDecoder: vi.fn(),
 }));
@@ -32,7 +33,32 @@ vi.mock('../pkg/dsp', () => {
     reset = vi.fn();
   }
   return {
-    default: hoisted.init,
+    default: hoisted.initBase,
+    WasmEncoder,
+    WasmDecoder,
+  };
+});
+
+vi.mock('../pkg-simd/dsp', () => {
+  class WasmEncoder {
+    constructor(...args: any[]) {
+      hoisted.WasmEncoder(...args);
+    }
+    set_data = vi.fn();
+    get_k = vi.fn(() => 10);
+    pull_frame = vi.fn(() => new Float32Array(2000));
+    encode_all = vi.fn(() => new Float32Array(2000));
+  }
+  class WasmDecoder {
+    constructor(...args: any[]) {
+      hoisted.WasmDecoder(...args);
+    }
+    process_samples = vi.fn(() => ({ complete: true, received_packets: 1, needed_packets: 11, progress: 0.1 }));
+    recovered_data = vi.fn(() => new Uint8Array([1, 2, 3]));
+    reset = vi.fn();
+  }
+  return {
+    default: hoisted.initSimd,
     WasmEncoder,
     WasmDecoder,
   };
@@ -48,7 +74,7 @@ describe('MistcastBackend', () => {
     const backend = new MistcastBackend();
     await backend.init();
     await backend.init();
-    expect(hoisted.init).toHaveBeenCalledTimes(1);
+    expect(hoisted.initBase.mock.calls.length + hoisted.initSimd.mock.calls.length).toBe(1);
   });
 
   it('starts encoder and appends to audio port', async () => {
