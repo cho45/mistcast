@@ -27,7 +27,7 @@
 ///
 /// # 例
 /// ```
-/// use dsp::msequence::MSequence;
+/// use dsp::common::msequence::MSequence;
 /// let mut mseq = MSequence::new(5); // 次数5, 長さ31
 /// let chips: Vec<i8> = mseq.generate(31);
 /// assert_eq!(chips.len(), 31);
@@ -43,7 +43,11 @@ impl MSequence {
     /// 次数 `order` のM系列生成器を作成する
     pub fn new(order: usize) -> Self {
         let initial_state = 1u32 << (order - 1); // MSBのみセット
-        MSequence { state: initial_state, initial_state, order }
+        MSequence {
+            state: initial_state,
+            initial_state,
+            order,
+        }
     }
 
     /// 初期状態にリセットする
@@ -63,16 +67,25 @@ impl MSequence {
 
         // フィードバック計算 (次数に対応する原始多項式)
         let feedback = match self.order {
+            3 => ((self.state >> 2) ^ (self.state >> 1)) & 1, // x³+x²+1
+            4 => ((self.state >> 3) ^ (self.state >> 2)) & 1, // x⁴+x³+1
             5 => ((self.state >> 4) ^ (self.state >> 2)) & 1, // x⁵+x³+1
             6 => ((self.state >> 5) ^ (self.state >> 4)) & 1, // x⁶+x⁵+1
             7 => ((self.state >> 6) ^ (self.state >> 5)) & 1, // x⁷+x⁶+1
+            8 => {
+                ((self.state >> 7) ^ (self.state >> 5) ^ (self.state >> 4) ^ (self.state >> 3)) & 1
+            } // x⁸+x⁶+x⁵+x⁴+1
             _ => panic!("未対応のM系列次数: {}", self.order),
         };
 
         let mask = (1u32 << self.order) - 1;
         self.state = ((self.state << 1) | feedback) & mask;
 
-        if out_bit == 1 { 1 } else { -1 }
+        if out_bit == 1 {
+            1
+        } else {
+            -1
+        }
     }
 
     /// `len` チップ分のM系列を生成する ({-1, +1} 値)
@@ -116,7 +129,7 @@ mod tests {
     /// M系列は2^(n-1)個の1と(2^(n-1)-1)個の0を含む
     #[test]
     fn test_balance() {
-        for order in [5usize, 6, 7] {
+        for order in [4usize, 5, 6, 7] {
             let mut mseq = MSequence::new(order);
             let chips = mseq.one_period();
             let ones = chips.iter().filter(|&&c| c == 1).count();
@@ -125,7 +138,9 @@ mod tests {
                 ones as i32 - neg_ones as i32,
                 1,
                 "次数{}: +1の数 - (-1)の数 = 1 であること (ones={}, neg_ones={})",
-                order, ones, neg_ones
+                order,
+                ones,
+                neg_ones
             );
         }
     }
@@ -204,7 +219,7 @@ mod tests {
     /// LFSRが正しく1周期で元の状態に戻ることを確認
     #[test]
     fn test_period_returns_to_initial() {
-        for order in [5usize, 6, 7] {
+        for order in [4usize, 5, 6, 7] {
             let mut mseq = MSequence::new(order);
             let period = (1 << order) - 1;
             let _ = mseq.generate(period);

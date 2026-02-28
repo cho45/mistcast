@@ -1,5 +1,5 @@
 import { expose } from "comlink";
-import initWasm, { WasmEncoder, WasmDecoder, WasmDecodeProgress } from "../pkg/dsp";
+import initWasm, { WasmEncoder, WasmDecoder } from "../pkg/dsp";
 import { RecycleTransferSender } from "./recycle-transfer-bridge";
 
 type RecyclePortInboundMessage = 
@@ -16,7 +16,7 @@ export class MistcastBackend {
   private isEncoding = false;
 
   private onPacket: ((data: Uint8Array) => void) | null = null;
-  private onProgress: ((p: { received: number, needed: number, progress: f32, complete: boolean }) => void) | null = null;
+  private onProgress: ((p: any) => void) | null = null;
 
   async init() {
     if (!this.wasmInitialized) {
@@ -40,9 +40,7 @@ export class MistcastBackend {
         this.fillEncoderBuffer();
       }
     };
-    if (typeof this.audioOutPort.start === "function") {
-      this.audioOutPort.start();
-    }
+    this.audioOutPort.start();
   }
 
   async setAudioInPort(port: MessagePort) {
@@ -58,24 +56,28 @@ export class MistcastBackend {
         this.processSamples(msg.data);
       }
     };
-    if (typeof this.audioInPort.start === "function") {
-      this.audioInPort.start();
-    }
+    this.audioInPort.start();
   }
 
   async startEncoder(data: Uint8Array, sampleRate: number) {
     await this.init();
+    
+    // 前回の送信状態をリセット
+    this.isEncoding = false;
+    this.audioOutPort?.postMessage({ type: "reset" });
+
     if (!this.encoder) {
         this.encoder = new WasmEncoder(sampleRate);
     }
     this.encoder.set_data(data);
-    console.log("[Worker] Encoder started with data length:", data.length);
+    console.log(`[Worker] Encoder started (size=${data.length}, rate=${sampleRate})`);
 
     const dummyFrame = this.encoder.pull_frame();
     if (!dummyFrame) return;
     
-    this.audioPacketSender = new RecycleTransferSender(dummyFrame.length, 64);
-    this.audioPacketSender.recycle(new Float32Array(dummyFrame));
+    if (!this.audioPacketSender || (this.audioPacketSender as any).packetSamples !== dummyFrame.length) {
+        this.audioPacketSender = new RecycleTransferSender(dummyFrame.length, 64);
+    }
 
     this.isEncoding = true;
     this.fillEncoderBuffer();
@@ -84,13 +86,12 @@ export class MistcastBackend {
   private fillEncoderBuffer() {
     if (!this.isEncoding || !this.encoder || !this.audioPacketSender || !this.audioOutPort) return;
 
-    while (true) {
+    while (this.isEncoding) {
         const frame = this.encoder.pull_frame();
         if (!frame) break;
 
         const samples = new Float32Array(frame);
         const prevDropped = this.audioPacketSender.getDroppedSamplesCount();
-        
         this.audioPacketSender.appendFrom(samples, samples.length, 1, this.audioOutPort);
 
         if (this.audioPacketSender.getDroppedSamplesCount() > prevDropped) {
@@ -102,32 +103,32 @@ export class MistcastBackend {
   async stopEncoder() {
     this.isEncoding = false;
     this.audioOutPort?.postMessage({ type: "reset" });
-    console.log("[Worker] Encoder stopped");
   }
 
-  async startDecoder(dataSize: number, ltK: number, sampleRate: number, 
+  async startDecoder(sampleRate: number, 
                      onPacket: (data: Uint8Array) => void,
                      onProgress: (p: any) => void) {
     await this.init();
-    console.log(`[Worker] Decoder started (size=${dataSize}, k=${ltK})`);
-    this.decoder = new WasmDecoder(dataSize, ltK, sampleRate);
+    console.log(`[Worker] Decoder setup (fixed protocol, rate=${sampleRate})`);
+    
+    this.decoder = new WasmDecoder(sampleRate);
     this.onPacket = onPacket;
     this.onProgress = onProgress;
   }
 
   async processSamples(samples: Float32Array) {
-    if (!this.decoder) return;
+    if (!this.decoder) return null;
     
     const progress = this.decoder.process_samples(samples);
-    
-    // UIに進捗を通知
+    const result = {
+        received: progress.received_packets,
+        needed: progress.needed_packets,
+        progress: progress.progress,
+        complete: progress.complete,
+    };
+
     if (this.onProgress) {
-        this.onProgress({
-            received: progress.received_packets,
-            needed: progress.needed_packets,
-            progress: progress.progress,
-            complete: progress.complete,
-        });
+        this.onProgress(result);
     }
 
     if (progress.complete) {
@@ -136,12 +137,17 @@ export class MistcastBackend {
       if (data && this.onPacket) {
         this.onPacket(data);
       }
+      this.decoder = null; 
     }
+    
+    return result;
   }
 
   async resetDecoder() {
-    this.decoder?.reset();
-    console.log("[Worker] Decoder reset");
+    if (this.decoder) {
+        this.decoder.reset();
+        this.decoder = null;
+    }
   }
 }
 

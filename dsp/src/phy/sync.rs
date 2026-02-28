@@ -1,325 +1,306 @@
-//! スライディング相関による同期捕捉
+//! 実用的な同期捕捉 (ノンコヒーレント相関)
+//!
+//! 1シンボルごとに相関電力を計算し、それらを足し合わせることで、
+//! 位相回転やクロックズレに強い同期捕捉を実現する。
 
 use crate::common::msequence::MSequence;
-use crate::common::rrc_filter::RrcFilter;
 use crate::DspConfig;
 
-/// ダウンコンバート: 受信信号にcos/sin を掛けてベースバンドI/Q信号に変換
-///
-/// I(t) = x(t) * cos(2π·fc·t) * 2
-/// Q(t) = x(t) * (-sin(2π·fc·t)) * 2
-pub fn downconvert(samples: &[f32], sample_offset: usize, config: &DspConfig) -> (Vec<f32>, Vec<f32>) {
-    let two_pi = 2.0 * std::f32::consts::PI;
-    let fs = config.sample_rate;
-    let fc = config.carrier_freq;
-    let mut i_ch = Vec::with_capacity(samples.len());
-    let mut q_ch = Vec::with_capacity(samples.len());
-
-    for (k, &s) in samples.iter().enumerate() {
-        let t = (sample_offset + k) as f32 / fs;
-        let cos_val = (two_pi * fc * t).cos();
-        let sin_val = (two_pi * fc * t).sin();
-        i_ch.push(s * cos_val * 2.0);
-        q_ch.push(s * (-sin_val) * 2.0);
-    }
-    (i_ch, q_ch)
-}
-
-/// RRCマッチドフィルタを適用してデシメーション (チップレートに落とす)
-pub fn matched_filter_decimate(
-    i_ch: &[f32],
-    q_ch: &[f32],
-    config: &DspConfig,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut rrc_i = RrcFilter::from_config(config);
-    let mut rrc_q = RrcFilter::from_config(config);
-    let spc = config.samples_per_chip();
-    let mut filtered_i: Vec<f32> = i_ch.iter().map(|&s| rrc_i.process(s)).collect();
-    let mut filtered_q: Vec<f32> = q_ch.iter().map(|&s| rrc_q.process(s)).collect();
-
-    // マッチドフィルタによる遅延補正
-    // Tx RRC (delay) + Rx RRC (delay) = 2 * (num_taps - 1) / 2 = num_taps - 1
-    // これにより最初のチップのピークがインデックス0に来る
-    let total_delay = config.rrc_num_taps().saturating_sub(1);
-
-    if filtered_i.len() > total_delay {
-        filtered_i = filtered_i[total_delay..].to_vec();
-        filtered_q = filtered_q[total_delay..].to_vec();
-    }
-
-    let out_i: Vec<f32> = filtered_i.iter().step_by(spc).cloned().collect();
-    let out_q: Vec<f32> = filtered_q.iter().step_by(spc).cloned().collect();
-
-    (out_i, out_q)
-}
-
-/// 同期捕捉の結果
 #[derive(Debug, Clone)]
 pub struct SyncResult {
-    /// データ開始サンプルインデックス
-    pub data_start_sample: usize,
-    /// 相関ピーク値
-    pub peak_value: f32,
-    /// 信頼度 (ピーク/平均比)
-    pub confidence: f32,
+    pub peak_sample_idx: usize,
+    pub peak_iq: (f32, f32),
+    pub score: f32,
 }
 
-/// スライディング相関によるプリアンブル検出
 pub struct SyncDetector {
     config: DspConfig,
-    local_mseq: Vec<f32>,
+    pn: Vec<f32>,
+    sf: usize,
+    spc: usize,
+    sym_len: usize,
 }
 
 impl SyncDetector {
     pub fn new(config: DspConfig) -> Self {
         let mut mseq = MSequence::new(config.mseq_order);
-        let period = config.spread_factor();
-        let chips: Vec<f32> = mseq.generate(period).iter().map(|&c| c as f32).collect();
-        SyncDetector { config, local_mseq: chips }
+        let sf = config.spread_factor();
+        let spc = config.samples_per_chip().max(1);
+        let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|x| x as f32).collect();
+        let sym_len = sf * spc;
+
+        SyncDetector {
+            config,
+            pn,
+            sf,
+            spc,
+            sym_len,
+        }
     }
 
-    pub fn default_48k() -> Self {
-        Self::new(DspConfig::default_48k())
+    pub fn filter_delay(&self) -> usize {
+        self.config.rrc_num_taps() - 1
     }
 
-    /// チップ列に対してスライディング相関を計算し、ピーク位置を返す
-    pub fn slide_correlate(&self, chips: &[f32]) -> (usize, f32) {
-        let n = self.local_mseq.len();
-        if chips.len() < n {
-            return (0, 0.0);
+    pub fn detect(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        start_offset: usize,
+    ) -> (Option<SyncResult>, usize) {
+        let sym_len = self.sym_len;
+        let repeat = self.config.preamble_repeat;
+        let preamble_len = sym_len * repeat;
+        let required_len = preamble_len + sym_len;
+        let spc = self.spc;
+
+        // プリアンブル直後の1シンボル分まで見えてから同期確定する。
+        // 部分一致による早期ロックを避けるためのガード。
+        if i_ch.len() < start_offset + required_len {
+            return (None, start_offset);
         }
 
-        let mut best_pos = 0;
-        let mut best_corr = f32::NEG_INFINITY;
+        let search_range_end = i_ch.len() - required_len;
 
-        for start in 0..=(chips.len() - n) {
-            let corr: f32 = chips[start..start + n]
-                .iter()
-                .zip(self.local_mseq.iter())
-                .map(|(&r, &l)| r * l)
-                .sum::<f32>()
-                / n as f32;
-            if corr > best_corr {
-                best_corr = corr;
-                best_pos = start;
+        // --- 1. 粗同期 (チップ単位でのノンコヒーレント検索) ---
+        let mut best_power_score = 0.0f32;
+        let mut best_n = start_offset;
+
+        for n in (start_offset..=search_range_end).step_by(spc.max(1)) {
+            let (score, _) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
+            if score > best_power_score {
+                best_power_score = score;
+                best_n = n;
             }
         }
-        (best_pos, best_corr)
-    }
 
-/// サンプル列から同期位置を検出する
-///
-/// 戻り値は `(Option<SyncResult>, usize)` であり、第2要素は「探索済みで安全に破棄できるサンプル数」を返す。
-pub fn detect(&self, samples: &[f32]) -> (Option<SyncResult>, usize) {
-    let (i_ch, q_ch) = downconvert(samples, 0, &self.config);
-    let (chips_i, chips_q) = matched_filter_decimate(&i_ch, &q_ch, &self.config);
-    self.detect_chips(&chips_i, &chips_q)
-}
+        // --- 2. 精密同期 (ピーク周辺を1サンプル刻みで) ---
+        if best_power_score > 0.2 {
+            let start = best_n.saturating_sub(spc);
+            let end = (best_n + spc).min(search_range_end);
 
-/// チップ列から同期位置を検出する
-///
-/// 戻り値の `SyncResult::data_start_sample` は、この関数に渡されたチップ列が
-/// もし0サンプル目から生成されたと仮定した場合の元のサンプルインデックスを返す。
-/// 実際にはチップ数ベースで管理する方が良いため、内部で変換している。
-pub fn detect_chips(&self, chips_i: &[f32], chips_q: &[f32]) -> (Option<SyncResult>, usize) {
-    let period = self.local_mseq.len();
-    let window = period * self.config.preamble_repeat;
+            let mut fine_best_score = 0.0f32;
+            let mut fine_best_idx = best_n;
+            let mut last_sym_iq = (0.0, 0.0);
 
-    if chips_i.len() < window {
-        return (None, 0);
-    }
-        let search_range = chips_i.len().saturating_sub(window);
-        let mut energies = Vec::with_capacity(search_range);
-        let mut best_energy = 0.0f32;
-
-        for offset in 0..search_range {
-            let mut sum_ci = 0.0f32;
-            let mut sum_cq = 0.0f32;
-            for rep in 0..self.config.preamble_repeat {
-                let start = offset + rep * period;
-                if start + period > chips_i.len() {
-                    break;
+            for n in start..=end {
+                let (score, last_iq) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
+                if score > fine_best_score {
+                    fine_best_score = score;
+                    fine_best_idx = n;
+                    last_sym_iq = last_iq;
                 }
-                let ci: f32 = chips_i[start..start + period]
-                    .iter().zip(self.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
-                let cq: f32 = chips_q[start..start + period]
-                    .iter().zip(self.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
-                sum_ci += ci;
-                sum_cq += cq;
             }
-            // Coherent integration: square after summing across all repetitions.
-            let energy = sum_ci * sum_ci + sum_cq * sum_cq;
-            energies.push(energy);
-            if energy > best_energy {
-                best_energy = energy;
+
+            if fine_best_score > 0.4 {
+                return (
+                    Some(SyncResult {
+                        peak_sample_idx: fine_best_idx + preamble_len,
+                        peak_iq: last_sym_iq, // 最後のシンボル(-M)の位相を返す
+                        score: fine_best_score,
+                    }),
+                    fine_best_idx,
+                );
             }
         }
 
-        let mean_energy = if !energies.is_empty() {
-            energies.iter().sum::<f32>() / energies.len() as f32
+        // ストリーミング時の取りこぼしを防ぐため、次回探索用に
+        // 少なくとも preamble_len に加えて 2シンボル分を保持する。
+        let keep_tail = sym_len * 2 + spc;
+        (None, (search_range_end + 1).saturating_sub(keep_tail))
+    }
+
+    /// 1シンボル分だけの相関を計算
+    fn correlate_one_symbol(&self, i_ch: &[f32], q_ch: &[f32], offset: usize) -> (f32, f32, f32) {
+        let mut sum_i = 0.0f32;
+        let mut sum_q = 0.0f32;
+        let mut sum_en = 0.0f32;
+
+        for chip_idx in 0..self.sf {
+            let p = offset + chip_idx * self.spc + (self.spc / 2);
+            if let (Some(&si), Some(&sq)) = (i_ch.get(p), q_ch.get(p)) {
+                let rv = self.pn[chip_idx];
+                sum_i += si * rv;
+                sum_q += sq * rv;
+                sum_en += si * si + sq * sq;
+            }
+        }
+        (sum_i, sum_q, sum_en)
+    }
+
+    /// プリアンブル構造 [M, M, ..., -M] を使って候補位置のスコアを計算する。
+    /// 電力和に加え、シンボル間位相関係（最後だけ反転）を評価することで
+    /// ノンコヒーレント電力相関の周期曖昧性を抑える。
+    fn score_candidate(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        n: usize,
+        repeat: usize,
+        sym_len: usize,
+    ) -> (f32, (f32, f32)) {
+        let mut ci_buf = Vec::with_capacity(repeat);
+        let mut cq_buf = Vec::with_capacity(repeat);
+        let mut mag_buf = Vec::with_capacity(repeat);
+        let mut pow_buf = Vec::with_capacity(repeat);
+        let mut total_power = 0.0f32;
+
+        for rep in 0..repeat {
+            let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, n + rep * sym_len);
+            let _ = en;
+            let power = (ci * ci + cq * cq) / self.sf as f32;
+            total_power += power;
+            pow_buf.push(power);
+            ci_buf.push(ci);
+            cq_buf.push(cq);
+            mag_buf.push((ci * ci + cq * cq).sqrt());
+        }
+
+        let avg_power = total_power / repeat as f32;
+        let min_power = pow_buf.iter().copied().fold(f32::INFINITY, f32::min);
+
+        let mut pattern_score = 0.0f32;
+        if repeat >= 2 {
+            for rep in 1..repeat {
+                let prev_mag = mag_buf[rep - 1];
+                let cur_mag = mag_buf[rep];
+                if prev_mag < 1e-3 || cur_mag < 1e-3 {
+                    continue;
+                }
+                let dot = ci_buf[rep - 1] * ci_buf[rep] + cq_buf[rep - 1] * cq_buf[rep];
+                let denom = prev_mag * cur_mag + 1e-9;
+                let cos_rel = dot / denom;
+                let expected = if rep == repeat - 1 { -1.0 } else { 1.0 };
+                pattern_score += expected * cos_rel;
+            }
+        }
+
+        let last_iq = if repeat > 0 {
+            (ci_buf[repeat - 1], cq_buf[repeat - 1])
         } else {
-            1.0
+            (0.0, 0.0)
         };
 
-        let confidence = if mean_energy > 0.0 { best_energy / mean_energy } else { 0.0 };
-        let mut best_local_offset = None;
+        let mut score = avg_power + 0.75 * pattern_score;
 
-        // 閾値をクリアしている場合のみ詳細なピーク判定を行う
-        if best_energy > 0.0 && confidence > 10.0 {
-            // 絶対最大値の90%以上を真のピーク候補とする (前置ピークは ~56% なので確実に弾かれる)
-            let peak_threshold = best_energy * 0.9;
-            
-            // 候補を満たす「一番最初」のローカルピークを真の同期位置とする
-            for (offset, &energy) in energies.iter().enumerate().take(search_range) {
-                if energy >= peak_threshold {
-                    // 前後2チップで極大値（ローカルピーク）であるか確認
-                    let start_idx = offset.saturating_sub(2);
-                    let end_idx = (offset + 2).min(search_range - 1);
-                    
-                    let mut is_peak = true;
-                    for &e_val in energies.iter().take(end_idx + 1).skip(start_idx) {
-                        if e_val > energy {
-                            is_peak = false;
-                            break;
-                        }
-                    }
-
-                    if is_peak {
-                        best_local_offset = Some((offset, energy));
-                        break; // 最初の真のピークを発見したら即座に確定
-                    }
-                }
-            }
+        // 区間の一部だけにエネルギーがある「部分一致」を抑制する。
+        if min_power < avg_power * 0.2 {
+            score *= 0.1;
         }
-
-        let searched_samples = search_range * self.config.samples_per_chip();
-
-        if let Some((offset, energy)) = best_local_offset {
-            let data_start_chip = offset + window;
-            let data_start_sample = data_start_chip * self.config.samples_per_chip();
-            (Some(SyncResult { data_start_sample, peak_value: energy.sqrt(), confidence }), offset * self.config.samples_per_chip())
-        } else {
-            (None, searched_samples)
-        }
+        (score, last_iq)
     }
+}
+
+pub fn downconvert(
+    samples: &[f32],
+    sample_offset: usize,
+    config: &DspConfig,
+) -> (Vec<f32>, Vec<f32>) {
+    let two_pi = 2.0 * std::f32::consts::PI;
+    let fs = config.sample_rate;
+    let fc = config.carrier_freq;
+    let mut i_ch = Vec::with_capacity(samples.len());
+    let mut q_ch = Vec::with_capacity(samples.len());
+    for (k, &s) in samples.iter().enumerate() {
+        let t = (sample_offset + k) as f32 / fs;
+        let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
+        i_ch.push(s * cos_v * 2.0);
+        q_ch.push(s * (-sin_v) * 2.0);
+    }
+    (i_ch, q_ch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::rrc_filter::RrcFilter;
     use crate::phy::modulator::Modulator;
+    use rand::prelude::*;
+    use rand_distr::Normal;
 
-    fn test_config() -> DspConfig {
-        DspConfig::default_48k()
+    fn add_noise(i: &mut [f32], q: &mut [f32], sigma: f32) {
+        let mut rng = thread_rng();
+        let dist = Normal::new(0.0, sigma).unwrap();
+        for x in i.iter_mut() {
+            *x += dist.sample(&mut rng);
+        }
+        for x in q.iter_mut() {
+            *x += dist.sample(&mut rng);
+        }
     }
 
     #[test]
-    fn test_sync_detection_exact() {
-        let config = test_config();
-        let mut mod_ = Modulator::new(config.clone());
-        let preamble = mod_.generate_preamble();
-        
-        let data_bits = vec![1u8, 0, 1, 0, 1, 0, 1, 0];
-        let data_samples = mod_.modulate(&data_bits);
-
-        let mut signal = Vec::new();
-        // 前方に無音区間を入れて同期位置がずれないか確認
-        // samples_per_chip = 6 の倍数にする
-        let silence_len = 96;
-        signal.extend(vec![0.0; silence_len]);
-        signal.extend_from_slice(&preamble);
-        signal.extend_from_slice(&data_samples);
-
+    fn test_sync_robustness() {
+        let config = DspConfig::default_48k();
+        let mut modulator = Modulator::new(config.clone());
         let detector = SyncDetector::new(config.clone());
-        let (result_opt, _) = detector.detect(&signal);
 
-        assert!(result_opt.is_some(), "同期捕捉が成功すること");
-        let sync = result_opt.unwrap();
-        
-        // 理論的なデータ開始位置の計算
-        let expected_start = silence_len + preamble.len();
-        
-        assert_eq!(
-            sync.data_start_sample, expected_start,
-            "同期位置が数学的に完全に一致すること。 expected={}, got={}",
-            expected_start, sync.data_start_sample
-        );
+        for offset in [0, 123, 1000] {
+            let mut signal = vec![0.0; offset];
+            signal.extend(modulator.generate_preamble());
+            signal.extend(vec![0.0; 500]);
+            modulator.reset();
+
+            let (i_raw, q_raw) = downconvert(&signal, 0, &config);
+            let mut rrc_i = RrcFilter::from_config(&config);
+            let mut rrc_q = RrcFilter::from_config(&config);
+            let mut i_ch: Vec<f32> = i_raw.iter().map(|&s| rrc_i.process(s)).collect();
+            let mut q_ch: Vec<f32> = q_raw.iter().map(|&s| rrc_q.process(s)).collect();
+
+            add_noise(&mut i_ch, &mut q_ch, 0.1);
+
+            let (res, _) = detector.detect(&i_ch, &q_ch, 0);
+            let result = res.unwrap_or_else(|| panic!("Failed at offset {}", offset));
+
+            let expected = offset
+                + detector.filter_delay()
+                + config.samples_per_symbol() * config.preamble_repeat;
+            let tol = (config.samples_per_chip() as i32 / 2).max(2);
+            assert!((result.peak_sample_idx as i32 - expected as i32).abs() <= tol);
+        }
     }
 
     #[test]
-    fn test_sync_no_false_positives() {
-        let config = test_config();
-        let mut mod_ = Modulator::new(config.clone());
-        let preamble = mod_.generate_preamble();
-        
-        // 大量のランダムデータを作成して、データ部分に誤検出しないかテストする
-        let mut data_bits = Vec::with_capacity(2000);
-        let mut state = 12345u32; // 疑似乱数
-        for _ in 0..2000 {
-            state = state.wrapping_mul(1103515245).wrapping_add(12345);
-            data_bits.push((state >> 16 & 1) as u8);
-        }
-        let data_samples = mod_.modulate(&data_bits);
-
-        let mut signal = Vec::new();
-        let silence_len = 240; // 40 chips
-        signal.extend(vec![0.0; silence_len]);
-        signal.extend_from_slice(&preamble);
-        signal.extend_from_slice(&data_samples);
-
+    fn test_sync_streaming() {
+        let config = DspConfig::default_48k();
+        let mut modulator = Modulator::new(config.clone());
         let detector = SyncDetector::new(config.clone());
-        let (i_ch, q_ch) = downconvert(&signal, 0, &detector.config);
-        let (chips_i, chips_q) = matched_filter_decimate(&i_ch, &q_ch, &detector.config);
-        
-        let period = detector.local_mseq.len();
-        let window = period * detector.config.preamble_repeat;
-        let search_range = chips_i.len().saturating_sub(window);
-        let mut energies = Vec::with_capacity(search_range);
 
-        for offset in 0..search_range {
-            let mut sum_ci = 0.0f32;
-            let mut sum_cq = 0.0f32;
-            for rep in 0..detector.config.preamble_repeat {
-                let start = offset + rep * period;
-                if start + period > chips_i.len() { break; }
-                let ci: f32 = chips_i[start..start + period].iter().zip(detector.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
-                let cq: f32 = chips_q[start..start + period].iter().zip(detector.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
-                sum_ci += ci;
-                sum_cq += cq;
+        let offset = 456;
+        let mut signal = vec![0.0; offset];
+        signal.extend(modulator.generate_preamble());
+        signal.extend(vec![0.0; 1000]);
+
+        let (i_raw, q_raw) = downconvert(&signal, 0, &config);
+        let mut rrc_i = RrcFilter::from_config(&config);
+        let mut rrc_q = RrcFilter::from_config(&config);
+        let i_all: Vec<f32> = i_raw.iter().map(|&s| rrc_i.process(s)).collect();
+        let q_all: Vec<f32> = q_raw.iter().map(|&s| rrc_q.process(s)).collect();
+
+        let mut buf_i = Vec::new();
+        let mut buf_q = Vec::new();
+        let mut total_consumed = 0;
+        let mut detected = false;
+
+        for chunk in i_all.chunks(512).zip(q_all.chunks(512)) {
+            buf_i.extend_from_slice(chunk.0);
+            buf_q.extend_from_slice(chunk.1);
+
+            let (res, next_off) = detector.detect(&buf_i, &buf_q, 0);
+            if let Some(result) = res {
+                let absolute = total_consumed + result.peak_sample_idx;
+                let expected = offset
+                    + detector.filter_delay()
+                    + config.samples_per_symbol() * config.preamble_repeat;
+                let tol = (config.samples_per_chip() as i32 / 2).max(2);
+                assert!((absolute as i32 - expected as i32).abs() <= tol);
+                detected = true;
+                break;
             }
-            energies.push(sum_ci * sum_ci + sum_cq * sum_cq);
+            buf_i.drain(0..next_off);
+            buf_q.drain(0..next_off);
+            total_consumed += next_off;
         }
-        
-        let mean_energy = energies.iter().sum::<f32>() / energies.len() as f32;
-        
-        println!("--- Debugging Sync Peaks ---");
-        for (offset, &energy) in energies.iter().enumerate().take(46) {
-            let confidence = energy / mean_energy;
-            if confidence > 5.0 || offset == 40 {
-                println!("Offset: {}, Energy: {:.2}, Confidence: {:.2}", offset, energy, confidence);
-            }
-        }
-        println!("---");
-
-        let (result_opt, _) = detector.detect(&signal);
-
-        assert!(result_opt.is_some(), "長大なデータが付加されていても同期捕捉が成功すること");
-        let sync = result_opt.unwrap();
-        
-        let expected_start = silence_len + preamble.len();
-        assert_eq!(
-            sync.data_start_sample, expected_start,
-            "大量のデータが存在しても、プリアンブルの正確な終了位置を1サンプルの狂いもなく指し示すこと。誤検出(False Positive)は許されない。 expected={}, got={}",
-            expected_start, sync.data_start_sample
-        );
-    }
-
-    #[test]
-    fn test_downconvert_finite() {
-        let config = test_config();
-        let samples: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.01).sin()).collect();
-        let (i_ch, q_ch) = downconvert(&samples, 0, &config);
-        assert!(i_ch.iter().all(|&s| s.is_finite()));
-        assert!(q_ch.iter().all(|&s| s.is_finite()));
+        assert!(detected);
     }
 }

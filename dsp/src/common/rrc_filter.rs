@@ -86,14 +86,22 @@ impl RrcFilter {
             config.sample_rate,
         );
         let num_taps = coeffs.len();
-        RrcFilter { coeffs, buffer: vec![0.0f32; num_taps], pos: 0 }
+        RrcFilter {
+            coeffs,
+            buffer: vec![0.0f32; num_taps],
+            pos: 0,
+        }
     }
 
     /// カスタムパラメータでフィルタを作成する
     pub fn with_params(num_taps: usize, alpha: f32, chip_rate: f32, sample_rate: f32) -> Self {
         let coeffs = rrc_coeffs(num_taps, alpha, chip_rate, sample_rate);
         let buffer = vec![0.0f32; num_taps];
-        RrcFilter { coeffs, buffer, pos: 0 }
+        RrcFilter {
+            coeffs,
+            buffer,
+            pos: 0,
+        }
     }
 
     /// 1サンプルを処理する (循環バッファによる畳み込み)
@@ -120,6 +128,12 @@ impl RrcFilter {
         self.pos = 0;
     }
 
+    /// フィルタの群遅延 (サンプリング間隔単位) を返す
+    /// FIRフィルタの場合、(タップ数 - 1) / 2 となる。
+    pub fn delay(&self) -> usize {
+        (self.coeffs.len() - 1) / 2
+    }
+
     pub fn num_taps(&self) -> usize {
         self.coeffs.len()
     }
@@ -133,6 +147,31 @@ mod tests {
         DspConfig::default_48k()
     }
 
+    /// インパルス応答のピーク位置が理論的な遅延と一致することを確認
+    #[test]
+    fn test_impulse_response_delay() {
+        let config = test_config();
+        let mut filter = RrcFilter::from_config(&config);
+        let delay = filter.delay();
+
+        let mut impulse = vec![0.0f32; delay * 2 + 1];
+        impulse[0] = 1.0;
+
+        let output = filter.process_block(&impulse);
+        let (peak_idx, &peak_val) = output
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            peak_idx, delay,
+            "ピーク位置が理論的遅延 {} と一致すること",
+            delay
+        );
+        assert!(peak_val > 0.0, "ピーク値が正であること");
+    }
+
     /// ナイキスト基準の検証:
     /// 2つのRRCフィルタを縦続 (= レイズドコサイン) した場合、
     /// サンプリング点 t=k*Ts (k≠0) での応答がほぼ0になる
@@ -140,7 +179,12 @@ mod tests {
     fn test_nyquist_isi_zero() {
         let config = test_config();
         let sps = config.samples_per_chip();
-        let h = rrc_coeffs(config.rrc_num_taps(), config.rrc_alpha, config.chip_rate, config.sample_rate);
+        let h = rrc_coeffs(
+            config.rrc_num_taps(),
+            config.rrc_alpha,
+            config.chip_rate,
+            config.sample_rate,
+        );
 
         // 2つのRRCを畳み込み → レイズドコサイン応答
         let rc_len = 2 * h.len() - 1;
@@ -155,19 +199,29 @@ mod tests {
         let peak = rc[center];
         assert!(peak > 0.0, "ピークが正であること");
 
-        // チップレートが非整数比 (7407.0/48000.0) でるため量子化誤差が生じる
-        // 許容閾値: 10%以内 (ISIの実質的な影響は小さい: RRC+FECの組み合わせで响く)
-        let tolerance = 0.10f32;
+        // 整数比 (48000/8000 = 6) の場合、サンプリング点でのISIは極めて低くなるはず
+        // 許容閾値: 2%以内 (実信号レベルでの干渉抑制)
+        let tolerance = 0.02f32;
         for k in 1..=4 {
             if center + k * sps < rc_len {
                 let isi = rc[center + k * sps].abs() / peak;
-                assert!(isi < tolerance,
-                    "t=+{}*Ts での ISI = {:.4} >= {:.4} (ナイキスト条件違反)", k, isi, tolerance);
+                assert!(
+                    isi < tolerance,
+                    "t=+{}*Ts での ISI = {:.4} >= {:.4} (ナイキスト条件違反)",
+                    k,
+                    isi,
+                    tolerance
+                );
             }
             if center >= k * sps {
                 let isi = rc[center - k * sps].abs() / peak;
-                assert!(isi < tolerance,
-                    "t=-{}*Ts での ISI = {:.4} >= {:.4} (ナイキスト条件違反)", k, isi, tolerance);
+                assert!(
+                    isi < tolerance,
+                    "t=-{}*Ts での ISI = {:.4} >= {:.4} (ナイキスト条件違反)",
+                    k,
+                    isi,
+                    tolerance
+                );
             }
         }
     }
@@ -176,12 +230,23 @@ mod tests {
     #[test]
     fn test_symmetry() {
         let config = test_config();
-        let h = rrc_coeffs(config.rrc_num_taps(), config.rrc_alpha, config.chip_rate, config.sample_rate);
+        let h = rrc_coeffs(
+            config.rrc_num_taps(),
+            config.rrc_alpha,
+            config.chip_rate,
+            config.sample_rate,
+        );
         let n = h.len();
         for i in 0..n / 2 {
             let diff = (h[i] - h[n - 1 - i]).abs();
-            assert!(diff < 1e-6,
-                "係数が対称でない: h[{}]={} vs h[{}]={}", i, h[i], n - 1 - i, h[n - 1 - i]);
+            assert!(
+                diff < 1e-6,
+                "係数が対称でない: h[{}]={} vs h[{}]={}",
+                i,
+                h[i],
+                n - 1 - i,
+                h[n - 1 - i]
+            );
         }
     }
 
@@ -189,7 +254,12 @@ mod tests {
     #[test]
     fn test_44k_config() {
         let config = DspConfig::default_44k();
-        let h = rrc_coeffs(config.rrc_num_taps(), config.rrc_alpha, config.chip_rate, config.sample_rate);
+        let h = rrc_coeffs(
+            config.rrc_num_taps(),
+            config.rrc_alpha,
+            config.chip_rate,
+            config.sample_rate,
+        );
         assert!(!h.is_empty());
         assert!(h.iter().all(|&c| c.is_finite()));
         // 対称性確認

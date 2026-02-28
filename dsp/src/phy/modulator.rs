@@ -7,8 +7,8 @@
 //! 4. 帯域シフト: キャリアfc=8kHzで変調 (実信号)
 
 use crate::common::msequence::MSequence;
-use crate::params::SYNC_WORD;
 use crate::common::rrc_filter::RrcFilter;
+use crate::params::SYNC_WORD;
 use crate::DspConfig;
 
 /// 変調器
@@ -40,17 +40,25 @@ impl Modulator {
         Self::new(DspConfig::default_48k())
     }
 
-    /// プリアンブル (M系列 × PREAMBLE_REPEAT 周期) を生成する
+    /// プリアンブル (M系列の [M, M, M, -M] パターン) を生成する
     ///
-    /// 受信側の同期捕捉に使用する。
+    /// 最後のシンボルを反転させることで同期の曖昧さを排除する。
     pub fn generate_preamble(&mut self) -> Vec<f32> {
-        let period = self.config.spread_factor();
-        let total_chips = period * self.config.preamble_repeat;
+        let sf = self.config.spread_factor();
+        let repeat = self.config.preamble_repeat;
+        let mut all_chips = Vec::with_capacity(sf * repeat);
 
         self.mseq.reset();
-        let chips = self.mseq.generate(total_chips);
+        let pn = self.mseq.generate(sf);
 
-        self.chips_to_samples(&chips)
+        for i in 0..repeat {
+            let sign: i8 = if i == repeat - 1 { -1 } else { 1 };
+            for &c in &pn {
+                all_chips.push(sign * c);
+            }
+        }
+
+        self.chips_to_samples(&all_chips)
     }
 
     /// ビット列を変調してサンプル列を返す
@@ -94,25 +102,63 @@ impl Modulator {
                 self.sample_idx += 1;
             }
         }
+
+        // 外部から modulate() が単発で呼ばれた場合のためのフラッシュ
+        // encode_frame 内では末尾に 0 チップが追加されるため、そこでのフィルタリングがフラッシュの役割を果たす。
+        let delay = self.rrc.delay();
+        for _ in 0..delay {
+            let filtered = self.rrc.process(0.0);
+            let t = self.sample_idx as f32 / fs;
+            let carrier = (two_pi * fc * t).cos();
+            out.push(filtered * carrier);
+            self.sample_idx += 1;
+        }
+
         out
     }
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
-        let mut frame = self.generate_preamble();
+        self.reset();
+        let sf = self.config.spread_factor();
+        let preamble_repeat = self.config.preamble_repeat;
 
-        let sync_bits: Vec<u8> = (0..32).rev().map(|i| ((SYNC_WORD >> i) & 1) as u8).collect();
-        frame.extend(self.modulate(&sync_bits));
-        frame.extend(self.modulate(bits));
+        let mut all_chips = Vec::new();
 
-        // RRCフィルタの遅延（送受信合計 num_taps - 1 サンプル）により、
-        // 最後のチップのエネルギーがフィルタ内に残ってしまう。
-        // デコーダ側が確実に最後のビットを復元できるよう、
-        // 遅延分＋マージン（1シンボル分）の無音サンプルを末尾に付加してフラッシュする。
-        let flush_samples = self.config.rrc_num_taps() - 1 + self.config.samples_per_symbol();
-        frame.extend(vec![0.0; flush_samples]);
+        // 1. プリアンブル
+        self.mseq.reset();
+        all_chips.extend(self.mseq.generate(sf * preamble_repeat));
 
-        frame
+        // 2. 同期ワード (32bit)
+        let sync_bits: Vec<u8> = (0..32)
+            .rev()
+            .map(|i| ((SYNC_WORD >> i) & 1) as u8)
+            .collect();
+        for &bit in &sync_bits {
+            self.prev_phase ^= bit;
+            let symbol: i8 = if self.prev_phase == 0 { 1 } else { -1 };
+            self.mseq.reset();
+            let pn = self.mseq.generate(sf);
+            for chip in pn {
+                all_chips.push(symbol * chip);
+            }
+        }
+
+        // 3. データ
+        for &bit in bits {
+            self.prev_phase ^= bit;
+            let symbol: i8 = if self.prev_phase == 0 { 1 } else { -1 };
+            self.mseq.reset();
+            let pn = self.mseq.generate(sf);
+            for chip in pn {
+                all_chips.push(symbol * chip);
+            }
+        }
+
+        // 4. マージン (1シンボル分の無音チップ)
+        all_chips.extend(vec![0; sf]);
+
+        self.chips_to_samples(&all_chips)
     }
 
     /// 変調器の状態をリセット
@@ -142,9 +188,17 @@ mod tests {
         let mut mod_ = make_modulator();
         let preamble = mod_.generate_preamble();
         let config = DspConfig::default_48k();
-        let expected_samples = config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
-        assert_eq!(preamble.len(), expected_samples,
-            "プリアンブル長が正しいこと: expected={}", expected_samples);
+        // チップ数 = SF * PREAMBLE_REPEAT
+        // サンプル数 = チップ数 * SPC + フラッシュ(delay)
+        let expected_samples =
+            config.spread_factor() * config.preamble_repeat * config.samples_per_chip()
+                + mod_.rrc.delay();
+        assert_eq!(
+            preamble.len(),
+            expected_samples,
+            "プリアンブル長が正しいこと: expected={}",
+            expected_samples
+        );
     }
 
     /// サンプル値が有限値であること
@@ -153,7 +207,10 @@ mod tests {
         let mut mod_ = make_modulator();
         let bits = vec![0u8, 1, 0, 1, 1, 0, 1, 0];
         let samples = mod_.modulate(&bits);
-        assert!(samples.iter().all(|&s| s.is_finite()), "全サンプルが有限値であること");
+        assert!(
+            samples.iter().all(|&s| s.is_finite()),
+            "全サンプルが有限値であること"
+        );
     }
 
     /// 変調出力の長さ確認
@@ -163,8 +220,14 @@ mod tests {
         let config = DspConfig::default_48k();
         let bits = vec![0u8; 8];
         let samples = mod_.modulate(&bits);
-        let expected = bits.len() * config.spread_factor() * config.samples_per_chip();
-        assert_eq!(samples.len(), expected, "変調後サンプル数が正しいこと: {}", expected);
+        let expected =
+            bits.len() * config.spread_factor() * config.samples_per_chip() + mod_.rrc.delay();
+        assert_eq!(
+            samples.len(),
+            expected,
+            "変調後サンプル数が正しいこと: {}",
+            expected
+        );
     }
 
     /// 変調出力の振幅が概ね±2以内であること
@@ -203,53 +266,77 @@ mod tests {
     fn test_math_dbpsk_dsss() {
         let mut mod_ = make_modulator();
         let bits = vec![1u8, 0, 1];
-        
-        // 数学的に手計算でDBPSKを検証
-        // 初期 phase = 0
-        // bit=1 -> phase = 0 ^ 1 = 1 -> symbol = -1
-        // bit=0 -> phase = 1 ^ 0 = 1 -> symbol = -1
-        // bit=1 -> phase = 1 ^ 1 = 0 -> symbol = 1
-        let expected_symbols = vec![-1i8, -1i8, 1i8];
-        
-        let sf = mod_.config.spread_factor();
-        let mseq_order = mod_.config.mseq_order;
-        let mut mseq = MSequence::new(mseq_order);
-        
-        let mut expected_chips = Vec::new();
-        for sym in expected_symbols {
-            mseq.reset();
-            let pn = mseq.generate(sf);
-            for chip in pn {
-                expected_chips.push(sym * chip);
-            }
-        }
-        
-        // RRCフィルタとキャリアの数学的モデルを直接検証する
-        let spc = mod_.config.samples_per_chip();
         let fs = mod_.config.sample_rate;
         let fc = mod_.config.carrier_freq;
-        let mut rrc = RrcFilter::from_config(&mod_.config);
-        
-        let mut expected_samples = Vec::new();
-        let mut sample_idx = 0;
+        let sf = mod_.config.spread_factor();
+        let spc = mod_.config.samples_per_chip();
         let two_pi = 2.0 * std::f32::consts::PI;
-        
-        for &chip in &expected_chips {
-            for k in 0..spc {
-                let baseband = if k == 0 { chip as f32 } else { 0.0 };
-                let filtered = rrc.process(baseband);
-                let t = sample_idx as f32 / fs;
-                let carrier = (two_pi * fc * t).cos();
-                expected_samples.push(filtered * carrier);
-                sample_idx += 1;
+
+        // --- 検証: encode_frame が生成する波形を理想的な受信機で復号する ---
+        let frame = mod_.encode_frame(&bits);
+
+        let mut demod_rrc = RrcFilter::from_config(&mod_.config);
+        let mut i_ch = Vec::new();
+        let mut q_ch = Vec::new();
+        for (i, &s) in frame.iter().enumerate() {
+            let t = i as f32 / fs;
+            let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
+            i_ch.push(demod_rrc.process(s * cos_v * 2.0));
+            q_ch.push(demod_rrc.process(s * (-sin_v) * 2.0));
+        }
+
+        let total_delay = mod_.rrc.delay() + demod_rrc.delay();
+        let mut mseq = MSequence::new(mod_.config.mseq_order);
+        let preamble_repeat = mod_.config.preamble_repeat;
+
+        // 1. プリアンブルの最後で位相基準を得る
+        let mut prev_i = 0.0f32;
+        let mut prev_q = 0.0f32;
+        let ref_symbol_start = total_delay + (preamble_repeat - 1) * sf * spc;
+        mseq.reset();
+        let pn = mseq.generate(sf);
+        for (c_idx, &pn_val) in pn.iter().enumerate() {
+            let p = ref_symbol_start + c_idx * spc;
+            prev_i += i_ch[p] * pn_val as f32;
+            prev_q += q_ch[p] * pn_val as f32;
+        }
+        let mag = (prev_i * prev_i + prev_q * prev_q).sqrt().max(1e-6);
+        prev_i /= mag;
+        prev_q /= mag;
+
+        // 2. 同期ワード(32bit) + データ(bits)
+        let data_start_chips = sf * preamble_repeat;
+        let total_symbols = 32 + bits.len();
+        let mut recovered_bits = Vec::new();
+
+        for s_idx in 0..total_symbols {
+            let symbol_start = total_delay + (data_start_chips + s_idx * sf) * spc;
+            let mut cur_i = 0.0;
+            let mut cur_q = 0.0;
+
+            mseq.reset();
+            let pn = mseq.generate(sf);
+            for (c_idx, &pn_val) in pn.iter().enumerate() {
+                let p = symbol_start + c_idx * spc;
+                cur_i += i_ch[p] * pn_val as f32;
+                cur_q += q_ch[p] * pn_val as f32;
             }
+
+            let dot = cur_i * prev_i + cur_q * prev_q;
+            let bit = if dot > 0.0 { 0 } else { 1 };
+
+            if s_idx >= 32 {
+                recovered_bits.push(bit);
+            }
+
+            let mag = (cur_i * cur_i + cur_q * cur_q).sqrt().max(1e-6);
+            prev_i = cur_i / mag;
+            prev_q = cur_q / mag;
         }
-        
-        let actual_samples = mod_.modulate(&bits);
-        
-        assert_eq!(actual_samples.len(), expected_samples.len());
-        for (i, (&a, &e)) in actual_samples.iter().zip(expected_samples.iter()).enumerate() {
-            assert!((a - e).abs() < 1e-5, "Sample {} mismatch: expected {}, got {}", i, e, a);
-        }
+
+        assert_eq!(
+            recovered_bits, bits,
+            "プリアンブル・同期ワードを通過してデータが正しく復号されること"
+        );
     }
 }

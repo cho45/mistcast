@@ -13,8 +13,14 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--input" if i + 1 < args.len() => { input = args[i + 1].clone(); i += 2; }
-            "--output" if i + 1 < args.len() => { output = args[i + 1].clone(); i += 2; }
+            "--input" if i + 1 < args.len() => {
+                input = args[i + 1].clone();
+                i += 2;
+            }
+            "--output" if i + 1 < args.len() => {
+                output = args[i + 1].clone();
+                i += 2;
+            }
             "--sample-rate" if i + 1 < args.len() => {
                 sample_rate = args[i + 1].parse().unwrap_or(48000.0);
                 i += 2;
@@ -35,13 +41,20 @@ fn main() {
     let mut all_samples: Vec<f32> = Vec::new();
     for frame_idx in 0..num_frames {
         let frame = stream.next().unwrap();
-        println!("フレーム {}: {} サンプル ({:.2} sec)",
-            frame_idx, frame.len(), frame.len() as f32 / sample_rate);
+        println!(
+            "フレーム {}: {} サンプル ({:.2} sec)",
+            frame_idx,
+            frame.len(),
+            frame.len() as f32 / sample_rate
+        );
         all_samples.extend(frame);
     }
 
-    println!("合計 {} サンプル ({:.2} sec)",
-        all_samples.len(), all_samples.len() as f32 / sample_rate);
+    println!(
+        "合計 {} サンプル ({:.2} sec)",
+        all_samples.len(),
+        all_samples.len() as f32 / sample_rate
+    );
 
     let spec = hound::WavSpec {
         channels: 1,
@@ -52,8 +65,12 @@ fn main() {
 
     let mut writer = hound::WavWriter::create(&output, spec).expect("WAVファイルの作成に失敗");
     for &sample in &all_samples {
-        writer.write_sample(sample.clamp(-1.0, 1.0)).expect("サンプル書き込みに失敗");
+        writer
+            .write_sample(sample.clamp(-1.0, 1.0))
+            .expect("サンプル書き込みに失敗");
     }
-    writer.finalize().expect("WAVファイルのファイナライズに失敗");
+    writer
+        .finalize()
+        .expect("WAVファイルのファイナライズに失敗");
     println!("出力: {}", output);
 }

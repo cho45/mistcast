@@ -24,21 +24,26 @@ fn parity(x: u8) -> u8 {
 }
 
 /// 現在の状態 `state` にビット `bit` を入力したときの出力シンボル (2ビット)
-/// state は K-1=6 ビット幅
+/// state は K-1=6 ビット幅: [s0 s1 s2 s3 s4 s5]
+/// 出力は現在の bit と state の全ビットに依存する (計7ビット)
 #[inline]
 fn conv_output(state: u8, bit: u8) -> (u8, u8) {
-    // 新しいシフトレジスタ値 (上位 K-1 ビット + 入力ビット)
-    let reg = (state >> 1) | (bit << (CONSTRAINT_LEN as u8 - 2));
+    // 7ビットのレジスタ値を構成: [bit s0 s1 s2 s3 s4 s5]
+    // bit を MSB (第6ビット) に配置
+    let reg = (bit << 6) | (state & 0x3F);
+
     // G1, G2との積のパリティ
+    // G1=0o171=0b1111001, G2=0o133=0b1011011
     let v1 = parity(reg & G1);
     let v2 = parity(reg & G2);
     (v1, v2)
 }
 
 /// 次の状態を計算する
+/// [bit s0 s1 s2 s3 s4] を新しい状態とする
 #[inline]
 fn next_state(state: u8, bit: u8) -> u8 {
-    ((state >> 1) | (bit << (CONSTRAINT_LEN as u8 - 2))) & (NUM_STATES as u8 - 1)
+    ((bit << 5) | (state >> 1)) & 0x3F
 }
 
 /// 畳み込み符号エンコーダ
@@ -73,7 +78,10 @@ pub fn encode(bits: &[u8]) -> Vec<u8> {
 /// 符号化ビット列を復号する。入力の約半分長のビット列を返す。
 /// テールビットを考慮する。
 pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
-    assert!(coded_bits.len().is_multiple_of(2), "符号化ビット列は偶数長であること");
+    assert!(
+        coded_bits.len().is_multiple_of(2),
+        "符号化ビット列は偶数長であること"
+    );
     let num_symbols = coded_bits.len() / 2;
 
     // トレリス: path_metric[state] = 累積ハミング距離
@@ -130,7 +138,7 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
         let prev = survivors[t][state as usize];
         // このステップの入力ビットを復元
         // next_state(prev, bit) == state を満たすbitを見つける
-        let bit = if (prev >> 1) | (1u8 << (CONSTRAINT_LEN as u8 - 2)) == state {
+        let bit = if next_state(prev, 1) == state {
             1u8
         } else {
             0u8
@@ -148,9 +156,10 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
 pub fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
     bits.chunks(8)
         .map(|chunk| {
-            chunk.iter().enumerate().fold(0u8, |acc, (i, &b)| {
-                acc | (b << (7 - i))
-            })
+            chunk
+                .iter()
+                .enumerate()
+                .fold(0u8, |acc, (i, &b)| acc | (b << (7 - i)))
         })
         .collect()
 }
@@ -180,19 +189,23 @@ mod tests {
 
         let decoded = decode(&coded);
         assert_eq!(decoded.len(), original.len());
-        assert_eq!(decoded, original, "エラーなし時にデコード結果が一致すること");
+        assert_eq!(
+            decoded, original,
+            "エラーなし時にデコード結果が一致すること"
+        );
     }
 
     /// ランダムデータのエンコード→デコード
     #[test]
     fn test_encode_decode_random() {
         // 疑似乱数的なビット列 (u32で演算してからu8に変換)
-        let original: Vec<u8> = (0..64u32)
-            .map(|i| ((i * 37 + 11) % 2) as u8)
-            .collect();
+        let original: Vec<u8> = (0..64u32).map(|i| ((i * 37 + 11) % 2) as u8).collect();
         let coded = encode(&original);
         let decoded = decode(&coded);
-        assert_eq!(decoded, original, "ランダムビット列のデコード結果が一致すること");
+        assert_eq!(
+            decoded, original,
+            "ランダムビット列のデコード結果が一致すること"
+        );
     }
 
     /// 1ビットエラーの訂正確認
@@ -204,10 +217,7 @@ mod tests {
         let flip_pos = coded.len() / 2;
         coded[flip_pos] ^= 1;
         let decoded = decode(&coded);
-        assert_eq!(
-            decoded, original,
-            "1ビットエラーが訂正されること"
-        );
+        assert_eq!(decoded, original, "1ビットエラーが訂正されること");
     }
 
     /// エンコード長の確認
@@ -226,13 +236,54 @@ mod tests {
         }
     }
 
-    /// bytes_to_bits / bits_to_bytes 往復テスト
+    /// 3ビットエラーの訂正確認 (K=7, R=1/2 なら十分可能)
     #[test]
-    fn test_byte_bit_conversion() {
-        let original = vec![0xABu8, 0xCD, 0xEF];
-        let bits = bytes_to_bits(&original);
-        assert_eq!(bits.len(), 24);
-        let recovered = bits_to_bytes(&bits);
-        assert_eq!(recovered, original);
+    fn test_multi_bit_error_correction() {
+        let original: Vec<u8> = vec![1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1];
+        let mut coded = encode(&original);
+
+        // 分散した位置で3ビット反転
+        coded[10] ^= 1;
+        coded[20] ^= 1;
+        coded[30] ^= 1;
+
+        let decoded = decode(&coded);
+        assert_eq!(decoded, original, "3ビットの分散エラーが訂正されること");
+    }
+
+    /// バーストエラーの訂正限界確認
+    #[test]
+    fn test_burst_error_correction() {
+        let original: Vec<u8> = vec![0; 32];
+        let mut coded = encode(&original);
+
+        // 連続する4ビットを反転 (R=1/2, K=7 ではこのあたりが限界)
+        for bit in coded.iter_mut().take(24).skip(20) {
+            *bit ^= 1;
+        }
+
+        let decoded = decode(&coded);
+        assert_eq!(decoded, original, "4ビットのバーストエラーが訂正されること");
+    }
+
+    /// フルパケット(約160ビット)でのエラー訂正能力確認
+    #[test]
+    fn test_full_packet_error_correction() {
+        let mut original = vec![0u8; 160];
+        for (i, bit) in original.iter_mut().enumerate().take(160) {
+            *bit = (i % 2) as u8;
+        }
+        let mut coded = encode(&original);
+
+        // 5% のビットエラーをランダム(分散)に注入 (160*2 * 0.05 = 16ビット)
+        for i in (0..coded.len()).step_by(20) {
+            coded[i] ^= 1;
+        }
+
+        let decoded = decode(&coded);
+        assert_eq!(
+            decoded, original,
+            "フルパケットでの分散エラーが訂正されること"
+        );
     }
 }

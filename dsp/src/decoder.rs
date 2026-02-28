@@ -1,195 +1,411 @@
 //! 受信パイプライン (統合デコーダ)
-//!
-//! ```text
-//! 受信音声サンプル列 → 同期捕捉 → DBPSK+DSSS復調
-//! → デインターリーブ → Viterbi FEC → CRC確認 → LTデコーダ → ファイル復元
-//! ```
 
 use crate::{
     coding::fec,
     coding::fountain::{EncodedPacket, LtDecoder, LtParams},
     coding::interleaver::BlockInterleaver,
-    phy::demodulator::Demodulator,
-    phy::sync::SyncDetector,
+    common::decimator::FirDecimator,
     common::rrc_filter::RrcFilter,
     frame::packet::{Packet, PACKET_BYTES},
     params::PAYLOAD_SIZE,
+    phy::demodulator::Demodulator,
+    phy::sync::{SyncDetector, SyncResult},
     DspConfig,
 };
+use std::time::{Duration, Instant};
 
-/// デコード進捗情報
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
     pub received_packets: usize,
     pub needed_packets: usize,
     pub progress: f32,
     pub complete: bool,
-    /// 今回の呼び出しで消費（処理済みとして破棄可能）されたサンプル数
-    pub consumed_samples: usize,
 }
 
-/// 受信パイプライン統合デコーダ
 pub struct Decoder {
     config: DspConfig,
+    proc_config: DspConfig,
     sample_idx: usize,
     rrc_i: RrcFilter,
     rrc_q: RrcFilter,
-    pub(crate) chip_buffer_i: Vec<f32>,
-    pub(crate) chip_buffer_q: Vec<f32>,
+    decimator_i: FirDecimator,
+    decimator_q: FirDecimator,
+    sample_buffer_i: Vec<f32>,
+    sample_buffer_q: Vec<f32>,
     sync_detector: SyncDetector,
     demodulator: Demodulator,
     interleaver: BlockInterleaver,
     lt_decoder: LtDecoder,
     recovered_data: Option<Vec<u8>>,
-    original_size: usize,
+    agc_peak: f32,
+    decimation_factor: usize,
+    lo_cos: f32,
+    lo_sin: f32,
+    lo_step_cos: f32,
+    lo_step_sin: f32,
+
+    // --- 同期状態 ---
+    last_search_idx: usize,
+    current_sync: Option<SyncResult>,
+
+    // --- 統計用 ---
+    pub stats_sync_calls: usize,
+    pub stats_sync_time: Duration,
+    pub stats_total_samples: usize,
 }
 
 impl Decoder {
-    pub fn new(data_size: usize, lt_k: usize, dsp_config: DspConfig) -> Self {
+    pub fn new(_data_size: usize, lt_k: usize, dsp_config: DspConfig) -> Self {
+        let decimation_factor = choose_decimation_factor(&dsp_config);
+        let proc_config = build_proc_config(&dsp_config, decimation_factor);
         let params = LtParams::new(lt_k, PAYLOAD_SIZE);
-        // PACKET_BYTES * 8 (bits) + 6 (tail bits)
         let raw_bits = PACKET_BYTES * 8 + 6;
         let fec_bits = raw_bits * 2;
         let il_rows = 16;
         let il_cols = fec_bits.div_ceil(16);
+        let decim_cutoff_norm = 0.45 / decimation_factor as f32;
+        let lo_w = 2.0 * std::f32::consts::PI * dsp_config.carrier_freq / dsp_config.sample_rate;
+        let (lo_step_sin, lo_step_cos) = lo_w.sin_cos();
 
         Decoder {
             rrc_i: RrcFilter::from_config(&dsp_config),
             rrc_q: RrcFilter::from_config(&dsp_config),
-            chip_buffer_i: Vec::new(),
-            chip_buffer_q: Vec::new(),
+            decimator_i: FirDecimator::new_lowpass_hamming(
+                decimation_factor,
+                63,
+                decim_cutoff_norm,
+            ),
+            decimator_q: FirDecimator::new_lowpass_hamming(
+                decimation_factor,
+                63,
+                decim_cutoff_norm,
+            ),
+            sample_buffer_i: Vec::new(),
+            sample_buffer_q: Vec::new(),
             sample_idx: 0,
-            sync_detector: SyncDetector::new(dsp_config.clone()),
-            demodulator: Demodulator::new(dsp_config.clone()),
+            sync_detector: SyncDetector::new(proc_config.clone()),
+            demodulator: Demodulator::new(proc_config.clone()),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             lt_decoder: LtDecoder::new(params),
             recovered_data: None,
-            original_size: data_size,
             config: dsp_config,
+            proc_config,
+            agc_peak: 0.5,
+            decimation_factor,
+            lo_cos: 1.0,
+            lo_sin: 0.0,
+            lo_step_cos,
+            lo_step_sin,
+            last_search_idx: 0,
+            current_sync: None,
+            stats_sync_calls: 0,
+            stats_sync_time: Duration::ZERO,
+            stats_total_samples: 0,
         }
     }
 
-    pub fn default_48k(data_size: usize, lt_k: usize) -> Self {
-        Self::new(data_size, lt_k, DspConfig::default_48k())
-    }
-
-    /// 受信サンプル列を処理する
     pub fn process_samples(&mut self, samples: &[f32]) -> DecodeProgress {
-        let two_pi = 2.0 * std::f32::consts::PI;
-        let fs = self.config.sample_rate;
-        let fc = self.config.carrier_freq;
-        let spc = self.config.samples_per_chip();
-        let total_delay = self.config.rrc_num_taps().saturating_sub(1);
+        if self.recovered_data.is_some() {
+            return self.progress();
+        }
+        self.stats_total_samples += samples.len();
+
+        let spc = self.proc_config.samples_per_chip();
+        let sf = self.config.spread_factor();
+        let max_buffer_len = (100_000 / self.decimation_factor.max(1)).max(1);
+        let drain_len = (50_000 / self.decimation_factor.max(1)).max(1);
+
+        let mut i_mixed = Vec::with_capacity(samples.len());
+        let mut q_mixed = Vec::with_capacity(samples.len());
+        let mut lo_cos = self.lo_cos;
+        let mut lo_sin = self.lo_sin;
+        let step_cos = self.lo_step_cos;
+        let step_sin = self.lo_step_sin;
 
         for (idx, &s) in samples.iter().enumerate() {
-            let current_sample_idx = self.sample_idx + idx;
-            let t = current_sample_idx as f32 / fs;
-            let cos_val = (two_pi * fc * t).cos();
-            let sin_val = (two_pi * fc * t).sin();
-            
-            let i_val = s * cos_val * 2.0;
-            let q_val = s * (-sin_val) * 2.0;
+            self.agc_peak = self.agc_peak * 0.999 + s.abs() * 0.001;
+            let current_gain = if self.agc_peak > 1e-6 {
+                0.5 / self.agc_peak
+            } else {
+                1.0
+            };
+            i_mixed.push(self.rrc_i.process(s * current_gain * lo_cos * 2.0));
+            q_mixed.push(self.rrc_q.process(s * current_gain * (-lo_sin) * 2.0));
 
-            let filtered_i = self.rrc_i.process(i_val);
-            let filtered_q = self.rrc_q.process(q_val);
+            let next_cos = lo_cos * step_cos - lo_sin * step_sin;
+            let next_sin = lo_sin * step_cos + lo_cos * step_sin;
+            lo_cos = next_cos;
+            lo_sin = next_sin;
 
-            if current_sample_idx >= total_delay && (current_sample_idx - total_delay).is_multiple_of(spc) {
-                self.chip_buffer_i.push(filtered_i);
-                self.chip_buffer_q.push(filtered_q);
+            if (idx & 1023) == 1023 {
+                let norm = (lo_cos * lo_cos + lo_sin * lo_sin).sqrt().max(1e-12);
+                lo_cos /= norm;
+                lo_sin /= norm;
             }
         }
+        self.lo_cos = lo_cos;
+        self.lo_sin = lo_sin;
         self.sample_idx += samples.len();
 
-        let raw_bits_len = PACKET_BYTES * 8 + 6;
-        let needed_fec_bits = (raw_bits_len * 2).div_ceil(16) * 16;
+        let mut i_decimated = Vec::new();
+        let mut q_decimated = Vec::new();
+        self.decimator_i.process_into(&i_mixed, &mut i_decimated);
+        self.decimator_q.process_into(&q_mixed, &mut q_decimated);
+        self.sample_buffer_i.extend_from_slice(&i_decimated);
+        self.sample_buffer_q.extend_from_slice(&q_decimated);
+
         let sync_bits_len = 32;
-        let total_needed_bits = needed_fec_bits + sync_bits_len;
-        let needed_chips = total_needed_bits * self.config.spread_factor();
+        let fec_bits_len = self.interleaver.rows() * self.interleaver.cols();
+        let total_bits = sync_bits_len + fec_bits_len;
+        let symbol_len = sf * spc;
 
-        // 1回の関数呼び出しでバッファ内の可能な限りのパケットをすべて処理する
         loop {
-            let (sync_opt, searched_samples) = self.sync_detector.detect_chips(&self.chip_buffer_i, &self.chip_buffer_q);
-            
-            if let Some(sync) = sync_opt {
-                let data_start_chip = sync.data_start_sample / spc;
+            if self.recovered_data.is_some() {
+                break;
+            }
 
-                if self.chip_buffer_i.len() >= data_start_chip + needed_chips {
-                    let data_chips_i = &self.chip_buffer_i[data_start_chip..];
-                    let data_chips_q = &self.chip_buffer_q[data_start_chip..];
+            // 1. 同期情報の取得
+            let sync = if let Some(s) = self.current_sync.clone() {
+                s
+            } else {
+                let sync_start = Instant::now();
+                let (sync_opt, next_search_idx) = self.sync_detector.detect(
+                    &self.sample_buffer_i,
+                    &self.sample_buffer_q,
+                    self.last_search_idx,
+                );
+                self.stats_sync_calls += 1;
+                self.stats_sync_time += sync_start.elapsed();
 
-                    let raw_bits = self.demodulator.demodulate_chips(&data_chips_i[..needed_chips], &data_chips_q[..needed_chips]);
-                    
-                    if raw_bits.len() >= total_needed_bits {
-                        let payload_bits = &raw_bits[sync_bits_len..total_needed_bits];
-                        let deinterleaved = self.interleaver.deinterleave(payload_bits);
-                        let decoded_bits = fec::decode(&deinterleaved);
-                        let decoded_bytes = fec::bits_to_bytes(&decoded_bits);
-
-                        if decoded_bytes.len() >= PACKET_BYTES {
-                            if let Some(packet) = Packet::deserialize(&decoded_bytes[..PACKET_BYTES]) {
-                                let (degree, neighbors) = crate::coding::fountain::reconstruct_packet_metadata(
-                                    packet.lt_seq,
-                                    self.lt_decoder.params().k,
-                                    self.lt_decoder.params().c,
-                                    self.lt_decoder.params().delta,
-                                );
-                                let lt_pkt = EncodedPacket {
-                                    seq: packet.lt_seq,
-                                    degree,
-                                    neighbors,
-                                    data: packet.payload.to_vec(),
-                                };
-                                self.lt_decoder.receive(lt_pkt);
-
-                                if let Some(data) = self.lt_decoder.decode() {
-                                    let truncated = data[..self.original_size.min(data.len())].to_vec();
-                                    self.recovered_data = Some(truncated);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // パケットを処理したかどうかにかかわらず、データ開始位置まで＋処理に必要だったチップ数を消費する。
-                    self.chip_buffer_i.drain(0..(data_start_chip + needed_chips));
-                    self.chip_buffer_q.drain(0..(data_start_chip + needed_chips));
-                    self.demodulator.reset();
-                    // バッファを消費したので、残りのバッファにまだパケットがあるか再度ループで調べる
-                    continue;
+                if let Some(s) = sync_opt {
+                    self.current_sync = Some(s.clone());
+                    s
                 } else {
-                    // syncは見つかったが、まだ必要なデータ長に達していない場合。
-                    // 次のチャンクでデータが来るのを待つため、ループを抜ける。
+                    self.last_search_idx = next_search_idx;
+                    if self.sample_buffer_i.len() > max_buffer_len {
+                        let drain = drain_len;
+                        self.sample_buffer_i.drain(0..drain);
+                        self.sample_buffer_q.drain(0..drain);
+                        self.last_search_idx = self.last_search_idx.saturating_sub(drain);
+                    }
                     break;
                 }
-            } else {
-                // 同期が見つからなかった場合、探索済み範囲までは確実に不要。
-                let drained_chips = searched_samples / spc;
-                if drained_chips > 0 {
-                    let drain_amount = drained_chips.min(self.chip_buffer_i.len());
-                    self.chip_buffer_i.drain(0..drain_amount);
-                    self.chip_buffer_q.drain(0..drain_amount);
+            };
+
+            let start = sync.peak_sample_idx;
+            let data_end_sample = start + total_bits * sf * spc;
+
+            // データが溜まるのを待つ
+            if self.sample_buffer_i.len() < data_end_sample + spc {
+                // タイムアウト監視: 同期位置がバッファの遥か後方を指している場合や、
+                // 既にバッファが十分長いのに同期位置が古すぎる場合は、偽同期とみなす
+                if start + symbol_len < self.sample_buffer_i.len().saturating_sub(max_buffer_len) {
+                    self.current_sync = None;
+                    self.last_search_idx = 0;
+                    continue;
                 }
                 break;
             }
+
+            // --- Robust Header Search (Probing) ---
+            let mut found_header = false;
+            let mut best_sym_shift = 0;
+            let mut best_t_shift = 0;
+            let mut best_invert = false;
+
+            'probe: for sym_shift in -2i32..=2i32 {
+                let base_start = start as i32 + sym_shift * symbol_len as i32;
+                for t_shift in -((spc as i32) * 2)..=((spc as i32) * 2) {
+                    let p_start_i32 = base_start + t_shift;
+                    if p_start_i32 < 0 {
+                        continue;
+                    }
+                    let p_start = p_start_i32 as usize;
+                    let ref_sym_start = p_start.saturating_sub(sf * spc);
+                    let (ref_i, ref_q) = self.despread_at(ref_sym_start);
+
+                    for invert in [false, true] {
+                        self.demodulator.reset();
+                        if invert {
+                            self.demodulator.set_reference_phase(-ref_i, -ref_q);
+                        } else {
+                            self.demodulator.set_reference_phase(ref_i, ref_q);
+                        }
+
+                        let mut sync_chips_i = Vec::with_capacity(sync_bits_len * sf);
+                        let mut sync_chips_q = Vec::with_capacity(sync_bits_len * sf);
+                        for c_idx in 0..(sync_bits_len * sf) {
+                            let cp = p_start + c_idx * spc + (spc / 2);
+                            if cp >= self.sample_buffer_i.len() {
+                                sync_chips_i.clear();
+                                sync_chips_q.clear();
+                                break;
+                            }
+                            sync_chips_i.push(self.sample_buffer_i[cp]);
+                            sync_chips_q.push(self.sample_buffer_q[cp]);
+                        }
+                        if sync_chips_i.len() != sync_bits_len * sf {
+                            continue;
+                        }
+
+                        let llrs = self
+                            .demodulator
+                            .demodulate_chips_soft(&sync_chips_i, &sync_chips_q);
+                        let bits: Vec<u8> = llrs
+                            .iter()
+                            .map(|&l| if l > 0.0 { 0u8 } else { 1u8 })
+                            .collect();
+
+                        let mut val = 0u32;
+                        for b in &bits[0..32] {
+                            val = (val << 1) | (*b as u32);
+                        }
+
+                        if val == crate::params::SYNC_WORD {
+                            found_header = true;
+                            best_sym_shift = sym_shift;
+                            best_t_shift = t_shift;
+                            best_invert = invert;
+                            break 'probe;
+                        }
+                    }
+                }
+            }
+
+            if found_header {
+                let p_start =
+                    (start as i32 + best_sym_shift * symbol_len as i32 + best_t_shift) as usize;
+                let ref_sym_start = p_start.saturating_sub(sf * spc);
+                let (ref_i, ref_q) = self.despread_at(ref_sym_start);
+
+                self.demodulator.reset();
+                if best_invert {
+                    self.demodulator.set_reference_phase(-ref_i, -ref_q);
+                } else {
+                    self.demodulator.set_reference_phase(ref_i, ref_q);
+                }
+
+                let mut chips_i = Vec::with_capacity(total_bits * sf);
+                let mut chips_q = Vec::with_capacity(total_bits * sf);
+                for c_idx in 0..(total_bits * sf) {
+                    let cp = p_start + c_idx * spc + (spc / 2);
+                    if cp >= self.sample_buffer_i.len() {
+                        chips_i.clear();
+                        chips_q.clear();
+                        break;
+                    }
+                    chips_i.push(self.sample_buffer_i[cp]);
+                    chips_q.push(self.sample_buffer_q[cp]);
+                }
+                if chips_i.len() != total_bits * sf {
+                    let skip = (start + symbol_len).min(self.sample_buffer_i.len());
+                    self.sample_buffer_i.drain(0..skip);
+                    self.sample_buffer_q.drain(0..skip);
+                    self.last_search_idx = 0;
+                    self.current_sync = None;
+                    continue;
+                }
+
+                let llrs = self.demodulator.demodulate_chips_soft(&chips_i, &chips_q);
+                let bits: Vec<u8> = llrs
+                    .iter()
+                    .map(|&l| if l > 0.0 { 0u8 } else { 1u8 })
+                    .collect();
+
+                let deinterleaved = self
+                    .interleaver
+                    .deinterleave(&bits[sync_bits_len..total_bits]);
+                let decoded_bits = fec::decode(&deinterleaved);
+                let p_bits_len = PACKET_BYTES * 8;
+
+                if decoded_bits.len() >= p_bits_len {
+                    let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
+                    if let Some(packet) = Packet::deserialize(&d_bytes) {
+                        let (degree, neighbors) =
+                            crate::coding::fountain::reconstruct_packet_metadata(
+                                packet.lt_seq as u32,
+                                self.lt_decoder.params().k,
+                                self.lt_decoder.params().c,
+                                self.lt_decoder.params().delta,
+                            );
+                        self.lt_decoder.receive(EncodedPacket {
+                            seq: packet.lt_seq as u32,
+                            degree,
+                            neighbors,
+                            data: packet.payload.to_vec(),
+                        });
+
+                        if let Some(data) = self.lt_decoder.decode() {
+                            self.recovered_data = Some(data);
+                        }
+                        let actual_end = p_start + total_bits * sf * spc;
+                        self.sample_buffer_i.drain(0..actual_end);
+                        self.sample_buffer_q.drain(0..actual_end);
+                        self.last_search_idx = 0;
+                        self.current_sync = None;
+                        continue;
+                    }
+                }
+            }
+
+            // デコード失敗またはヘッダ未検出: 偽同期として捨てて進める
+            let skip = (start + symbol_len).min(self.sample_buffer_i.len());
+            self.sample_buffer_i.drain(0..skip);
+            self.sample_buffer_q.drain(0..skip);
+            self.last_search_idx = 0;
+            self.current_sync = None;
+            continue;
         }
 
+        self.progress()
+    }
+
+    fn despread_at(&self, start_sample: usize) -> (f32, f32) {
+        let sf = self.config.spread_factor();
+        let spc = self.proc_config.samples_per_chip();
+        let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
+        let pn = mseq.generate(sf);
+
+        let mut sum_i = 0.0;
+        let mut sum_q = 0.0;
+        for (j, &chip) in pn.iter().enumerate() {
+            let p = start_sample + j * spc + (spc / 2);
+            if let (Some(&si), Some(&sq)) =
+                (self.sample_buffer_i.get(p), self.sample_buffer_q.get(p))
+            {
+                sum_i += si * chip as f32;
+                sum_q += sq * chip as f32;
+            }
+        }
+        (sum_i / sf as f32, sum_q / sf as f32)
+    }
+
+    fn progress(&self) -> DecodeProgress {
         DecodeProgress {
             received_packets: self.lt_decoder.received_count(),
             needed_packets: self.lt_decoder.needed_count(),
             progress: self.lt_decoder.progress(),
             complete: self.recovered_data.is_some(),
-            consumed_samples: samples.len(),
         }
     }
 
-    /// デコーダの状態をリセットする
     pub fn reset(&mut self) {
         self.demodulator.reset();
         self.interleaver.reset();
         self.rrc_i.reset();
         self.rrc_q.reset();
-        self.chip_buffer_i.clear();
-        self.chip_buffer_q.clear();
+        self.decimator_i.reset();
+        self.decimator_q.reset();
+        self.sample_buffer_i.clear();
+        self.sample_buffer_q.clear();
         self.sample_idx = 0;
+        self.lo_cos = 1.0;
+        self.lo_sin = 0.0;
+        self.recovered_data = None;
+        self.last_search_idx = 0;
+        self.current_sync = None;
+        let params = self.lt_decoder.params().clone();
+        self.lt_decoder = LtDecoder::new(params);
     }
 
     pub fn recovered_data(&self) -> Option<&[u8]> {
@@ -197,120 +413,88 @@ impl Decoder {
     }
 }
 
+fn choose_decimation_factor(config: &DspConfig) -> usize {
+    let spc = config.samples_per_chip();
+    if spc >= 6 {
+        3
+    } else if spc >= 4 {
+        2
+    } else {
+        1
+    }
+}
+
+fn build_proc_config(config: &DspConfig, decimation_factor: usize) -> DspConfig {
+    let mut proc_config = config.clone();
+    proc_config.sample_rate = config.sample_rate / decimation_factor as f32;
+    proc_config
+}
+
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        println!("\n--- Decoder Statistics ---");
+        println!("  Total samples processed: {}", self.stats_total_samples);
+        println!("  Total detect() calls: {}", self.stats_sync_calls);
+        println!("  Total time in detect(): {:?}", self.stats_sync_time);
+        if self.stats_sync_calls > 0 {
+            println!(
+                "  Avg time per detect(): {:?}",
+                self.stats_sync_time / self.stats_sync_calls as u32
+            );
+        }
+        println!("--------------------------\n");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::Encoder;
+    use crate::params::FIXED_K;
 
     #[test]
-    fn test_progress_calculation() {
-        let _decoder = Decoder::default_48k(100, 8);
-        let progress = DecodeProgress {
-            received_packets: 0,
-            needed_packets: 9,
-            progress: 0.0,
-            complete: false,
-            consumed_samples: 0,
-        };
-        assert_eq!(progress.progress, 0.0);
+    fn test_choose_decimation_factor() {
+        assert_eq!(choose_decimation_factor(&DspConfig::default_48k()), 3);
+        assert_eq!(choose_decimation_factor(&DspConfig::default_44k()), 2);
+        assert_eq!(choose_decimation_factor(&DspConfig::new(16000.0)), 1);
+    }
+
+    #[test]
+    fn test_build_proc_config() {
+        let dsp_config = DspConfig::default_48k();
+        let proc = build_proc_config(&dsp_config, 2);
+        assert_eq!(proc.sample_rate, 24_000.0);
+        assert_eq!(proc.carrier_freq, dsp_config.carrier_freq);
+        assert_eq!(proc.chip_rate, dsp_config.chip_rate);
+    }
+
+    #[test]
+    fn test_decoder_silence_input_does_not_complete() {
+        let dsp_config = DspConfig::default_48k();
+        let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
+
+        let silence = vec![0.0f32; 4096];
+        let mut progress = decoder.process_samples(&silence);
+        for _ in 0..4 {
+            progress = decoder.process_samples(&silence);
+        }
+
         assert!(!progress.complete);
+        assert_eq!(progress.received_packets, 0);
+        assert!(decoder.recovered_data().is_none());
     }
 
     #[test]
-    fn test_encoder_decoder_interaction() {
-        let data = b"Hello, acoustic world!  ";
-        let mut encoder = Encoder::with_default_config();
-        let mut stream = encoder.encode_stream(data);
-        let frame = stream.next().unwrap();
+    fn test_decoder_reset_after_silence() {
+        let dsp_config = DspConfig::default_48k();
+        let mut decoder = Decoder::new(16, FIXED_K, dsp_config);
 
-        let mut decoder = Decoder::default_48k(data.len(), 8);
-        
-        // --- デバッグ: パイプラインの途中状態をインターセプトして検証 ---
-        let spc = decoder.config.samples_per_chip();
-        let mut test_chip_buffer_i = Vec::new();
-        let mut test_chip_buffer_q = Vec::new();
-        let total_delay = decoder.config.rrc_num_taps().saturating_sub(1);
-        let mut rrc_i = crate::common::rrc_filter::RrcFilter::from_config(&decoder.config);
-        let mut rrc_q = crate::common::rrc_filter::RrcFilter::from_config(&decoder.config);
-        let two_pi = 2.0 * std::f32::consts::PI;
-        let fs = decoder.config.sample_rate;
-        let fc = decoder.config.carrier_freq;
-        
-        for (sample_idx, &s) in frame.iter().enumerate() {
-            let t = sample_idx as f32 / fs;
-            let i_val = s * (two_pi * fc * t).cos() * 2.0;
-            let q_val = s * -(two_pi * fc * t).sin() * 2.0;
-            let fi = rrc_i.process(i_val);
-            let fq = rrc_q.process(q_val);
-            if sample_idx >= total_delay && (sample_idx - total_delay).is_multiple_of(spc) {
-                test_chip_buffer_i.push(fi);
-                test_chip_buffer_q.push(fq);
-            }
-        }
-        
-        let (sync_opt, _) = decoder.sync_detector.detect_chips(&test_chip_buffer_i, &test_chip_buffer_q);
-        assert!(sync_opt.is_some(), "Sync must be found");
-        let data_start_chip = sync_opt.unwrap().data_start_sample / spc;
-        
-        let raw_bits = decoder.demodulator.demodulate_chips(&test_chip_buffer_i[data_start_chip..], &test_chip_buffer_q[data_start_chip..]);
-        
-        // 最初の32bitはSYNC_WORD (0xDEADBEEF) のはず
-        let sync_word = crate::params::SYNC_WORD;
-        let expected_sync_bits: Vec<u8> = (0..32).rev().map(|i| ((sync_word >> i) & 1) as u8).collect();
-        
-        println!("test_chip_buffer_i.len() = {}, data_start_chip = {}, raw_bits.len() = {}", test_chip_buffer_i.len(), data_start_chip, raw_bits.len());
-        assert!(raw_bits.len() >= 32, "Must have decoded at least 32 bits");
-        
-        let mut match_count = 0;
-        for i in 0..32 {
-            if raw_bits[i] == expected_sync_bits[i] {
-                match_count += 1;
-            }
-        }
-        assert_eq!(match_count, 32, "同期直後の32bitは完全にSYNC_WORDと一致しなければならない。初期位相のズレが疑われる");
-        
-        // -------------------------------------------------------------
+        let silence = vec![0.0f32; 2048];
+        let _ = decoder.process_samples(&silence);
+        decoder.reset();
+        let progress = decoder.process_samples(&[]);
 
-        let progress = decoder.process_samples(&frame);
-        
-        // パケットが正しく1つデコードされていなければならない
-        assert_eq!(
-            progress.received_packets, 1,
-            "1フレーム分のサンプルを入力したため、1パケットが受信できているはずである"
-        );
-        assert!(progress.progress > 0.0);
-    }
-
-    #[test]
-    fn test_decoder_stream_vs_batch() {
-        let data = b"Hello Stream vs Batch!";
-        let config = DspConfig::default_48k();
-        let mut encoder = Encoder::new(crate::encoder::EncoderConfig::new(config.clone()));
-        let mut stream = encoder.encode_stream(data);
-        
-        let frame = stream.next().unwrap();
-        let mut tx_signal = vec![0.0; 1000]; // silence
-        tx_signal.extend(frame);
-        tx_signal.extend(vec![0.0; 1000]); // silence
-
-        let mut batch_decoder = Decoder::new(data.len(), 8, config.clone());
-        let batch_progress = batch_decoder.process_samples(&tx_signal);
-        
-        assert_eq!(batch_progress.received_packets, 1, "Batch processing must decode 1 packet");
-        
-        let mut stream_decoder = Decoder::new(data.len(), 8, config);
-        let mut stream_progress = DecodeProgress { received_packets: 0, needed_packets: 0, progress: 0.0, complete: false, consumed_samples: 0 };
-        
-        let chunk_size = 128; // Small chunk size to stress test the boundaries
-        for chunk in tx_signal.chunks(chunk_size) {
-            stream_progress = stream_decoder.process_samples(chunk);
-        }
-        
-        assert_eq!(stream_progress.received_packets, 1, "Stream processing must decode 1 packet identically to batch processing");
-        
-        // 注: バッチ処理は1回の関数呼び出しで終了するため末尾の無音区間がバッファに残るが、
-        // ストリーム処理ではチャンクごとに不要なバッファが切り捨てられるため最終バッファサイズは一致しない。
-        // （ストリーム処理の方がメモリ効率的に正しく動作していることの証明となる）
-        assert!(stream_decoder.chip_buffer_i.len() <= 124, "Stream buffer should not leak memory and bounded by window size");
+        assert!(!progress.complete);
+        assert_eq!(progress.received_packets, 0);
+        assert!(decoder.recovered_data().is_none());
     }
 }

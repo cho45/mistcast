@@ -18,25 +18,18 @@ vi.mock('../pkg/dsp', () => {
     constructor(...args: any[]) {
       hoisted.WasmEncoder(...args);
     }
-    set_data() {}
-    pull_frame() {
-      return new Float32Array(2000);
-    }
-    encode_all() {
-      return new Float32Array(2000);
-    }
+    set_data = vi.fn();
+    get_k = vi.fn(() => 10);
+    pull_frame = vi.fn(() => new Float32Array(2000));
+    encode_all = vi.fn(() => new Float32Array(2000));
   }
   class WasmDecoder {
     constructor(...args: any[]) {
       hoisted.WasmDecoder(...args);
     }
-    process_samples() {
-      return { complete: true, received_packets: 1, needed_packets: 8, progress: 1.0 };
-    }
-    recovered_data() {
-      return new Uint8Array([1, 2, 3]);
-    }
-    reset() {}
+    process_samples = vi.fn(() => ({ complete: true, received_packets: 1, needed_packets: 11, progress: 0.1 }));
+    recovered_data = vi.fn(() => new Uint8Array([1, 2, 3]));
+    reset = vi.fn();
   }
   return {
     default: hoisted.init,
@@ -67,10 +60,10 @@ describe('MistcastBackend', () => {
     } as unknown as MessagePort;
 
     await backend.setAudioOutPort(mockPort);
+    // startEncoder does not return anything in the latest implementation
     await backend.startEncoder(new Uint8Array([65, 66]), 48000);
 
     expect(hoisted.WasmEncoder).toHaveBeenCalledWith(48000);
-    // RecycleTransferSender should have been used to postMessage
     expect(mockPort.postMessage).toHaveBeenCalled();
   });
 
@@ -78,12 +71,14 @@ describe('MistcastBackend', () => {
     const { MistcastBackend } = await import('./worker');
     const backend = new MistcastBackend();
     const onPacket = vi.fn();
+    const onProgress = vi.fn();
 
-    await backend.startDecoder(10, 8, 48000, onPacket);
+    await backend.startDecoder(48000, onPacket, onProgress);
     const result = await backend.processSamples(new Float32Array(128));
 
-    expect(hoisted.WasmDecoder).toHaveBeenCalledWith(10, 8, 48000);
+    expect(hoisted.WasmDecoder).toHaveBeenCalledWith(48000);
     expect(result?.complete).toBe(true);
     expect(onPacket).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
+    expect(onProgress).toHaveBeenCalled();
   });
 });

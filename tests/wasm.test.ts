@@ -3,71 +3,80 @@ import init, { WasmEncoder, WasmDecoder } from '../pkg/dsp';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-// Node.js環境でWASMファイルをロードするためのヘルパー
 async function loadWasm() {
     const wasmPath = path.resolve(__dirname, '../pkg/dsp_bg.wasm');
     const wasmBuffer = fs.readFileSync(wasmPath);
     await init(wasmBuffer);
 }
 
-describe('WASM E2E Integration', () => {
+describe('WASM E2E Integration (Fixed Protocol)', () => {
     beforeAll(async () => {
         await loadWasm();
     });
 
-    it('should encode and decode data through WASM interface', async () => {
-        const data = new TextEncoder().encode("WASM Acoustic Test");
+    it('should encode and decode through fixed K=10 protocol', async () => {
+        const data = new TextEncoder().encode("Hello Acoustic World!");
         const sampleRate = 48000;
         
         const encoder = new WasmEncoder(sampleRate);
-        const samples = encoder.encode_all(data);
+        encoder.set_data(data);
         
-        expect(samples.length).toBeGreaterThan(0);
-
-        const decoder = new WasmDecoder(data.length, 8, sampleRate);
-        
-        // チャンクに分けて処理
-        const chunkSize = 2048;
+        const decoder = new WasmDecoder(sampleRate);
         let complete = false;
         
-        for (let i = 0; i < samples.length; i += chunkSize) {
-            const chunk = samples.slice(i, i + chunkSize);
-            const progress = decoder.process_samples(chunk);
+        for (let i = 0; i < 30; i++) {
+            const frame = encoder.pull_frame();
+            if (!frame) break;
+            
+            const signal = new Float32Array(frame.length + 4800);
+            signal.set(frame);
+            
+            const progress = decoder.process_samples(signal);
             if (progress.complete) {
                 complete = true;
                 break;
             }
         }
 
-        expect(complete).toBe(true);
+        expect(complete, "デコードが完了しませんでした。").toBe(true);
         const recovered = decoder.recovered_data();
         expect(recovered).toBeDefined();
-        expect(new TextDecoder().decode(recovered)).toBe("WASM Acoustic Test");
+        
+        let last = recovered!.length;
+        while(last > 0 && recovered![last-1] === 0) last--;
+        expect(new TextDecoder().decode(recovered!.slice(0, last))).toBe("Hello Acoustic World!");
     });
 });
 
-describe('Performance Benchmark', () => {
+describe('Performance Benchmark (Fixed Protocol)', () => {
     beforeAll(async () => {
         await loadWasm();
     });
 
     it('should measure real-time processing margin at 48kHz', () => {
         const sampleRate = 48000;
-        const data = new TextEncoder().encode("Performance Test Data for Real-time Margin Calculation.");
+        const data = new TextEncoder().encode("Performance Test Data for FIXED_K=10 protocol.");
         const encoder = new WasmEncoder(sampleRate);
-        const samples = encoder.encode_all(data);
+        encoder.set_data(data);
+
+        let allSamples = new Float32Array(0);
+        for (let i = 0; i < 15; i++) {
+            const frame = encoder.pull_frame();
+            if (frame) {
+                const next = new Float32Array(allSamples.length + frame.length + 4800);
+                next.set(allSamples);
+                next.set(frame, allSamples.length);
+                allSamples = next;
+            }
+        }
         
-        const decoder = new WasmDecoder(data.length, 8, sampleRate);
-        
+        const decoder = new WasmDecoder(sampleRate);
         const startTime = performance.now();
-        
-        // 全サンプルを一気に処理（内部でループ処理される）
-        decoder.process_samples(samples);
-        
+        decoder.process_samples(allSamples);
         const endTime = performance.now();
-        const processingTimeMs = endTime - startTime;
-        const audioDurationMs = (samples.length / sampleRate) * 1000;
         
+        const processingTimeMs = endTime - startTime;
+        const audioDurationMs = (allSamples.length / sampleRate) * 1000;
         const margin = audioDurationMs / processingTimeMs;
         
         console.log(`[Benchmark]`);
@@ -75,6 +84,6 @@ describe('Performance Benchmark', () => {
         console.log(`  Processing Time: ${processingTimeMs.toFixed(2)} ms`);
         console.log(`  Real-time Margin: ${margin.toFixed(2)}x`);
         
-        expect(margin).toBeGreaterThan(1.0); // 1.0未満だとリアルタイム処理が不可能
+        expect(margin).toBeGreaterThan(1.0);
     });
 });
