@@ -75,6 +75,10 @@ impl Encoder {
         let interleaved = self.interleaver.interleave(&coded);
         self.modulator.encode_frame(&interleaved)
     }
+
+    pub fn config(&self) -> &EncoderConfig {
+        &self.config
+    }
 }
 
 pub struct EncoderStream<'a> {

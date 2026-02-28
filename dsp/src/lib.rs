@@ -144,6 +144,8 @@ impl WasmDecoder {
 #[wasm_bindgen]
 pub struct WasmEncoder {
     inner: encoder::Encoder,
+    lt_encoder: Option<coding::fountain::LtEncoder>,
+    seq: u32,
 }
 
 #[wasm_bindgen]
@@ -154,19 +156,36 @@ impl WasmEncoder {
         let enc_config = encoder::EncoderConfig::new(config);
         WasmEncoder {
             inner: encoder::Encoder::new(enc_config),
+            lt_encoder: None,
+            seq: 0,
         }
     }
 
-    /// 一度にすべてのサンプルを生成する (簡易版)
+    /// 送信するデータを設定し、LTエンコーダを初期化する
+    pub fn set_data(&mut self, data: &[u8]) {
+        let params = coding::fountain::LtParams::new(self.inner.config().lt_k, params::PAYLOAD_SIZE);
+        self.lt_encoder = Some(coding::fountain::LtEncoder::new(data, params));
+        self.seq = 0;
+    }
+
+    /// 次の音声フレーム（1パケット分）を生成して返す
+    pub fn pull_frame(&mut self) -> Option<Vec<f32>> {
+        let lt_encoder = self.lt_encoder.as_mut()?;
+        let lt_pkt = lt_encoder.next_packet();
+        let samples = self.inner.encode_packet(&lt_pkt, self.seq);
+        self.seq = self.seq.wrapping_add(1);
+        Some(samples)
+    }
+
+    /// (互換性のために残す) 一度にすべてのサンプルを生成する
     pub fn encode_all(&mut self, data: &[u8]) -> Vec<f32> {
-        let mut stream = self.inner.encode_stream(data);
+        self.set_data(data);
         let mut all_samples = Vec::new();
-        // LT符号なので十分な数（K*2程度）を生成
+        // 十分な数（K*2程度）を生成
         for _ in 0..16 {
-            if let Some(frame) = stream.next() {
+            if let Some(frame) = self.pull_frame() {
                 all_samples.extend(frame);
-                // ギャップを追加
-                all_samples.extend(vec![0.0; 4800]);
+                all_samples.extend(vec![0.0; 4800]); // ギャップ
             }
         }
         all_samples

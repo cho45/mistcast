@@ -1,21 +1,37 @@
 # 音響通信DSPシステム (outer-kuiper) Makefile
 
-.PHONY: all test test-verbose build example clean check
+.PHONY: all test test-verbose build example clean check build-wasm dev build-all
 
-all: build
+all: build-all
 
-# ビルド確認
+# Rustビルド確認
 build:
-	cd dsp && cargo build
+        cd dsp && cargo build
+
+# WASMビルド
+build-wasm:
+        npm run build:wasm
+
+# フロントエンドビルド
+build-frontend: build-wasm
+        npm run build
+
+# 開発サーバー起動
+dev:
+        npm run dev
+
+# 全ビルド
+build-all: build build-wasm build-frontend
 
 # 全テスト実行
 test:
-	cd dsp && cargo test
+        cd dsp && cargo test
+        npm test
 
 # 詳細出力でテスト
 test-verbose:
-	cd dsp && cargo test -- --nocapture
-
+        cd dsp && cargo test -- --nocapture
+        npm test -- --reporter=verbose
 # 個別モジュールのテスト
 test-mseq:
 	cd dsp && cargo test msequence::tests
