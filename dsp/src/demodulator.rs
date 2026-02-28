@@ -8,8 +8,8 @@ use crate::DspConfig;
 pub struct Demodulator {
     config: DspConfig,
     mseq: MSequence,
-    /// 前シンボルの判定値 (差動復号用)
-    prev_symbol: f32,
+    /// 前シンボルの判定値 (I, Q) (差動復号用)
+    prev_symbol: (f32, f32),
 }
 
 impl Demodulator {
@@ -18,7 +18,7 @@ impl Demodulator {
         Demodulator {
             config,
             mseq: MSequence::new(mseq_order),
-            prev_symbol: 1.0,
+            prev_symbol: (1.0, 0.0),
         }
     }
 
@@ -27,44 +27,52 @@ impl Demodulator {
     }
 
     /// サンプル列を復調してビット列を返す
-    pub fn demodulate(&mut self, samples: &[f32], sample_offset: usize) -> Vec<u8> {
-        let (i_ch, q_ch) = downconvert(samples, sample_offset, &self.config);
-        let (chips_i, _chips_q) = matched_filter_decimate(&i_ch, &q_ch, &self.config);
+    pub fn demodulate(&mut self, samples: &[f32]) -> Vec<u8> {
+        let (i_ch, q_ch) = downconvert(samples, 0, &self.config);
+        let (chips_i, chips_q) = matched_filter_decimate(&i_ch, &q_ch, &self.config);
+        self.demodulate_chips(&chips_i, &chips_q)
+    }
 
+    /// デシメーション済みのチップ列を復調してビット列を返す
+    pub fn demodulate_chips(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<u8> {
         let chips_per_symbol = self.config.spread_factor();
         let mut bits = Vec::new();
 
         self.mseq.reset();
         let pn: Vec<f32> = self.mseq.generate(chips_per_symbol).iter().map(|&c| c as f32).collect();
 
-        let num_symbols = chips_i.len() / chips_per_symbol;
+        // 復調に使えるシンボル数はI/Qで短い方に合わせる
+        let num_symbols = chips_i.len().min(chips_q.len()) / chips_per_symbol;
         for sym_idx in 0..num_symbols {
             let start = sym_idx * chips_per_symbol;
-            let end = start + chips_per_symbol;
-            if end > chips_i.len() {
-                break;
-            }
 
             // 逆拡散: 受信チップ × PN系列の相関
-            let despread_i: f32 = chips_i[start..end]
-                .iter()
-                .zip(pn.iter())
-                .map(|(&c, &p)| c * p)
-                .sum::<f32>()
-                / chips_per_symbol as f32;
+            let mut despread_i = 0.0;
+            let mut despread_q = 0.0;
+            for i in 0..chips_per_symbol {
+                let p = pn[i];
+                despread_i += chips_i[start + i] * p;
+                despread_q += chips_q[start + i] * p;
+            }
+            despread_i /= chips_per_symbol as f32;
+            despread_q /= chips_per_symbol as f32;
 
-            // DBPSK差動復号: 前シンボルとの積の符号でビット判定
-            let product = despread_i * self.prev_symbol;
-            let bit = if product >= 0.0 { 0u8 } else { 1u8 };
+            // DBPSK差動復号: 前シンボルとの積の実部 I_k * I_{k-1} + Q_k * Q_{k-1}
+            let (prev_i, prev_q) = self.prev_symbol;
+            let dot_product = despread_i * prev_i + despread_q * prev_q;
+            
+            // 実部の符号でビット判定
+            let bit = if dot_product >= 0.0 { 0u8 } else { 1u8 };
             bits.push(bit);
-            self.prev_symbol = despread_i;
+            
+            self.prev_symbol = (despread_i, despread_q);
         }
 
         bits
     }
 
     pub fn reset(&mut self) {
-        self.prev_symbol = 1.0;
+        self.prev_symbol = (1.0, 0.0);
         self.mseq.reset();
     }
 }
@@ -84,29 +92,44 @@ mod tests {
         let config = test_config();
         let input_bits: Vec<u8> = vec![1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0];
         let mut mod_ = Modulator::new(config.clone());
-        let samples = mod_.modulate(&input_bits);
+        let mut samples = mod_.modulate(&input_bits);
+
+        // 送受信のRRCフィルタの遅延（合計 num_taps - 1 サンプル）により、
+        // 最後のシンボルのエネルギーがフィルタ内に残ってしまう。
+        // これを出し切る（フラッシュする）ために遅延分以上の無音サンプルを末尾に追加する。
+        let total_delay = config.rrc_num_taps() - 1;
+        samples.extend(vec![0.0; total_delay + config.samples_per_symbol()]);
 
         let mut demod = Demodulator::new(config);
-        let output_bits = demod.demodulate(&samples, 0);
+        let output_bits = demod.demodulate(&samples);
 
-        // RRC遅延・デシメーション境界で1ビット程度少なくなる場合がある
-        // 入力の90%以上が復調されていれば問題なし
+        // 最初のビットはDBPSKの初期位相（差動符号化の最初の差分）に依存するため、
+        // 実質的なデータビットは遅延を考慮して比較する必要がある。
+        // 現在のRRCフィルタとデシメーションの遅延計算が正しければ、
+        // 最初の1ビット目（あるいは2ビット目）以降は完全に入力と一致しなければならない。
+        
+        let start = 1; // 最初の1ビットは基準シンボルに対する差分
+        let compare_len = input_bits.len() - start;
+        
         assert!(
-            output_bits.len() >= input_bits.len() * 9 / 10,
-            "復調ビット数 {} が入力ビット数 {} の90%以上であること",
+            output_bits.len() >= input_bits.len(),
+            "復調ビット数 {} が入力ビット数 {} 以上であること",
             output_bits.len(), input_bits.len()
         );
 
-        // 最初の2ビットはDBPSK初期位相とRRC遅延のマージン
-        let start = 2;
-        let match_count = input_bits[start..]
-            .iter()
-            .zip(output_bits[start..].iter())
-            .filter(|(&a, &b)| a == b)
-            .count();
-        let total = input_bits.len() - start;
-        let ber = 1.0 - match_count as f32 / total as f32;
-        assert!(ber < 0.1, "ノイズなし時のBERが10%未満であること: BER={:.3}", ber);
+        let mut match_count = 0;
+        for i in 0..compare_len {
+            if input_bits[start + i] == output_bits[start + i] {
+                match_count += 1;
+            } else {
+                println!("Mismatch at index {}: expected {}, got {}", start + i, input_bits[start + i], output_bits[start + i]);
+            }
+        }
+        
+        assert_eq!(
+            match_count, compare_len,
+            "ノイズなしの環境では、遅延補正後の復調ビット列が完全に入力と一致しなければならない"
+        );
     }
 
     #[test]
@@ -117,9 +140,9 @@ mod tests {
         let samples = mod_.modulate(&bits);
 
         let mut demod = Demodulator::new(config);
-        let out1 = demod.demodulate(&samples, 0);
+        let out1 = demod.demodulate(&samples);
         demod.reset();
-        let out2 = demod.demodulate(&samples, 0);
+        let out2 = demod.demodulate(&samples);
         assert_eq!(out1, out2, "リセット後に同じ復調結果が得られること");
     }
 }

@@ -105,6 +105,13 @@ impl Modulator {
         frame.extend(self.modulate(&sync_bits));
         frame.extend(self.modulate(bits));
 
+        // RRCフィルタの遅延（送受信合計 num_taps - 1 サンプル）により、
+        // 最後のチップのエネルギーがフィルタ内に残ってしまう。
+        // デコーダ側が確実に最後のビットを復元できるよう、
+        // 遅延分＋マージン（1シンボル分）の無音サンプルを末尾に付加してフラッシュする。
+        let flush_samples = self.config.rrc_num_taps() - 1 + self.config.samples_per_symbol();
+        frame.extend(vec![0.0; flush_samples]);
+
         frame
     }
 
@@ -189,5 +196,60 @@ mod tests {
         let samples = mod_.modulate(&bits);
         assert!(!samples.is_empty());
         assert!(samples.iter().all(|&s| s.is_finite()));
+    }
+
+    /// DBPSKとDSSS拡散の数学的・論理的正しさを検証する
+    #[test]
+    fn test_math_dbpsk_dsss() {
+        let mut mod_ = make_modulator();
+        let bits = vec![1u8, 0, 1];
+        
+        // 数学的に手計算でDBPSKを検証
+        // 初期 phase = 0
+        // bit=1 -> phase = 0 ^ 1 = 1 -> symbol = -1
+        // bit=0 -> phase = 1 ^ 0 = 1 -> symbol = -1
+        // bit=1 -> phase = 1 ^ 1 = 0 -> symbol = 1
+        let expected_symbols = vec![-1i8, -1i8, 1i8];
+        
+        let sf = mod_.config.spread_factor();
+        let mseq_order = mod_.config.mseq_order;
+        let mut mseq = MSequence::new(mseq_order);
+        
+        let mut expected_chips = Vec::new();
+        for sym in expected_symbols {
+            mseq.reset();
+            let pn = mseq.generate(sf);
+            for chip in pn {
+                expected_chips.push(sym * chip);
+            }
+        }
+        
+        // RRCフィルタとキャリアの数学的モデルを直接検証する
+        let spc = mod_.config.samples_per_chip();
+        let fs = mod_.config.sample_rate;
+        let fc = mod_.config.carrier_freq;
+        let mut rrc = RrcFilter::from_config(&mod_.config);
+        
+        let mut expected_samples = Vec::new();
+        let mut sample_idx = 0;
+        let two_pi = 2.0 * std::f32::consts::PI;
+        
+        for &chip in &expected_chips {
+            for k in 0..spc {
+                let baseband = if k == 0 { chip as f32 } else { 0.0 };
+                let filtered = rrc.process(baseband);
+                let t = sample_idx as f32 / fs;
+                let carrier = (two_pi * fc * t).cos();
+                expected_samples.push(filtered * carrier);
+                sample_idx += 1;
+            }
+        }
+        
+        let actual_samples = mod_.modulate(&bits);
+        
+        assert_eq!(actual_samples.len(), expected_samples.len());
+        for (i, (&a, &e)) in actual_samples.iter().zip(expected_samples.iter()).enumerate() {
+            assert!((a - e).abs() < 1e-5, "Sample {} mismatch: expected {}, got {}", i, e, a);
+        }
     }
 }

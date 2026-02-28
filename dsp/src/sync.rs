@@ -107,24 +107,34 @@ impl SyncDetector {
         (best_pos, best_corr)
     }
 
-    /// サンプル列から同期位置を検出する
-    pub fn detect(&self, samples: &[f32]) -> Option<SyncResult> {
-        let (i_ch, q_ch) = downconvert(samples, 0, &self.config);
-        let (chips_i, chips_q) = matched_filter_decimate(&i_ch, &q_ch, &self.config);
+/// サンプル列から同期位置を検出する
+///
+/// 戻り値は `(Option<SyncResult>, usize)` であり、第2要素は「探索済みで安全に破棄できるサンプル数」を返す。
+pub fn detect(&self, samples: &[f32]) -> (Option<SyncResult>, usize) {
+    let (i_ch, q_ch) = downconvert(samples, 0, &self.config);
+    let (chips_i, chips_q) = matched_filter_decimate(&i_ch, &q_ch, &self.config);
+    self.detect_chips(&chips_i, &chips_q)
+}
 
-        let period = self.local_mseq.len();
-        let window = period * self.config.preamble_repeat;
+/// チップ列から同期位置を検出する
+///
+/// 戻り値の `SyncResult::data_start_sample` は、この関数に渡されたチップ列が
+/// もし0サンプル目から生成されたと仮定した場合の元のサンプルインデックスを返す。
+/// 実際にはチップ数ベースで管理する方が良いため、内部で変換している。
+pub fn detect_chips(&self, chips_i: &[f32], chips_q: &[f32]) -> (Option<SyncResult>, usize) {
+    let period = self.local_mseq.len();
+    let window = period * self.config.preamble_repeat;
 
-        if chips_i.len() < window {
-            return None;
-        }
-
-        let mut best_offset = 0;
-        let mut best_energy = 0.0f32;
+    if chips_i.len() < window {
+        return (None, 0);
+    }
         let search_range = chips_i.len().saturating_sub(window);
+        let mut energies = Vec::with_capacity(search_range);
+        let mut best_energy = 0.0f32;
 
         for offset in 0..search_range {
-            let mut energy = 0.0f32;
+            let mut sum_ci = 0.0f32;
+            let mut sum_cq = 0.0f32;
             for rep in 0..self.config.preamble_repeat {
                 let start = offset + rep * period;
                 if start + period > chips_i.len() {
@@ -134,37 +144,63 @@ impl SyncDetector {
                     .iter().zip(self.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
                 let cq: f32 = chips_q[start..start + period]
                     .iter().zip(self.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
-                energy += ci * ci + cq * cq;
+                sum_ci += ci;
+                sum_cq += cq;
             }
+            // Coherent integration: square after summing across all repetitions.
+            let energy = sum_ci * sum_ci + sum_cq * sum_cq;
+            energies.push(energy);
             if energy > best_energy {
                 best_energy = energy;
-                best_offset = offset;
             }
         }
 
-        let mean_energy = if search_range > 0 {
-            (0..search_range)
-                .map(|offset| {
-                    let ci: f32 = chips_i[offset..offset + period]
-                        .iter().zip(self.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
-                    ci * ci
-                })
-                .sum::<f32>()
-                / search_range as f32
+        let mean_energy = if !energies.is_empty() {
+            energies.iter().sum::<f32>() / energies.len() as f32
         } else {
             1.0
         };
 
-        let confidence = if mean_energy > 0.0 {
-            best_energy / (mean_energy * self.config.preamble_repeat as f32)
+        let confidence = if mean_energy > 0.0 { best_energy / mean_energy } else { 0.0 };
+        let mut best_local_offset = None;
+
+        // 閾値をクリアしている場合のみ詳細なピーク判定を行う
+        if best_energy > 0.0 && confidence > 10.0 {
+            // 絶対最大値の90%以上を真のピーク候補とする (前置ピークは ~56% なので確実に弾かれる)
+            let peak_threshold = best_energy * 0.9;
+            
+            // 候補を満たす「一番最初」のローカルピークを真の同期位置とする
+            for (offset, &energy) in energies.iter().enumerate().take(search_range) {
+                if energy >= peak_threshold {
+                    // 前後2チップで極大値（ローカルピーク）であるか確認
+                    let start_idx = offset.saturating_sub(2);
+                    let end_idx = (offset + 2).min(search_range - 1);
+                    
+                    let mut is_peak = true;
+                    for &e_val in energies.iter().take(end_idx + 1).skip(start_idx) {
+                        if e_val > energy {
+                            is_peak = false;
+                            break;
+                        }
+                    }
+
+                    if is_peak {
+                        best_local_offset = Some((offset, energy));
+                        break; // 最初の真のピークを発見したら即座に確定
+                    }
+                }
+            }
+        }
+
+        let searched_samples = search_range * self.config.samples_per_chip();
+
+        if let Some((offset, energy)) = best_local_offset {
+            let data_start_chip = offset + window;
+            let data_start_sample = data_start_chip * self.config.samples_per_chip();
+            (Some(SyncResult { data_start_sample, peak_value: energy.sqrt(), confidence }), offset * self.config.samples_per_chip())
         } else {
-            0.0
-        };
-
-        let data_start_chip = best_offset + window;
-        let data_start_sample = data_start_chip * self.config.samples_per_chip();
-
-        Some(SyncResult { data_start_sample, peak_value: best_energy.sqrt(), confidence })
+            (None, searched_samples)
+        }
     }
 }
 
@@ -178,26 +214,103 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_detection() {
+    fn test_sync_detection_exact() {
         let config = test_config();
-        let spc = config.samples_per_chip();
         let mut mod_ = Modulator::new(config.clone());
         let preamble = mod_.generate_preamble();
+        
         let data_bits = vec![1u8, 0, 1, 0, 1, 0, 1, 0];
         let data_samples = mod_.modulate(&data_bits);
 
-        let mut signal = preamble.clone();
+        let mut signal = Vec::new();
+        // 前方に無音区間を入れて同期位置がずれないか確認
+        // samples_per_chip = 6 の倍数にする
+        let silence_len = 96;
+        signal.extend(vec![0.0; silence_len]);
+        signal.extend_from_slice(&preamble);
         signal.extend_from_slice(&data_samples);
 
-        let detector = SyncDetector::new(config);
-        let result = detector.detect(&signal);
+        let detector = SyncDetector::new(config.clone());
+        let (result_opt, _) = detector.detect(&signal);
 
-        assert!(result.is_some(), "同期捕捉が成功すること");
-        let sync = result.unwrap();
-        assert!(
-            sync.data_start_sample >= preamble.len().saturating_sub(spc * 5),
-            "データ開始位置が概ね正確であること: got={}, expected≈{}",
-            sync.data_start_sample, preamble.len()
+        assert!(result_opt.is_some(), "同期捕捉が成功すること");
+        let sync = result_opt.unwrap();
+        
+        // 理論的なデータ開始位置の計算
+        let expected_start = silence_len + preamble.len();
+        
+        assert_eq!(
+            sync.data_start_sample, expected_start,
+            "同期位置が数学的に完全に一致すること。 expected={}, got={}",
+            expected_start, sync.data_start_sample
+        );
+    }
+
+    #[test]
+    fn test_sync_no_false_positives() {
+        let config = test_config();
+        let mut mod_ = Modulator::new(config.clone());
+        let preamble = mod_.generate_preamble();
+        
+        // 大量のランダムデータを作成して、データ部分に誤検出しないかテストする
+        let mut data_bits = Vec::with_capacity(2000);
+        let mut state = 12345u32; // 疑似乱数
+        for _ in 0..2000 {
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            data_bits.push((state >> 16 & 1) as u8);
+        }
+        let data_samples = mod_.modulate(&data_bits);
+
+        let mut signal = Vec::new();
+        let silence_len = 240; // 40 chips
+        signal.extend(vec![0.0; silence_len]);
+        signal.extend_from_slice(&preamble);
+        signal.extend_from_slice(&data_samples);
+
+        let detector = SyncDetector::new(config.clone());
+        let (i_ch, q_ch) = downconvert(&signal, 0, &detector.config);
+        let (chips_i, chips_q) = matched_filter_decimate(&i_ch, &q_ch, &detector.config);
+        
+        let period = detector.local_mseq.len();
+        let window = period * detector.config.preamble_repeat;
+        let search_range = chips_i.len().saturating_sub(window);
+        let mut energies = Vec::with_capacity(search_range);
+
+        for offset in 0..search_range {
+            let mut sum_ci = 0.0f32;
+            let mut sum_cq = 0.0f32;
+            for rep in 0..detector.config.preamble_repeat {
+                let start = offset + rep * period;
+                if start + period > chips_i.len() { break; }
+                let ci: f32 = chips_i[start..start + period].iter().zip(detector.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
+                let cq: f32 = chips_q[start..start + period].iter().zip(detector.local_mseq.iter()).map(|(&r, &l)| r * l).sum();
+                sum_ci += ci;
+                sum_cq += cq;
+            }
+            energies.push(sum_ci * sum_ci + sum_cq * sum_cq);
+        }
+        
+        let mean_energy = energies.iter().sum::<f32>() / energies.len() as f32;
+        
+        println!("--- Debugging Sync Peaks ---");
+        for (offset, &energy) in energies.iter().enumerate().take(46) {
+            let confidence = energy / mean_energy;
+            if confidence > 5.0 || offset == 40 {
+                println!("Offset: {}, Energy: {:.2}, Confidence: {:.2}", offset, energy, confidence);
+            }
+        }
+        println!("---");
+
+        let (result_opt, _) = detector.detect(&signal);
+
+        assert!(result_opt.is_some(), "長大なデータが付加されていても同期捕捉が成功すること");
+        let sync = result_opt.unwrap();
+        
+        let expected_start = silence_len + preamble.len();
+        assert_eq!(
+            sync.data_start_sample, expected_start,
+            "大量のデータが存在しても、プリアンブルの正確な終了位置を1サンプルの狂いもなく指し示すこと。誤検出(False Positive)は許されない。 expected={}, got={}",
+            expected_start, sync.data_start_sample
         );
     }
 

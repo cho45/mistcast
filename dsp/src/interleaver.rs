@@ -61,6 +61,10 @@ impl BlockInterleaver {
         matrix
     }
 
+    pub fn reset(&mut self) {
+        // 現在は状態を持たないため何もしない
+    }
+
     pub fn block_size(&self) -> usize {
         self.rows * self.cols
     }
@@ -110,8 +114,8 @@ mod tests {
         let mut interleaved = il.interleave(&input);
 
         // 連続4ビットのバーストエラー (位置0〜3を反転)
-        for i in 0..rows {
-            interleaved[i] = 0;
+        for item in interleaved.iter_mut().take(rows) {
+            *item = 0;
         }
 
         let recovered = il.deinterleave(&interleaved);

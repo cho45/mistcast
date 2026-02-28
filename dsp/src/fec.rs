@@ -73,7 +73,7 @@ pub fn encode(bits: &[u8]) -> Vec<u8> {
 /// 符号化ビット列を復号する。入力の約半分長のビット列を返す。
 /// テールビットを考慮する。
 pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
-    assert!(coded_bits.len() % 2 == 0, "符号化ビット列は偶数長であること");
+    assert!(coded_bits.len().is_multiple_of(2), "符号化ビット列は偶数長であること");
     let num_symbols = coded_bits.len() / 2;
 
     // トレリス: path_metric[state] = 累積ハミング距離
@@ -92,8 +92,8 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
         let mut survivor = vec![0u8; NUM_STATES];
 
         // 各状態への遷移を評価
-        for prev_state in 0..NUM_STATES {
-            if path_metrics[prev_state] == INF {
+        for (prev_state, &metric) in path_metrics.iter().enumerate().take(NUM_STATES) {
+            if metric == INF {
                 continue;
             }
             for bit in 0u8..2 {
@@ -101,7 +101,7 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
                 // ハミング距離
                 let branch_metric = (v1 ^ r0) as u32 + (v2 ^ r1) as u32;
                 let ns = next_state(prev_state as u8, bit) as usize;
-                let total = path_metrics[prev_state] + branch_metric;
+                let total = metric + branch_metric;
                 if total < new_metrics[ns] {
                     new_metrics[ns] = total;
                     survivor[ns] = prev_state as u8;

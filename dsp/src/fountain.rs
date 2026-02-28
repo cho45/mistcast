@@ -54,12 +54,12 @@ fn robust_soliton_degree(seq: u32, k: usize, c: f32, delta: f32) -> usize {
     let r = c * (k as f32 / delta).ln() * (k as f32).sqrt();
     let mut tau = vec![0.0f32; k + 1];
     tau[0] = 0.0;
-    for d in 1..=k {
+    for (d, t_val) in tau.iter_mut().enumerate().take(k + 1).skip(1) {
         if d == 1 {
-            tau[d] = r / k as f32;
+            *t_val = r / k as f32;
         } else {
             let kdr = (k as f32 / (r * d as f32)).max(0.0);
-            tau[d] = if kdr > 1.0 || d == (k as f32 / r).floor() as usize {
+            *t_val = if kdr > 1.0 || d == (k as f32 / r).floor() as usize {
                 r / (d as f32 * k as f32)
             } else {
                 0.0
@@ -70,14 +70,14 @@ fn robust_soliton_degree(seq: u32, k: usize, c: f32, delta: f32) -> usize {
     // ロバストソリトン: rho(d) + tau(d)
     let mut cdf = vec![0.0f32; k + 1];
     let mut sum = 0.0f32;
-    for d in 1..=k {
+    for (d, c_val) in cdf.iter_mut().enumerate().take(k + 1).skip(1) {
         let rho = if d == 1 {
             1.0 / k as f32
         } else {
             1.0 / (d as f32 * (d as f32 - 1.0))
         };
         sum += rho + tau[d];
-        cdf[d] = sum;
+        *c_val = sum;
     }
     // 正規化 (Zが0にならないように保護)
     let z = if sum > 0.0 { sum } else { 1.0 };
@@ -86,8 +86,8 @@ fn robust_soliton_degree(seq: u32, k: usize, c: f32, delta: f32) -> usize {
     // 次数をサンプリング
     let u = rng.next_f32();
     let mut degree = 1; // デフォルト次数1
-    for d in 1..=k {
-        if u <= cdf[d] {
+    for (d, &c_val) in cdf.iter().enumerate().take(k + 1).skip(1) {
+        if u <= c_val {
             degree = d;
             break;
         }
@@ -158,8 +158,7 @@ impl LtEncoder {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
 
-        let degree = robust_soliton_degree(seq, self.params.k, self.params.c, self.params.delta);
-        let neighbors = select_neighbors(seq, degree, self.params.k);
+        let (degree, neighbors) = reconstruct_packet_metadata(seq, self.params.k, self.params.c, self.params.delta);
 
         let bs = self.params.block_size;
         let mut data = vec![0u8; bs];
@@ -229,8 +228,8 @@ impl LtDecoder {
             for (neighbors, data) in &packets {
                 if neighbors.len() == 1 {
                     let idx = neighbors[0];
-                    if !recovered.contains_key(&idx) {
-                        recovered.insert(idx, data.clone());
+                    if let std::collections::hash_map::Entry::Vacant(e) = recovered.entry(idx) {
+                        e.insert(data.clone());
                         any_degree1 = true;
                     }
                 }
@@ -274,7 +273,7 @@ impl LtDecoder {
         }
 
         let n_packets = self.received.len();
-        let row_words = (k + 7) / 8;
+        let row_words = k.div_ceil(8);
         let mut matrix: Vec<Vec<u8>> = vec![vec![0u8; row_words]; n_packets];
         let mut rhs: Vec<Vec<u8>> = Vec::with_capacity(n_packets);
 
@@ -290,8 +289,8 @@ impl LtDecoder {
 
         for col in 0..k {
             let mut found = None;
-            for row in next_row..n_packets {
-                if (matrix[row][col / 8] >> (col % 8)) & 1 == 1 {
+            for (row, m_row) in matrix.iter().enumerate().take(n_packets).skip(next_row) {
+                if (m_row[col / 8] >> (col % 8)) & 1 == 1 {
                     found = Some(row);
                     break;
                 }
@@ -304,6 +303,7 @@ impl LtDecoder {
                 let pivot = next_row;
                 pivot_row_for_col[col] = Some(pivot);
 
+                #[allow(clippy::needless_range_loop)]
                 for row in 0..n_packets {
                     if row != pivot && (matrix[row][col / 8] >> (col % 8)) & 1 == 1 {
                         for w in 0..row_words {
@@ -321,8 +321,8 @@ impl LtDecoder {
         }
 
         let mut solution: Vec<Option<Vec<u8>>> = vec![None; k];
-        for col in 0..k {
-            if let Some(row) = pivot_row_for_col[col] {
+        for (col, pivot_row_opt) in pivot_row_for_col.iter().enumerate().take(k) {
+            if let Some(row) = *pivot_row_opt {
                 let mut bit_count = 0;
                 for c in 0..k {
                     if (matrix[row][c / 8] >> (c % 8)) & 1 == 1 {
@@ -330,7 +330,8 @@ impl LtDecoder {
                     }
                 }
                 if bit_count == 1 {
-                    solution[col] = Some(rhs[row].clone());
+                    let solved_data: Vec<u8> = rhs[row].clone();
+                    solution[col] = Some(solved_data);
                 }
             }
         }
@@ -340,17 +341,24 @@ impl LtDecoder {
         }
 
         let mut result = Vec::with_capacity(k * bs);
-        for i in 0..k {
-            result.extend_from_slice(solution[i].as_ref()?);
+        for s_opt in solution.iter().take(k) {
+            result.extend_from_slice(s_opt.as_ref()?);
         }
         Some(result)
     }
 }
 
 pub fn reconstruct_packet_metadata(seq: u32, k: usize, c: f32, delta: f32) -> (usize, Vec<usize>) {
-    let degree = robust_soliton_degree(seq, k, c, delta);
-    let neighbors = select_neighbors(seq, degree, k);
-    (degree, neighbors)
+    // システマティックLT符号:
+    // 最初のK個のパケットは、ソースブロックをそのまま（次数1）送信する。
+    // これにより、ノイズがない環境では最小のKパケットで確実にデコードが可能になる。
+    if (seq as usize) < k {
+        (1, vec![seq as usize])
+    } else {
+        let degree = robust_soliton_degree(seq, k, c, delta);
+        let neighbors = select_neighbors(seq, degree, k);
+        (degree, neighbors)
+    }
 }
 
 #[cfg(test)]
@@ -423,5 +431,22 @@ mod tests {
             assert!(decoder.progress() > 0.0);
         }
         assert_eq!(decoder.progress(), 1.0);
+    }
+
+    #[test]
+    fn test_k8_solvability_with_15_packets() {
+        // E2Eテストと同じパラメータ: K=8, BS=16
+        let data = b"Acoustic E2E Noise Test Data.";
+        let params = LtParams::new(8, 16);
+        let mut encoder = LtEncoder::new(data, params.clone());
+        let mut decoder = LtDecoder::new(params);
+
+        // 最初の15パケットでフルランクになる（デコード成功する）か検証
+        for _ in 0..15 {
+            decoder.receive(encoder.next_packet());
+        }
+
+        let result = decoder.decode();
+        assert!(result.is_some(), "K=8 に対して最初の15パケットで数学的にフルランクになり復元できなければならない");
     }
 }

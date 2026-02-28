@@ -25,7 +25,9 @@ pub struct EncoderConfig {
 
 impl EncoderConfig {
     pub fn new(dsp: DspConfig) -> Self {
-        let fec_bits = (PACKET_BYTES + 6) * 2 * 8;
+        // PACKET_BYTES * 8 (bits) + 6 (tail bits)
+        let raw_bits = PACKET_BYTES * 8 + 6;
+        let fec_bits = raw_bits * 2; // 畳み込み符号 (r=1/2) なので2倍
         EncoderConfig {
             lt_k: 8,
             il_rows: 16,
