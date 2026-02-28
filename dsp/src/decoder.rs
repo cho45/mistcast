@@ -14,11 +14,18 @@ use crate::{
     phy::sync::{SyncDetector, SyncResult},
     DspConfig,
 };
+use num_complex::Complex32;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::{f32x4, v128, v128_store};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+
+const TRACKING_TIMING_LOOP_GAIN: f32 = 0.18;
+const TRACKING_PHASE_LOOP_GAIN: f32 = 0.04;
+const TRACKING_TIMING_LIMIT_CHIP: f32 = 0.5;
+const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
+const TRACKING_PHASE_STEP_CLAMP: f32 = 0.15;
 
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
@@ -272,39 +279,20 @@ impl Decoder {
                 let ref_sym_start = p_start.saturating_sub(sf * spc);
                 let (ref_i, ref_q) = self.despread_at(ref_sym_start);
 
-                self.demodulator.reset();
-                if best_invert {
-                    self.demodulator.set_reference_phase(-ref_i, -ref_q);
+                let initial_ref = if best_invert {
+                    Complex32::new(-ref_i, -ref_q)
                 } else {
-                    self.demodulator.set_reference_phase(ref_i, ref_q);
-                }
-
-                let mut chips_i = Vec::with_capacity(total_bits * sf);
-                let mut chips_q = Vec::with_capacity(total_bits * sf);
-                for c_idx in 0..(total_bits * sf) {
-                    let cp = p_start + c_idx * spc + (spc / 2);
-                    if cp >= self.sample_buffer_i.len() {
-                        chips_i.clear();
-                        chips_q.clear();
-                        break;
-                    }
-                    chips_i.push(self.sample_buffer_i[cp]);
-                    chips_q.push(self.sample_buffer_q[cp]);
-                }
-                if chips_i.len() != total_bits * sf {
+                    Complex32::new(ref_i, ref_q)
+                };
+                let Some(bits) = self.decode_bits_with_tracking(p_start, total_bits, initial_ref)
+                else {
                     let skip = (start + symbol_len).min(self.sample_buffer_i.len());
                     self.sample_buffer_i.drain(0..skip);
                     self.sample_buffer_q.drain(0..skip);
                     self.last_search_idx = 0;
                     self.current_sync = None;
                     continue;
-                }
-
-                let llrs = self.demodulator.demodulate_chips_soft(&chips_i, &chips_q);
-                let bits: Vec<u8> = llrs
-                    .iter()
-                    .map(|&l| if l > 0.0 { 0u8 } else { 1u8 })
-                    .collect();
+                };
                 let p_bits_len = PACKET_BYTES * 8;
                 let mut _valid_packet_count = 0usize;
                 let payload_bits = &bits[sync_bits_len..total_bits];
@@ -404,6 +392,99 @@ impl Decoder {
             }
         }
         (sum_i / sf as f32, sum_q / sf as f32)
+    }
+
+    fn despread_symbol_with_timing(
+        &self,
+        symbol_start: usize,
+        pn: &[f32],
+        timing_offset: f32,
+        sample_shift: f32,
+    ) -> Option<Complex32> {
+        let spc = self.proc_config.samples_per_chip().max(1);
+        let shift = (timing_offset + sample_shift).round() as isize;
+        let mut sum_i = 0.0f32;
+        let mut sum_q = 0.0f32;
+        for (chip_idx, &pn_val) in pn.iter().enumerate() {
+            let p = symbol_start as isize + (chip_idx * spc + (spc / 2)) as isize + shift;
+            if p < 0 {
+                return None;
+            }
+            let p = p as usize;
+            let si = *self.sample_buffer_i.get(p)?;
+            let sq = *self.sample_buffer_q.get(p)?;
+            sum_i += si * pn_val;
+            sum_q += sq * pn_val;
+        }
+        let inv_sf = 1.0f32 / pn.len() as f32;
+        Some(Complex32::new(sum_i * inv_sf, sum_q * inv_sf))
+    }
+
+    fn decode_bits_with_tracking(
+        &self,
+        start_sample: usize,
+        num_symbols: usize,
+        initial_phase_ref: Complex32,
+    ) -> Option<Vec<u8>> {
+        let sf = self.config.spread_factor();
+        let spc = self.proc_config.samples_per_chip().max(1);
+        let symbol_len = sf * spc;
+        let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
+        let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
+
+        let mut phase_ref = if initial_phase_ref.norm_sqr() > 1e-8 {
+            initial_phase_ref / initial_phase_ref.norm()
+        } else {
+            Complex32::new(1.0, 0.0)
+        };
+        let mut prev_symbol = phase_ref;
+        let mut timing_offset = 0.0f32;
+        let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
+        let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
+        let mut bits = Vec::with_capacity(num_symbols);
+
+        for s_idx in 0..num_symbols {
+            let symbol_start = start_sample + s_idx * symbol_len;
+            let on = self.despread_symbol_with_timing(symbol_start, &pn, timing_offset, 0.0)?;
+            let early = self.despread_symbol_with_timing(
+                symbol_start,
+                &pn,
+                timing_offset,
+                -early_late_delta,
+            )?;
+            let late = self.despread_symbol_with_timing(
+                symbol_start,
+                &pn,
+                timing_offset,
+                early_late_delta,
+            )?;
+
+            let on_rot = on * phase_ref.conj();
+            let llr = on_rot.re * prev_symbol.re + on_rot.im * prev_symbol.im;
+            bits.push(if llr > 0.0 { 0 } else { 1 });
+
+            // Decision-directed phase tracking: ±1 data成分を取り除いて残留位相誤差のみを抽出する。
+            let diff = on_rot * prev_symbol.conj();
+            let dphi = phase_step_from_diff(diff);
+            let (sin_dphi, cos_dphi) = dphi.sin_cos();
+            phase_ref *= Complex32::new(cos_dphi, sin_dphi);
+            let phase_norm = phase_ref.norm().max(1e-6);
+            phase_ref /= phase_norm;
+
+            // Early/Late timing tracking
+            let early_mag = early.norm();
+            let late_mag = late.norm();
+            let timing_err = timing_error_from_early_late(early_mag, late_mag);
+            timing_offset = (timing_offset + TRACKING_TIMING_LOOP_GAIN * timing_err)
+                .clamp(-timing_limit, timing_limit);
+
+            let on_norm = on_rot.norm();
+            if on_norm > 1e-4 {
+                prev_symbol = on_rot / on_norm;
+            }
+        }
+
+        Some(bits)
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -541,6 +622,20 @@ impl Decoder {
     }
 }
 
+#[inline]
+fn timing_error_from_early_late(early_mag: f32, late_mag: f32) -> f32 {
+    (late_mag - early_mag) / (late_mag + early_mag + 1e-6)
+}
+
+#[inline]
+fn phase_step_from_diff(diff: Complex32) -> f32 {
+    let decision_sign = if diff.re >= 0.0 { 1.0 } else { -1.0 };
+    let diff_data_removed = diff * decision_sign;
+    let phase_err = diff_data_removed.im / (diff_data_removed.re.abs() + 1e-6);
+    (TRACKING_PHASE_LOOP_GAIN * phase_err)
+        .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
+}
+
 fn choose_decimation_factor(config: &DspConfig) -> usize {
     let spc = config.samples_per_chip();
     if spc >= 6 {
@@ -578,6 +673,10 @@ impl Drop for Decoder {
 mod tests {
     use super::*;
     use crate::params::FIXED_K;
+    use crate::{
+        encoder::{Encoder, EncoderConfig},
+        DspConfig,
+    };
 
     #[test]
     fn test_choose_decimation_factor() {
@@ -624,5 +723,111 @@ mod tests {
         assert!(!progress.complete);
         assert_eq!(progress.received_packets, 0);
         assert!(decoder.recovered_data().is_none());
+    }
+
+    fn build_test_signal(data: &[u8], k: usize, frames: usize, gap_samples: usize) -> Vec<f32> {
+        let mut enc_cfg = EncoderConfig::new(DspConfig::default_48k());
+        enc_cfg.fountain_k = k;
+        let mut encoder = Encoder::new(enc_cfg);
+        let mut stream = encoder.encode_stream(data);
+
+        let mut signal = Vec::new();
+        for _ in 0..frames {
+            if let Some(frame) = stream.next() {
+                signal.extend_from_slice(&frame);
+                signal.extend(std::iter::repeat_n(0.0f32, gap_samples));
+            }
+        }
+        signal
+    }
+
+    fn decode_signal(data: &[u8], k: usize, config: DspConfig, signal: &[f32]) -> Option<Vec<u8>> {
+        let mut decoder = Decoder::new(data.len(), k, config);
+        for chunk in signal.chunks(2048) {
+            let progress = decoder.process_samples(chunk);
+            if progress.complete {
+                return decoder.recovered_data().map(|v| v.to_vec());
+            }
+        }
+        decoder.recovered_data().map(|v| v.to_vec())
+    }
+
+    fn apply_clock_drift_ppm(input: &[f32], ppm: f32) -> Vec<f32> {
+        if input.is_empty() || ppm.abs() < 1.0 {
+            return input.to_vec();
+        }
+        let period = (1_000_000.0 / ppm.abs()).round() as usize;
+        if period < 2 {
+            return input.to_vec();
+        }
+
+        if ppm > 0.0 {
+            // 正のppm: 受信側クロックが遅い想定 -> 波形がわずかに伸びる（サンプル重複）
+            let mut out = Vec::with_capacity(input.len() + input.len() / period + 8);
+            for (i, &s) in input.iter().enumerate() {
+                out.push(s);
+                if (i + 1) % period == 0 {
+                    out.push(s);
+                }
+            }
+            out
+        } else {
+            // 負のppm: 受信側クロックが速い想定 -> 波形がわずかに縮む（サンプル間引き）
+            let mut out = Vec::with_capacity(input.len().saturating_sub(input.len() / period));
+            for (i, &s) in input.iter().enumerate() {
+                if (i + 1) % period == 0 {
+                    continue;
+                }
+                out.push(s);
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn test_decoder_tracking_tolerates_clock_drift_ppm() {
+        let data = b"tracking timing drift payload";
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let signal = build_test_signal(data, k, 6, 64);
+        // 実オーディオI/Fで起きるオーダー(100ppm前後)のクロックずれを模擬。
+        let drifted = apply_clock_drift_ppm(&signal, 120.0);
+        let recovered = decode_signal(data, k, DspConfig::default_48k(), &drifted)
+            .expect("decoder should recover under realistic clock drift");
+        assert_eq!(&recovered[..data.len()], data);
+    }
+
+    #[test]
+    fn test_decoder_tracking_tolerates_carrier_offset() {
+        let data = b"tracking carrier offset payload";
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let signal = build_test_signal(data, k, 3, 64);
+
+        let mut rx_cfg = DspConfig::default_48k();
+        // 受信LOずれを模擬: 音響リンクで現実的な小さなCFO。
+        rx_cfg.carrier_freq += 5.0;
+
+        let recovered = decode_signal(data, k, rx_cfg, &signal)
+            .expect("decoder should recover under mild carrier offset");
+        assert_eq!(&recovered[..data.len()], data);
+    }
+
+    #[test]
+    fn test_tracking_timing_error_sign() {
+        let pos = timing_error_from_early_late(0.6, 1.2);
+        let neg = timing_error_from_early_late(1.2, 0.6);
+        let zero = timing_error_from_early_late(1.0, 1.0);
+        assert!(pos > 0.0);
+        assert!(neg < 0.0);
+        assert!(zero.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_tracking_phase_step_sign_and_clamp() {
+        let p = phase_step_from_diff(Complex32::new(0.8, 0.8));
+        let n = phase_step_from_diff(Complex32::new(0.8, -0.8));
+        let c = phase_step_from_diff(Complex32::new(1e-6, 10.0));
+        assert!(p > 0.0);
+        assert!(n < 0.0);
+        assert!(c.abs() <= TRACKING_PHASE_STEP_CLAMP + 1e-6);
     }
 }
