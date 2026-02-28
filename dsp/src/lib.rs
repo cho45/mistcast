@@ -3,18 +3,13 @@
 //! エアギャップ環境での音響通信を実現するDSPコアライブラリ。
 //! DSSS + DBPSK 変調、RRCフィルタ、FEC、LT符号(Fountain Code)を実装する。
 
-pub mod crc;
-pub mod demodulator;
+pub mod common;
+pub mod phy;
+pub mod coding;
+pub mod frame;
+
 pub mod decoder;
 pub mod encoder;
-pub mod fec;
-pub mod fountain;
-pub mod interleaver;
-pub mod modulator;
-pub mod msequence;
-pub mod packet;
-pub mod rrc_filter;
-pub mod sync;
 
 /// システムデフォルト定数
 ///

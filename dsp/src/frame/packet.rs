@@ -12,7 +12,7 @@
 //! パケット構造体はペイロード以降を表す。
 
 use crate::params::{PAYLOAD_SIZE, SYNC_WORD};
-use crate::crc;
+use crate::common::crc;
 
 /// ヘッダサイズ (seq u32 + lt_seq u32 + payload_len u16 = 10 bytes)
 pub const HEADER_SIZE: usize = 10;

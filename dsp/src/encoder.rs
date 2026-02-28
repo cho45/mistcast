@@ -6,11 +6,11 @@
 //! ```
 
 use crate::{
-    fec,
-    fountain::{EncodedPacket, LtEncoder, LtParams},
-    interleaver::BlockInterleaver,
-    modulator::Modulator,
-    packet::{Packet, PACKET_BYTES},
+    coding::fec,
+    coding::fountain::{EncodedPacket, LtEncoder, LtParams},
+    coding::interleaver::BlockInterleaver,
+    phy::modulator::Modulator,
+    frame::packet::{Packet, PACKET_BYTES},
     params::PAYLOAD_SIZE,
     DspConfig,
 };

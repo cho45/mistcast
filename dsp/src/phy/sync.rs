@@ -1,7 +1,7 @@
 //! スライディング相関による同期捕捉
 
-use crate::msequence::MSequence;
-use crate::rrc_filter::RrcFilter;
+use crate::common::msequence::MSequence;
+use crate::common::rrc_filter::RrcFilter;
 use crate::DspConfig;
 
 /// ダウンコンバート: 受信信号にcos/sin を掛けてベースバンドI/Q信号に変換
@@ -207,7 +207,7 @@ pub fn detect_chips(&self, chips_i: &[f32], chips_q: &[f32]) -> (Option<SyncResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modulator::Modulator;
+    use crate::phy::modulator::Modulator;
 
     fn test_config() -> DspConfig {
         DspConfig::default_48k()

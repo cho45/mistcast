@@ -1,7 +1,7 @@
 //! QPSK/Spread Spectrum 復調器
 
-use crate::msequence::MSequence;
-use crate::sync::{downconvert, matched_filter_decimate};
+use crate::common::msequence::MSequence;
+use crate::phy::sync::{downconvert, matched_filter_decimate};
 use crate::DspConfig;
 
 /// DBPSK + DSSS 復調器
@@ -80,7 +80,7 @@ impl Demodulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modulator::Modulator;
+    use crate::phy::modulator::Modulator;
 
     fn test_config() -> DspConfig {
         DspConfig::default_48k()
@@ -150,7 +150,7 @@ mod tests {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
-    use crate::msequence::MSequence;
+    use crate::common::msequence::MSequence;
 
     /// 逆拡散の単純テスト
     #[test]

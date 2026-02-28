@@ -6,14 +6,14 @@
 //! ```
 
 use crate::{
-    demodulator::Demodulator,
-    fec,
-    fountain::{EncodedPacket, LtDecoder, LtParams},
-    interleaver::BlockInterleaver,
-    packet::{Packet, PACKET_BYTES},
+    coding::fec,
+    coding::fountain::{EncodedPacket, LtDecoder, LtParams},
+    coding::interleaver::BlockInterleaver,
+    phy::demodulator::Demodulator,
+    phy::sync::SyncDetector,
+    common::rrc_filter::RrcFilter,
+    frame::packet::{Packet, PACKET_BYTES},
     params::PAYLOAD_SIZE,
-    rrc_filter::RrcFilter,
-    sync::SyncDetector,
     DspConfig,
 };
 
@@ -80,24 +80,25 @@ impl Decoder {
         let fc = self.config.carrier_freq;
         let spc = self.config.samples_per_chip();
         let total_delay = self.config.rrc_num_taps().saturating_sub(1);
-for (idx, &s) in samples.iter().enumerate() {
-    let current_sample_idx = self.sample_idx + idx;
-    let t = current_sample_idx as f32 / fs;
-    let cos_val = (two_pi * fc * t).cos();
-    let sin_val = (two_pi * fc * t).sin();
 
-    let i_val = s * cos_val * 2.0;
-    let q_val = s * (-sin_val) * 2.0;
+        for (idx, &s) in samples.iter().enumerate() {
+            let current_sample_idx = self.sample_idx + idx;
+            let t = current_sample_idx as f32 / fs;
+            let cos_val = (two_pi * fc * t).cos();
+            let sin_val = (two_pi * fc * t).sin();
+            
+            let i_val = s * cos_val * 2.0;
+            let q_val = s * (-sin_val) * 2.0;
 
-    let filtered_i = self.rrc_i.process(i_val);
-    let filtered_q = self.rrc_q.process(q_val);
+            let filtered_i = self.rrc_i.process(i_val);
+            let filtered_q = self.rrc_q.process(q_val);
 
-    if current_sample_idx >= total_delay && (current_sample_idx - total_delay).is_multiple_of(spc) {
-        self.chip_buffer_i.push(filtered_i);
-        self.chip_buffer_q.push(filtered_q);
-    }
-}
-self.sample_idx += samples.len();
+            if current_sample_idx >= total_delay && (current_sample_idx - total_delay).is_multiple_of(spc) {
+                self.chip_buffer_i.push(filtered_i);
+                self.chip_buffer_q.push(filtered_q);
+            }
+        }
+        self.sample_idx += samples.len();
 
         let raw_bits_len = PACKET_BYTES * 8 + 6;
         let needed_fec_bits = (raw_bits_len * 2).div_ceil(16) * 16;
@@ -126,7 +127,7 @@ self.sample_idx += samples.len();
 
                         if decoded_bytes.len() >= PACKET_BYTES {
                             if let Some(packet) = Packet::deserialize(&decoded_bytes[..PACKET_BYTES]) {
-                                let (degree, neighbors) = crate::fountain::reconstruct_packet_metadata(
+                                let (degree, neighbors) = crate::coding::fountain::reconstruct_packet_metadata(
                                     packet.lt_seq,
                                     self.lt_decoder.params().k,
                                     self.lt_decoder.params().c,
@@ -229,8 +230,8 @@ mod tests {
         let mut test_chip_buffer_i = Vec::new();
         let mut test_chip_buffer_q = Vec::new();
         let total_delay = decoder.config.rrc_num_taps().saturating_sub(1);
-        let mut rrc_i = crate::rrc_filter::RrcFilter::from_config(&decoder.config);
-        let mut rrc_q = crate::rrc_filter::RrcFilter::from_config(&decoder.config);
+        let mut rrc_i = crate::common::rrc_filter::RrcFilter::from_config(&decoder.config);
+        let mut rrc_q = crate::common::rrc_filter::RrcFilter::from_config(&decoder.config);
         let two_pi = 2.0 * std::f32::consts::PI;
         let fs = decoder.config.sample_rate;
         let fc = decoder.config.carrier_freq;

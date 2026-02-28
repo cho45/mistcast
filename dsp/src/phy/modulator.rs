@@ -6,9 +6,9 @@
 //! 3. RRCパルス整形: 各チップをRRCフィルタで成形
 //! 4. 帯域シフト: キャリアfc=8kHzで変調 (実信号)
 
-use crate::msequence::MSequence;
+use crate::common::msequence::MSequence;
 use crate::params::SYNC_WORD;
-use crate::rrc_filter::RrcFilter;
+use crate::common::rrc_filter::RrcFilter;
 use crate::DspConfig;
 
 /// 変調器
