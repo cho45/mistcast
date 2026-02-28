@@ -28,7 +28,16 @@ vi.mock('../pkg/dsp', () => {
     constructor(...args: any[]) {
       hoisted.WasmDecoder(...args);
     }
-    process_samples = vi.fn(() => ({ complete: true, received_packets: 1, needed_packets: 11, progress: 0.1 }));
+    process_samples = vi.fn(() => ({
+      complete: true,
+      received_packets: 1,
+      needed_packets: 11,
+      rank_packets: 1,
+      stalled_packets: 0,
+      last_packet_seq: 0,
+      last_rank_up_seq: 0,
+      progress: 0.1
+    }));
     recovered_data = vi.fn(() => new Uint8Array([1, 2, 3]));
     reset = vi.fn();
   }
@@ -53,7 +62,16 @@ vi.mock('../pkg-simd/dsp', () => {
     constructor(...args: any[]) {
       hoisted.WasmDecoder(...args);
     }
-    process_samples = vi.fn(() => ({ complete: true, received_packets: 1, needed_packets: 11, progress: 0.1 }));
+    process_samples = vi.fn(() => ({
+      complete: true,
+      received_packets: 1,
+      needed_packets: 11,
+      rank_packets: 1,
+      stalled_packets: 0,
+      last_packet_seq: 0,
+      last_rank_up_seq: 0,
+      progress: 0.1
+    }));
     recovered_data = vi.fn(() => new Uint8Array([1, 2, 3]));
     reset = vi.fn();
   }

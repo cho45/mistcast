@@ -24,6 +24,10 @@ use std::time::Instant;
 pub struct DecodeProgress {
     pub received_packets: usize,
     pub needed_packets: usize,
+    pub rank_packets: usize,
+    pub stalled_packets: usize,
+    pub last_packet_seq: i32,
+    pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
 }
@@ -47,6 +51,8 @@ pub struct Decoder {
     // --- 同期状態 ---
     last_search_idx: usize,
     current_sync: Option<SyncResult>,
+    last_packet_seq: Option<u32>,
+    last_rank_up_seq: Option<u32>,
 
     // --- 統計用 ---
     pub stats_sync_calls: usize,
@@ -82,6 +88,8 @@ impl Decoder {
             lo_nco,
             last_search_idx: 0,
             current_sync: None,
+            last_packet_seq: None,
+            last_rank_up_seq: None,
             stats_sync_calls: 0,
             stats_sync_time: Duration::ZERO,
             stats_total_samples: 0,
@@ -281,19 +289,30 @@ impl Decoder {
                 if decoded_bits.len() >= p_bits_len {
                     let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
                     if let Some(packet) = Packet::deserialize(&d_bytes) {
+                        let seq = packet.lt_seq as u32;
                         let (degree, neighbors) =
                             crate::coding::fountain::reconstruct_packet_metadata(
-                                packet.lt_seq as u32,
+                                seq,
                                 self.lt_decoder.params().k,
                                 self.lt_decoder.params().c,
                                 self.lt_decoder.params().delta,
                             );
+                        let before_received = self.lt_decoder.received_count();
+                        let before_rank = self.lt_decoder.rank();
                         self.lt_decoder.receive(EncodedPacket {
-                            seq: packet.lt_seq as u32,
+                            seq,
                             degree,
                             neighbors,
                             data: packet.payload.to_vec(),
                         });
+                        let after_received = self.lt_decoder.received_count();
+                        let after_rank = self.lt_decoder.rank();
+                        if after_received > before_received {
+                            self.last_packet_seq = Some(seq);
+                            if after_rank > before_rank {
+                                self.last_rank_up_seq = Some(seq);
+                            }
+                        }
 
                         if let Some(data) = self.lt_decoder.decode() {
                             self.recovered_data = Some(data);
@@ -341,9 +360,16 @@ impl Decoder {
     }
 
     fn progress(&self) -> DecodeProgress {
+        let received = self.lt_decoder.received_count();
+        let needed = self.lt_decoder.needed_count();
+        let rank = self.lt_decoder.rank();
         DecodeProgress {
-            received_packets: self.lt_decoder.received_count(),
-            needed_packets: self.lt_decoder.needed_count(),
+            received_packets: received,
+            needed_packets: needed,
+            rank_packets: rank,
+            stalled_packets: received.saturating_sub(rank),
+            last_packet_seq: self.last_packet_seq.map(|v| v as i32).unwrap_or(-1),
+            last_rank_up_seq: self.last_rank_up_seq.map(|v| v as i32).unwrap_or(-1),
             progress: self.lt_decoder.progress(),
             complete: self.recovered_data.is_some(),
         }
@@ -435,6 +461,8 @@ impl Decoder {
         self.recovered_data = None;
         self.last_search_idx = 0;
         self.current_sync = None;
+        self.last_packet_seq = None;
+        self.last_rank_up_seq = None;
         let params = self.lt_decoder.params().clone();
         self.lt_decoder = LtDecoder::new(params);
     }

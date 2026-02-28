@@ -12,6 +12,10 @@ type WasmDecoderLike = {
   process_samples(samples: Float32Array): {
     received_packets: number;
     needed_packets: number;
+    rank_packets: number;
+    stalled_packets: number;
+    last_packet_seq: number;
+    last_rank_up_seq: number;
     progress: number;
     complete: boolean;
   };
@@ -215,6 +219,10 @@ export class MistcastBackend {
     const result = {
         received: progress.received_packets,
         needed: progress.needed_packets,
+        rank: progress.rank_packets,
+        stalled: progress.stalled_packets,
+        lastPacketSeq: progress.last_packet_seq,
+        lastRankUpSeq: progress.last_rank_up_seq,
         progress: progress.progress,
         complete: progress.complete,
     };

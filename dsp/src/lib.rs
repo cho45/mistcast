@@ -71,6 +71,10 @@ impl DspConfig {
 pub struct WasmDecodeProgress {
     pub received_packets: usize,
     pub needed_packets: usize,
+    pub rank_packets: usize,
+    pub stalled_packets: usize,
+    pub last_packet_seq: i32,
+    pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
 }
@@ -99,6 +103,10 @@ impl WasmDecoder {
         WasmDecodeProgress {
             received_packets: progress.received_packets,
             needed_packets: progress.needed_packets,
+            rank_packets: progress.rank_packets,
+            stalled_packets: progress.stalled_packets,
+            last_packet_seq: progress.last_packet_seq,
+            last_rank_up_seq: progress.last_rank_up_seq,
             progress: progress.progress,
             complete: progress.complete,
         }

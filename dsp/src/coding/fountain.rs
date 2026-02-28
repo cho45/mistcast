@@ -214,6 +214,9 @@ impl LtDecoder {
     pub fn received_count(&self) -> usize {
         self.received.len()
     }
+    pub fn rank(&self) -> usize {
+        self.current_rank
+    }
     pub fn needed_count(&self) -> usize {
         self.params.k
     }

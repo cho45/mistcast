@@ -15,13 +15,26 @@ const isMicActive = ref(false);
 
 const receivedPackets = ref(0);
 const totalNeededPackets = ref(0);
+const rankPackets = ref(0);
+const stalledPackets = ref(0);
+const lastPacketSeq = ref(-1);
+const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
+const rxLogs = ref<string[]>([]);
+const rxTick = ref(0);
 
 let backend: Comlink.Remote<MistcastBackend> | null = null;
 let audioContext: AudioContext | null = null;
 let encoderNode: AudioWorkletNode | null = null;
 let decoderNode: AudioWorkletNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
+
+function pushRxLog(line: string) {
+  rxLogs.value.push(line);
+  if (rxLogs.value.length > 120) {
+    rxLogs.value.splice(0, rxLogs.value.length - 120);
+  }
+}
 
 async function init() {
   if (backend) return;
@@ -53,7 +66,13 @@ async function startSending() {
   status.value = "Preparing...";
   outputText.value = "";
   receivedPackets.value = 0;
+  rankPackets.value = 0;
+  stalledPackets.value = 0;
+  lastPacketSeq.value = -1;
+  lastRankUpSeq.value = -1;
   progressPercent.value = 0;
+  rxLogs.value = [];
+  rxTick.value = 0;
 
   const data = new TextEncoder().encode(inputText.value);
   
@@ -68,9 +87,22 @@ async function startSending() {
         status.value = "Decoded!";
     }),
     Comlink.proxy((p: any) => {
+        const prevReceived = receivedPackets.value;
+        const prevRank = rankPackets.value;
         receivedPackets.value = p.received;
         totalNeededPackets.value = p.needed;
+        rankPackets.value = p.rank ?? 0;
+        stalledPackets.value = p.stalled ?? Math.max(0, receivedPackets.value - rankPackets.value);
+        lastPacketSeq.value = p.lastPacketSeq ?? -1;
+        lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
         progressPercent.value = p.progress;
+        rxTick.value += 1;
+        const changed = prevReceived !== receivedPackets.value || prevRank !== rankPackets.value || p.complete;
+        if (changed) {
+          pushRxLog(
+            `#${rxTick.value} recv=${receivedPackets.value}/${totalNeededPackets.value} rank=${rankPackets.value} stall=${stalledPackets.value} prog=${(progressPercent.value * 100).toFixed(1)}% lastSeq=${lastPacketSeq.value} lastRankUp=${lastRankUpSeq.value}${p.complete ? " COMPLETE" : ""}`
+          );
+        }
     })
   );
 
@@ -114,8 +146,14 @@ async function reset() {
     await backend?.resetDecoder();
     outputText.value = "";
     receivedPackets.value = 0;
+    rankPackets.value = 0;
+    stalledPackets.value = 0;
+    lastPacketSeq.value = -1;
+    lastRankUpSeq.value = -1;
     progressPercent.value = 0;
     totalNeededPackets.value = 0;
+    rxLogs.value = [];
+    rxTick.value = 0;
     status.value = "Ready";
 }
 </script>
@@ -154,8 +192,17 @@ async function reset() {
             <div class="progress-text">
               Packets: {{ receivedPackets }} / {{ totalNeededPackets }} ({{ (progressPercent * 100).toFixed(1) }}%)
             </div>
+            <div class="progress-text detail">
+              Rank: {{ rankPackets }} / {{ totalNeededPackets }}
+              | Stall: {{ stalledPackets }}
+              | Last Seq: {{ lastPacketSeq }}
+              | Last Rank-Up Seq: {{ lastRankUpSeq }}
+            </div>
             <div class="progress-bar-bg">
               <div class="progress-bar-fill" :style="{ width: (progressPercent * 100) + '%' }"></div>
+            </div>
+            <div class="rx-log" v-if="rxLogs.length > 0">
+              <pre>{{ rxLogs.join('\n') }}</pre>
             </div>
           </div>
 
@@ -189,8 +236,11 @@ textarea { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 
 .btn-group { display: flex; gap: 0.5rem; }
 .progress-container { margin-top: 1.5rem; }
 .progress-text { font-size: 0.85rem; margin-bottom: 0.4rem; color: #666; }
+.progress-text.detail { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #555; }
 .progress-bar-bg { width: 100%; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; }
 .progress-bar-fill { height: 100%; background: #28a745; transition: width 0.2s ease-out; }
+.rx-log { margin-top: 0.6rem; max-height: 220px; overflow: auto; border: 1px solid #e0e0e0; border-radius: 4px; background: #fafafa; }
+.rx-log pre { margin: 0; padding: 0.6rem; font-size: 0.78rem; line-height: 1.35; color: #444; }
 .display { margin-top: 1rem; background: #f8f9fa; border: 1px solid #e9ecef; padding: 1rem; border-radius: 4px; min-height: 120px; }
 .placeholder { color: #999; font-style: italic; }
 pre { white-space: pre-wrap; font-size: 1.1rem; color: #007bff; margin: 0; }
