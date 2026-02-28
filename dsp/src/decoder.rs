@@ -680,8 +680,8 @@ mod tests {
 
     #[test]
     fn test_choose_decimation_factor() {
-        assert_eq!(choose_decimation_factor(&DspConfig::default_48k()), 3);
-        assert_eq!(choose_decimation_factor(&DspConfig::default_44k()), 2);
+        assert_eq!(choose_decimation_factor(&DspConfig::default_48k()), 2);
+        assert_eq!(choose_decimation_factor(&DspConfig::default_44k()), 1);
         assert_eq!(choose_decimation_factor(&DspConfig::new(16000.0)), 1);
     }
 

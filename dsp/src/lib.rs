@@ -13,10 +13,10 @@ use wasm_bindgen::prelude::*;
 pub mod params {
     pub const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
     pub const CARRIER_FREQ: f32 = 8000.0;
-    pub const MSEQ_ORDER: usize = 5;
-    pub const SPREAD_FACTOR: usize = 31;
+    pub const MSEQ_ORDER: usize = 4;
+    pub const SPREAD_FACTOR: usize = 15;
     pub const RRC_ALPHA: f32 = 0.35;
-    pub const CHIP_RATE: f32 = 8000.0;
+    pub const CHIP_RATE: f32 = 12000.0;
     pub const PREAMBLE_REPEAT: usize = 4;
     pub const SYNC_WORD_BITS: usize = 32;
     pub const SYNC_WORD: u32 = 0xDEAD_BEEF;

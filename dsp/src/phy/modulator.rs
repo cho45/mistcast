@@ -65,23 +65,26 @@ impl Modulator {
     ///
     /// 差動符号化 → DSSS拡散 → RRC整形 → キャリア変調
     pub fn modulate(&mut self, bits: &[u8]) -> Vec<f32> {
+        let all_chips = self.bits_to_chips(bits);
+        self.chips_to_samples(&all_chips)
+    }
+
+    fn append_symbol_chips(&mut self, symbol: i8, out: &mut Vec<i8>) {
+        self.mseq.reset();
+        for chip in self.mseq.generate(self.config.spread_factor()) {
+            out.push(symbol * chip);
+        }
+    }
+
+    fn bits_to_chips(&mut self, bits: &[u8]) -> Vec<i8> {
         let spread_factor = self.config.spread_factor();
         let mut all_chips: Vec<i8> = Vec::with_capacity(bits.len() * spread_factor);
-
         for &bit in bits {
-            // DBPSK差動符号化
             self.prev_phase ^= bit;
             let symbol: i8 = if self.prev_phase == 0 { 1 } else { -1 };
-
-            // DSSS拡散: 1シンボル = N個のチップ
-            self.mseq.reset();
-            let pn = self.mseq.generate(spread_factor);
-            for chip in pn {
-                all_chips.push(symbol * chip);
-            }
+            self.append_symbol_chips(symbol, &mut all_chips);
         }
-
-        self.chips_to_samples(&all_chips)
+        all_chips
     }
 
     /// チップ列をRRC整形 + キャリア変調してサンプル列に変換
@@ -143,22 +146,14 @@ impl Modulator {
         for &bit in &sync_bits {
             self.prev_phase ^= bit;
             let symbol: i8 = if self.prev_phase == 0 { 1 } else { -1 };
-            self.mseq.reset();
-            let pn = self.mseq.generate(sf);
-            for chip in pn {
-                all_chips.push(symbol * chip);
-            }
+            self.append_symbol_chips(symbol, &mut all_chips);
         }
 
         // 3. データ
         for &bit in bits {
             self.prev_phase ^= bit;
             let symbol: i8 = if self.prev_phase == 0 { 1 } else { -1 };
-            self.mseq.reset();
-            let pn = self.mseq.generate(sf);
-            for chip in pn {
-                all_chips.push(symbol * chip);
-            }
+            self.append_symbol_chips(symbol, &mut all_chips);
         }
 
         // 4. マージン (1シンボル分の無音チップ)
@@ -183,6 +178,7 @@ impl Modulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::rrc_filter::RrcFilter;
 
     fn make_modulator() -> Modulator {
         Modulator::default_48k()
@@ -271,78 +267,111 @@ mod tests {
     #[test]
     fn test_math_dbpsk_dsss() {
         let mut mod_ = make_modulator();
-        let bits = vec![1u8, 0, 1];
-        let fs = mod_.config.sample_rate;
-        let fc = mod_.config.carrier_freq;
+        let bits = vec![1u8, 0, 1, 1, 0, 1, 0];
         let sf = mod_.config.spread_factor();
-        let spc = mod_.config.samples_per_chip();
-        let two_pi = 2.0 * std::f32::consts::PI;
-
-        // --- 検証: encode_frame が生成する波形を理想的な受信機で復号する ---
-        let frame = mod_.encode_frame(&bits);
-
-        let mut demod_rrc = RrcFilter::from_config(&mod_.config);
-        let mut i_ch = Vec::new();
-        let mut q_ch = Vec::new();
-        for (i, &s) in frame.iter().enumerate() {
-            let t = i as f32 / fs;
-            let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
-            i_ch.push(demod_rrc.process(s * cos_v * 2.0));
-            q_ch.push(demod_rrc.process(s * (-sin_v) * 2.0));
-        }
-
-        let total_delay = mod_.rrc.delay() + demod_rrc.delay();
-        let mut mseq = MSequence::new(mod_.config.mseq_order);
-        let preamble_repeat = mod_.config.preamble_repeat;
-
-        // 1. プリアンブルの最後で位相基準を得る
-        let mut prev_i = 0.0f32;
-        let mut prev_q = 0.0f32;
-        let ref_symbol_start = total_delay + (preamble_repeat - 1) * sf * spc;
-        mseq.reset();
-        let pn = mseq.generate(sf);
-        for (c_idx, &pn_val) in pn.iter().enumerate() {
-            let p = ref_symbol_start + c_idx * spc;
-            prev_i += i_ch[p] * pn_val as f32;
-            prev_q += q_ch[p] * pn_val as f32;
-        }
-        let mag = (prev_i * prev_i + prev_q * prev_q).sqrt().max(1e-6);
-        prev_i /= mag;
-        prev_q /= mag;
-
-        // 2. 同期ワード + データ(bits)
-        let data_start_chips = sf * preamble_repeat;
-        let total_symbols = SYNC_WORD_BITS + bits.len();
-        let mut recovered_bits = Vec::new();
-
-        for s_idx in 0..total_symbols {
-            let symbol_start = total_delay + (data_start_chips + s_idx * sf) * spc;
-            let mut cur_i = 0.0;
-            let mut cur_q = 0.0;
-
-            mseq.reset();
-            let pn = mseq.generate(sf);
-            for (c_idx, &pn_val) in pn.iter().enumerate() {
-                let p = symbol_start + c_idx * spc;
-                cur_i += i_ch[p] * pn_val as f32;
-                cur_q += q_ch[p] * pn_val as f32;
-            }
-
-            let dot = cur_i * prev_i + cur_q * prev_q;
-            let bit = if dot > 0.0 { 0 } else { 1 };
-
-            if s_idx >= SYNC_WORD_BITS {
-                recovered_bits.push(bit);
-            }
-
-            let mag = (cur_i * cur_i + cur_q * cur_q).sqrt().max(1e-6);
-            prev_i = cur_i / mag;
-            prev_q = cur_q / mag;
-        }
+        let chips = mod_.bits_to_chips(&bits);
 
         assert_eq!(
-            recovered_bits, bits,
-            "プリアンブル・同期ワードを通過してデータが正しく復号されること"
+            chips.len(),
+            bits.len() * sf,
+            "1bitあたりSF個のチップに展開されること"
         );
+
+        let mut mseq = MSequence::new(mod_.config.mseq_order);
+        let pn = mseq.generate(sf);
+
+        let mut expected_phase = 0u8;
+        for (sym_idx, &bit) in bits.iter().enumerate() {
+            expected_phase ^= bit;
+            let expected_symbol = if expected_phase == 0 { 1i8 } else { -1i8 };
+            let start = sym_idx * sf;
+            let end = start + sf;
+            for (chip_idx, &chip) in chips[start..end].iter().enumerate() {
+                assert_eq!(
+                    chip,
+                    expected_symbol * pn[chip_idx],
+                    "sym={} chip={} でDBPSK差動符号化とDSSS拡散が正しいこと",
+                    sym_idx,
+                    chip_idx
+                );
+            }
+        }
+    }
+
+    /// 同期位置が既知の前提で、encode_frame波形からDBPSK遷移を復元できること
+    #[test]
+    fn test_known_sync_position_dbpsk_roundtrip_without_demodulator() {
+        let mut mod_ = make_modulator();
+        let bits = vec![1u8, 0, 1, 1, 0, 1, 0, 0, 1];
+        let config = mod_.config().clone();
+        let frame = mod_.encode_frame(&bits);
+
+        let fs = config.sample_rate;
+        let fc = config.carrier_freq;
+        let two_pi = 2.0 * std::f32::consts::PI;
+        let mut rrc_i = RrcFilter::from_config(&config);
+        let mut rrc_q = RrcFilter::from_config(&config);
+        let mut i_ch = Vec::with_capacity(frame.len());
+        let mut q_ch = Vec::with_capacity(frame.len());
+        for (idx, &s) in frame.iter().enumerate() {
+            let t = idx as f32 / fs;
+            let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
+            i_ch.push(rrc_i.process(s * cos_v * 2.0));
+            q_ch.push(rrc_q.process(s * (-sin_v) * 2.0));
+        }
+
+        let sf = config.spread_factor();
+        let spc = config.samples_per_chip();
+        let sym_len = sf * spc;
+        let total_delay = mod_.rrc.delay() + rrc_i.delay();
+
+        let mut mseq = MSequence::new(config.mseq_order);
+        let pn = mseq.generate(sf);
+
+        let correlate_symbol = |sym_idx: usize, phase: usize, i_ch: &[f32], q_ch: &[f32]| {
+            let base = total_delay + phase + sym_idx * sym_len;
+            let mut ci = 0.0f32;
+            let mut cq = 0.0f32;
+            for (chip_idx, &pn_val) in pn.iter().enumerate() {
+                let p = base + chip_idx * spc;
+                ci += i_ch[p] * pn_val as f32;
+                cq += q_ch[p] * pn_val as f32;
+            }
+            (ci, cq)
+        };
+
+        let mut best_phase = 0usize;
+        let mut best_mag = -1.0f32;
+        for phase in 0..spc {
+            let (ci, cq) = correlate_symbol(0, phase, &i_ch, &q_ch);
+            let mag = ci * ci + cq * cq;
+            if mag > best_mag {
+                best_mag = mag;
+                best_phase = phase;
+            }
+        }
+
+        let sync_bits: Vec<u8> = (0..SYNC_WORD_BITS)
+            .rev()
+            .map(|i| ((SYNC_WORD >> i) & 1) as u8)
+            .collect();
+        let mut expected_bits = Vec::with_capacity(sync_bits.len() + bits.len());
+        expected_bits.extend_from_slice(&sync_bits);
+        expected_bits.extend_from_slice(&bits);
+
+        // DBPSKの初期位相は +M (prev_phase=0) なので、+M側のプリアンブルを基準に
+        // sync+payload全ビットを復元して一致を確認する。
+        let mut prev = correlate_symbol(0, best_phase, &i_ch, &q_ch);
+        for (idx, &expected_bit) in expected_bits.iter().enumerate() {
+            let cur = correlate_symbol(config.preamble_repeat + idx, best_phase, &i_ch, &q_ch);
+            let dot = prev.0 * cur.0 + prev.1 * cur.1;
+            let decoded_bit = if dot >= 0.0 { 0 } else { 1 };
+            assert_eq!(
+                decoded_bit, expected_bit,
+                "sym={} の差動ビット復元が一致すること",
+                idx
+            );
+            prev = cur;
+        }
     }
 }
