@@ -31,7 +31,7 @@ fn test_transmission_quick(sigma: f32, seed: u64) -> bool {
     let lt_k = 4usize;
     let dsp_config = DspConfig::default_48k();
     let mut enc_config = EncoderConfig::new(dsp_config.clone());
-    enc_config.lt_k = lt_k;
+    enc_config.fountain_k = lt_k;
     let mut encoder = Encoder::new(enc_config);
     let mut stream = encoder.encode_stream(data);
     let mut decoder = Decoder::new(data.len(), lt_k, dsp_config.clone());

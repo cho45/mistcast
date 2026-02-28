@@ -4,7 +4,7 @@
 use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::{
     coding::fec,
-    coding::fountain::{EncodedPacket, LtDecoder, LtParams, ReceiveOutcome},
+    coding::fountain::{FountainDecoder, FountainPacket, FountainParams, ReceiveOutcome},
     coding::interleaver::BlockInterleaver,
     common::nco::Nco,
     common::rrc_filter::DecimatingRrcFilter,
@@ -47,7 +47,7 @@ pub struct Decoder {
     sync_detector: SyncDetector,
     demodulator: Demodulator,
     interleaver: BlockInterleaver,
-    lt_decoder: LtDecoder,
+    fountain_decoder: FountainDecoder,
     recovered_data: Option<Vec<u8>>,
     agc_peak: f32,
     decimation_factor: usize,
@@ -71,10 +71,10 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    pub fn new(_data_size: usize, lt_k: usize, dsp_config: DspConfig) -> Self {
+    pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let decimation_factor = choose_decimation_factor(&dsp_config);
         let proc_config = build_proc_config(&dsp_config, decimation_factor);
-        let params = LtParams::new(lt_k, PAYLOAD_SIZE);
+        let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         let raw_bits = PACKET_BYTES * 8 + 6;
         let fec_bits = raw_bits * 2;
         let il_rows = 16;
@@ -89,7 +89,7 @@ impl Decoder {
             sync_detector: SyncDetector::new(proc_config.clone()),
             demodulator: Demodulator::new(proc_config.clone()),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
-            lt_decoder: LtDecoder::new(params),
+            fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
             config: dsp_config,
             proc_config,
@@ -306,23 +306,21 @@ impl Decoder {
                     match Packet::deserialize(&d_bytes) {
                         Ok(packet) => {
                             let pkt_k = packet.lt_k as usize;
-                            if pkt_k != self.lt_decoder.params().k {
-                                self.rebuild_lt_decoder(pkt_k);
+                            if pkt_k != self.fountain_decoder.params().k {
+                                self.rebuild_fountain_decoder(pkt_k);
                             }
                             let seq = packet.lt_seq as u32;
-                            let (degree, neighbors) =
-                                crate::coding::fountain::reconstruct_packet_metadata(
+                            let coefficients =
+                                crate::coding::fountain::reconstruct_packet_coefficients(
                                     seq,
-                                    self.lt_decoder.params().k,
-                                    self.lt_decoder.params().c,
-                                    self.lt_decoder.params().delta,
+                                    self.fountain_decoder.params().k,
                                 );
-                            let outcome = self.lt_decoder.receive_with_outcome(EncodedPacket {
-                                seq,
-                                degree,
-                                neighbors,
-                                data: packet.payload.to_vec(),
-                            });
+                            let outcome =
+                                self.fountain_decoder.receive_with_outcome(FountainPacket {
+                                    seq,
+                                    coefficients,
+                                    data: packet.payload.to_vec(),
+                                });
                             match outcome {
                                 ReceiveOutcome::AcceptedRankUp => {
                                     self.last_packet_seq = Some(seq);
@@ -335,12 +333,12 @@ impl Decoder {
                                 ReceiveOutcome::DuplicateSeq => {
                                     self.duplicate_packets += 1;
                                 }
-                                ReceiveOutcome::InvalidNeighbors => {
+                                ReceiveOutcome::InvalidPacket => {
                                     self.invalid_neighbor_packets += 1;
                                 }
                             }
 
-                            if let Some(data) = self.lt_decoder.decode() {
+                            if let Some(data) = self.fountain_decoder.decode() {
                                 self.recovered_data = Some(data);
                             }
                             let actual_end = p_start + total_bits * sf * spc;
@@ -393,9 +391,9 @@ impl Decoder {
     }
 
     fn progress(&self) -> DecodeProgress {
-        let received = self.lt_decoder.received_count();
-        let needed = self.lt_decoder.needed_count();
-        let rank = self.lt_decoder.rank();
+        let received = self.fountain_decoder.received_count();
+        let needed = self.fountain_decoder.needed_count();
+        let rank = self.fountain_decoder.rank();
         DecodeProgress {
             received_packets: received,
             needed_packets: needed,
@@ -408,14 +406,14 @@ impl Decoder {
             invalid_neighbor_packets: self.invalid_neighbor_packets,
             last_packet_seq: self.last_packet_seq.map(|v| v as i32).unwrap_or(-1),
             last_rank_up_seq: self.last_rank_up_seq.map(|v| v as i32).unwrap_or(-1),
-            progress: self.lt_decoder.progress(),
+            progress: self.fountain_decoder.progress(),
             complete: self.recovered_data.is_some(),
         }
     }
 
-    fn rebuild_lt_decoder(&mut self, lt_k: usize) {
-        let params = LtParams::new(lt_k, PAYLOAD_SIZE);
-        self.lt_decoder = LtDecoder::new(params);
+    fn rebuild_fountain_decoder(&mut self, fountain_k: usize) {
+        let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
+        self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
         self.last_packet_seq = None;
         self.last_rank_up_seq = None;
@@ -519,7 +517,7 @@ impl Decoder {
         self.crc_error_packets = 0;
         self.parse_error_packets = 0;
         self.invalid_neighbor_packets = 0;
-        self.rebuild_lt_decoder(self.lt_decoder.params().k);
+        self.rebuild_fountain_decoder(self.fountain_decoder.params().k);
     }
 
     pub fn recovered_data(&self) -> Option<&[u8]> {

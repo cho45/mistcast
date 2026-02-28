@@ -132,7 +132,7 @@ impl WasmDecoder {
 #[wasm_bindgen]
 pub struct WasmEncoder {
     inner: encoder::Encoder,
-    lt_encoder: Option<coding::fountain::LtEncoder>,
+    fountain_encoder: Option<coding::fountain::FountainEncoder>,
 }
 
 #[wasm_bindgen]
@@ -143,7 +143,7 @@ impl WasmEncoder {
         let enc_config = encoder::EncoderConfig::new(config);
         WasmEncoder {
             inner: encoder::Encoder::new(enc_config),
-            lt_encoder: None,
+            fountain_encoder: None,
         }
     }
     pub fn set_data(&mut self, data: &[u8]) {
@@ -155,12 +155,12 @@ impl WasmEncoder {
             needed_k,
             max_k
         );
-        self.inner.set_lt_k(needed_k);
-        let params = coding::fountain::LtParams::new(needed_k, params::PAYLOAD_SIZE);
-        self.lt_encoder = Some(coding::fountain::LtEncoder::new(data, params));
+        self.inner.set_fountain_k(needed_k);
+        let params = coding::fountain::FountainParams::new(needed_k, params::PAYLOAD_SIZE);
+        self.fountain_encoder = Some(coding::fountain::FountainEncoder::new(data, params));
     }
     pub fn pull_frame(&mut self) -> Option<Vec<f32>> {
-        let lt_pkt = self.lt_encoder.as_mut()?.next_packet();
-        Some(self.inner.encode_packet(&lt_pkt))
+        let fountain_pkt = self.fountain_encoder.as_mut()?.next_packet();
+        Some(self.inner.encode_packet(&fountain_pkt))
     }
 }

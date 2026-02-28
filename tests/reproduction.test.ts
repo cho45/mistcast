@@ -49,7 +49,7 @@ describe('Reproduction: 10/10 Verification', () => {
         expect(recovered?.slice(0, 16)).toEqual(data);
     });
 
-    it('should reproduce rank stall when part of systematic packets are dropped', async () => {
+    it('should recover quickly even when part of early packets are dropped', async () => {
         // k=10 を強制するため 160 bytes 送る。
         const data = new Uint8Array(160);
         for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
@@ -83,15 +83,13 @@ describe('Reproduction: 10/10 Verification', () => {
             }
         }
 
-        // rank=9 に達したあと、しばらく同じ rank が続く停滞を確認。
-        const stallStart = seenRanks.findIndex((r) => r === 9);
-        expect(stallStart).toBeGreaterThanOrEqual(0);
-        const stallLen = seenRanks
-            .slice(stallStart)
+        // RLNC 化により長い停滞は起きにくく、後続パケットで短時間に回復する。
+        const rank9Start = seenRanks.findIndex((r) => r === 9);
+        expect(rank9Start).toBeGreaterThanOrEqual(0);
+        const rank9StallLen = seenRanks
+            .slice(rank9Start)
             .reduce((n, r) => (r === 9 ? n + 1 : n), 0);
-        expect(stallLen, "rank=9 の停滞が再現していない").toBeGreaterThanOrEqual(3);
-
-        // その後は後続 fountain packet で回復し、最終的に完了する。
+        expect(rank9StallLen, "rank=9 付近の停滞が長すぎる").toBeLessThanOrEqual(2);
         expect(complete, "停滞後に回復して完了すべき").toBe(true);
         const recovered = decoder.recovered_data();
         expect(recovered?.slice(0, data.length)).toEqual(data);

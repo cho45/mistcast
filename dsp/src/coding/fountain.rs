@@ -1,151 +1,154 @@
-//! LT符号 (Luby Transform Code) - Fountain Code 実装
+//! Fountain coding module backed by non-systematic RLNC over GF(256).
 
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
-pub struct LtParams {
+pub struct FountainParams {
     pub k: usize,
     pub block_size: usize,
-    pub c: f32,
-    pub delta: f32,
 }
 
-impl LtParams {
+impl FountainParams {
     pub fn new(k: usize, block_size: usize) -> Self {
-        LtParams {
-            k,
-            block_size,
-            c: 0.03,
-            delta: 0.05,
-        }
+        FountainParams { k, block_size }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct EncodedPacket {
+pub struct FountainPacket {
     pub seq: u32,
-    pub degree: usize,
-    pub neighbors: Vec<usize>,
+    pub coefficients: Vec<u8>,
     pub data: Vec<u8>,
 }
 
-fn robust_soliton_degree(seq: u32, k: usize, c: f32, delta: f32) -> usize {
-    let mut rng = XorShift32::new(seq ^ 0xDEAD_CAFE);
-    let r = c * (k as f32 / delta).ln() * (k as f32).sqrt();
-    let mut tau = vec![0.0f32; k + 1];
-    for (d, t_val) in tau.iter_mut().enumerate().take(k + 1).skip(1) {
-        if d == 1 {
-            *t_val = r / k as f32;
-        } else {
-            let kdr = (k as f32 / (r * d as f32)).max(0.0);
-            *t_val = if kdr > 1.0 || d == (k as f32 / r).floor() as usize {
-                r / (d as f32 * k as f32)
-            } else {
-                0.0
-            };
-        }
-    }
-    let mut cdf = vec![0.0f32; k + 1];
-    let mut sum = 0.0f32;
-    for (d, c_val) in cdf.iter_mut().enumerate().take(k + 1).skip(1) {
-        let rho = if d == 1 {
-            1.0 / k as f32
-        } else {
-            1.0 / (d as f32 * (d as f32 - 1.0))
-        };
-        sum += rho + tau[d];
-        *c_val = sum;
-    }
-    let z = if sum > 0.0 { sum } else { 1.0 };
-    cdf.iter_mut().for_each(|v| *v /= z);
-    let u = rng.next_f32();
-    for (d, &c_val) in cdf.iter().enumerate().take(k + 1).skip(1) {
-        if u <= c_val {
-            return d;
-        }
-    }
-    1
+#[derive(Clone, Debug)]
+struct BasisRow {
+    coeffs: Vec<u8>,
+    data: Vec<u8>,
 }
 
-struct XorShift32 {
-    state: u32,
-}
-impl XorShift32 {
-    fn new(seed: u32) -> Self {
-        XorShift32 {
-            state: if seed == 0 { 1 } else { seed },
+#[inline]
+fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0u8;
+    for _ in 0..8 {
+        if b & 1 != 0 {
+            p ^= a;
         }
+        let carry = a & 0x80;
+        a <<= 1;
+        if carry != 0 {
+            a ^= 0x1b;
+        }
+        b >>= 1;
     }
-    fn next_u32(&mut self) -> u32 {
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 17;
-        self.state ^= self.state << 5;
-        self.state
+    p
+}
+
+fn gf_pow(mut base: u8, mut exp: u16) -> u8 {
+    let mut acc = 1u8;
+    while exp > 0 {
+        if exp & 1 != 0 {
+            acc = gf_mul(acc, base);
+        }
+        base = gf_mul(base, base);
+        exp >>= 1;
     }
-    fn next_f32(&mut self) -> f32 {
-        self.next_u32() as f32 / u32::MAX as f32
+    acc
+}
+
+#[inline]
+fn gf_inv(x: u8) -> u8 {
+    debug_assert!(x != 0);
+    gf_pow(x, 254)
+}
+
+#[inline]
+fn row_axpy(dst: &mut [u8], src: &[u8], factor: u8) {
+    if factor == 0 {
+        return;
     }
-    fn next_range(&mut self, max: usize) -> usize {
-        (self.next_u32() as usize) % max
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
+        *d ^= gf_mul(*s, factor);
     }
 }
 
-fn select_neighbors(seq: u32, degree: usize, k: usize) -> Vec<usize> {
-    let mut rng = XorShift32::new(seq ^ 0xCAFE_BABE);
-    let mut neighbors = Vec::with_capacity(degree);
-    let mut chosen = HashSet::new();
-    while neighbors.len() < degree {
-        let idx = rng.next_range(k);
-        if chosen.insert(idx) {
-            neighbors.push(idx);
-        }
+#[inline]
+fn row_scale(dst: &mut [u8], factor: u8) {
+    if factor == 1 {
+        return;
     }
-    neighbors
+    for d in dst.iter_mut() {
+        *d = gf_mul(*d, factor);
+    }
 }
 
-pub struct LtEncoder {
-    params: LtParams,
+pub fn reconstruct_packet_coefficients(seq: u32, k: usize) -> Vec<u8> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    // Non-systematic RLNC:
+    // row(seq) = [1, x, x^2, ..., x^(k-1)] over GF(256), x != 0.
+    // step is coprime with 255 to cover all non-zero field elements before repeating.
+    let step = 73u32;
+    let x = ((seq * step) % 255 + 1) as u8;
+
+    let mut coeffs = vec![0u8; k];
+    coeffs[0] = 1;
+    for i in 1..k {
+        coeffs[i] = gf_mul(coeffs[i - 1], x);
+    }
+    coeffs
+}
+
+pub struct FountainEncoder {
+    params: FountainParams,
     blocks: Vec<Vec<u8>>,
     next_seq: u32,
 }
 
-impl LtEncoder {
-    pub fn new(data: &[u8], params: LtParams) -> Self {
+impl FountainEncoder {
+    pub fn new(data: &[u8], params: FountainParams) -> Self {
         let mut padded = data.to_vec();
         padded.resize(params.k * params.block_size, 0);
         let blocks = padded
             .chunks(params.block_size)
             .map(|c| c.to_vec())
             .collect();
-        LtEncoder {
+        FountainEncoder {
             params,
             blocks,
             next_seq: 0,
         }
     }
-    pub fn next_packet(&mut self) -> EncodedPacket {
+
+    pub fn next_packet(&mut self) -> FountainPacket {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
-        let (degree, neighbors) =
-            reconstruct_packet_metadata(seq, self.params.k, self.params.c, self.params.delta);
+        let coefficients = reconstruct_packet_coefficients(seq, self.params.k);
         let mut data = vec![0u8; self.params.block_size];
-        for &idx in &neighbors {
-            for (i, &b) in self.blocks[idx].iter().enumerate() {
-                data[i] ^= b;
+
+        for (block_idx, &coeff) in coefficients.iter().enumerate() {
+            if coeff == 0 {
+                continue;
+            }
+            for (out, src) in data.iter_mut().zip(self.blocks[block_idx].iter()) {
+                *out ^= gf_mul(*src, coeff);
             }
         }
-        EncodedPacket {
+
+        FountainPacket {
             seq,
-            degree,
-            neighbors,
+            coefficients,
             data,
         }
     }
 }
 
-pub struct LtDecoder {
-    params: LtParams,
-    received: HashMap<u32, EncodedPacket>,
+pub struct FountainDecoder {
+    params: FountainParams,
+    seen_seq: HashSet<u32>,
+    basis: Vec<Option<BasisRow>>,
     current_rank: usize,
 }
 
@@ -154,179 +157,113 @@ pub enum ReceiveOutcome {
     AcceptedRankUp,
     AcceptedNoRankUp,
     DuplicateSeq,
-    InvalidNeighbors,
+    InvalidPacket,
 }
 
-impl LtDecoder {
-    pub fn params(&self) -> &LtParams {
+impl FountainDecoder {
+    pub fn params(&self) -> &FountainParams {
         &self.params
     }
-    pub fn new(params: LtParams) -> Self {
-        LtDecoder {
+
+    pub fn new(params: FountainParams) -> Self {
+        FountainDecoder {
+            basis: vec![None; params.k],
             params,
-            received: HashMap::new(),
+            seen_seq: HashSet::new(),
             current_rank: 0,
         }
     }
 
-    pub fn receive_with_outcome(&mut self, packet: EncodedPacket) -> ReceiveOutcome {
-        if !packet.neighbors.iter().all(|&idx| idx < self.params.k) {
-            return ReceiveOutcome::InvalidNeighbors;
+    pub fn receive_with_outcome(&mut self, packet: FountainPacket) -> ReceiveOutcome {
+        if packet.coefficients.len() != self.params.k
+            || packet.data.len() != self.params.block_size
+            || packet.coefficients.iter().all(|&x| x == 0)
+        {
+            return ReceiveOutcome::InvalidPacket;
         }
 
-        let before_rank = self.current_rank;
-        match self.received.entry(packet.seq) {
-            Entry::Occupied(_) => ReceiveOutcome::DuplicateSeq,
-            Entry::Vacant(e) => {
-                e.insert(packet);
-                self.update_rank();
-                if self.current_rank > before_rank {
-                    ReceiveOutcome::AcceptedRankUp
-                } else {
-                    ReceiveOutcome::AcceptedNoRankUp
-                }
-            }
+        if !self.seen_seq.insert(packet.seq) {
+            return ReceiveOutcome::DuplicateSeq;
+        }
+
+        let rank_up = self.insert_row(packet.coefficients, packet.data);
+        if rank_up {
+            ReceiveOutcome::AcceptedRankUp
+        } else {
+            ReceiveOutcome::AcceptedNoRankUp
         }
     }
 
-    pub fn receive(&mut self, packet: EncodedPacket) {
+    pub fn receive(&mut self, packet: FountainPacket) {
         let _ = self.receive_with_outcome(packet);
     }
 
-    fn update_rank(&mut self) {
+    fn insert_row(&mut self, mut coeffs: Vec<u8>, mut data: Vec<u8>) -> bool {
         let k = self.params.k;
-        if self.received.is_empty() {
-            self.current_rank = 0;
-            return;
-        }
-        let n_packets = self.received.len();
-        let row_words = k.div_ceil(8);
-        let mut matrix = vec![vec![0u8; row_words]; n_packets];
-        for (row, pkt) in self.received.values().enumerate() {
-            for &idx in &pkt.neighbors {
-                matrix[row][idx / 8] ^= 1 << (idx % 8);
-            }
-        }
-        let mut next_row = 0;
+
         for col in 0..k {
-            let mut found = None;
-            for (row, m_row) in matrix.iter().enumerate().take(n_packets).skip(next_row) {
-                if (m_row[col / 8] >> (col % 8)) & 1 == 1 {
-                    found = Some(row);
-                    break;
-                }
+            if coeffs[col] == 0 {
+                continue;
             }
-            if let Some(pivot_row) = found {
-                matrix.swap(pivot_row, next_row);
-                let pivot = next_row;
-                let pivot_words = matrix[pivot].clone();
-                for (row, m_row) in matrix.iter_mut().enumerate().take(n_packets) {
-                    if row != pivot && (m_row[col / 8] >> (col % 8)) & 1 == 1 {
-                        for (dst, src) in m_row.iter_mut().zip(pivot_words.iter()).take(row_words) {
-                            *dst ^= *src;
-                        }
-                    }
-                }
-                next_row += 1;
+            if let Some(pivot_row) = self.basis[col].as_ref() {
+                let factor = coeffs[col];
+                row_axpy(&mut coeffs, &pivot_row.coeffs, factor);
+                row_axpy(&mut data, &pivot_row.data, factor);
             }
         }
-        self.current_rank = next_row;
+
+        let Some(pivot_col) = coeffs.iter().position(|&c| c != 0) else {
+            return false;
+        };
+
+        let inv = gf_inv(coeffs[pivot_col]);
+        row_scale(&mut coeffs, inv);
+        row_scale(&mut data, inv);
+
+        for other_col in 0..k {
+            if other_col == pivot_col {
+                continue;
+            }
+            if let Some(other_row) = self.basis[other_col].as_mut() {
+                let factor = other_row.coeffs[pivot_col];
+                if factor != 0 {
+                    row_axpy(&mut other_row.coeffs, &coeffs, factor);
+                    row_axpy(&mut other_row.data, &data, factor);
+                }
+            }
+        }
+
+        self.basis[pivot_col] = Some(BasisRow { coeffs, data });
+        self.current_rank += 1;
+        true
     }
 
     pub fn received_count(&self) -> usize {
-        self.received.len()
+        self.seen_seq.len()
     }
+
     pub fn rank(&self) -> usize {
         self.current_rank
     }
+
     pub fn needed_count(&self) -> usize {
         self.params.k
     }
+
     pub fn progress(&self) -> f32 {
         (self.current_rank as f32 / self.params.k as f32).min(1.0)
     }
 
     pub fn decode(&self) -> Option<Vec<u8>> {
-        let k = self.params.k;
-        let bs = self.params.block_size;
-        if self.current_rank < k {
+        if self.current_rank < self.params.k {
             return None;
         }
-        let n_packets = self.received.len();
-        let row_words = k.div_ceil(8);
-        let mut matrix = Vec::with_capacity(n_packets);
-        let mut rhs = Vec::with_capacity(n_packets);
-        for pkt in self.received.values() {
-            let mut m_row = vec![0u8; row_words];
-            for &idx in &pkt.neighbors {
-                m_row[idx / 8] ^= 1 << (idx % 8);
-            }
-            matrix.push(m_row);
-            rhs.push(pkt.data.clone());
-        }
-        let mut next_row = 0;
-        let mut pivot_row_for_col = vec![None; k];
-        for col in 0..k {
-            let mut found = None;
-            for (row, m_row) in matrix.iter().enumerate().take(n_packets).skip(next_row) {
-                if (m_row[col / 8] >> (col % 8)) & 1 == 1 {
-                    found = Some(row);
-                    break;
-                }
-            }
-            if let Some(pivot_row) = found {
-                matrix.swap(pivot_row, next_row);
-                rhs.swap(pivot_row, next_row);
-                let pivot = next_row;
-                pivot_row_for_col[col] = Some(pivot);
-                let pivot_words = matrix[pivot].clone();
-                let pivot_rhs = rhs[pivot].clone();
-                for (row, m_row) in matrix.iter_mut().enumerate().take(n_packets) {
-                    if row != pivot && (m_row[col / 8] >> (col % 8)) & 1 == 1 {
-                        for (dst, src) in m_row.iter_mut().zip(pivot_words.iter()).take(row_words) {
-                            *dst ^= *src;
-                        }
-                        for (dst, src) in rhs[row].iter_mut().zip(pivot_rhs.iter()).take(bs) {
-                            *dst ^= *src;
-                        }
-                    }
-                }
-                next_row += 1;
-            }
-        }
-        let mut result = Vec::with_capacity(k * bs);
-        for row_opt in pivot_row_for_col.iter().take(k) {
-            let row = (*row_opt)?;
-            result.extend_from_slice(&rhs[row]);
+        let mut result = Vec::with_capacity(self.params.k * self.params.block_size);
+        for col in 0..self.params.k {
+            let row = self.basis[col].as_ref()?;
+            result.extend_from_slice(&row.data);
         }
         Some(result)
-    }
-}
-
-pub fn reconstruct_packet_metadata(seq: u32, k: usize, c: f32, delta: f32) -> (usize, Vec<usize>) {
-    if (seq as usize) < k {
-        (1, vec![seq as usize])
-    } else {
-        let post_systematic = seq - k as u32;
-        let singleton_period = singleton_injection_period(k);
-        if singleton_period > 0 && post_systematic.is_multiple_of(singleton_period) {
-            let idx = ((post_systematic / singleton_period) as usize) % k;
-            return (1, vec![idx]);
-        }
-        let degree = robust_soliton_degree(seq, k, c, delta);
-        let neighbors = select_neighbors(seq, degree, k);
-        (degree, neighbors)
-    }
-}
-
-fn singleton_injection_period(k: usize) -> u32 {
-    match k {
-        0 => 0,
-        1..=2 => 2,
-        3..=4 => 3,
-        5..=8 => 4,
-        9..=16 => 6,
-        _ => 8,
     }
 }
 
@@ -334,82 +271,154 @@ fn singleton_injection_period(k: usize) -> u32 {
 mod tests {
     use super::*;
 
+    fn sample_data(k: usize, bs: usize) -> Vec<u8> {
+        (0..(k * bs) as u8).collect()
+    }
+
     #[test]
-    fn test_systematic_recovery() {
+    fn test_non_systematic_prefix_is_not_identity_rows() {
+        let k = 8;
+        for seq in 0..k as u32 {
+            let coeffs = reconstruct_packet_coefficients(seq, k);
+            let one_count = coeffs.iter().filter(|&&v| v == 1).count();
+            let nonzero_count = coeffs.iter().filter(|&&v| v != 0).count();
+            assert!(nonzero_count > 1, "seq={seq} should not be systematic");
+            assert!(
+                !(one_count == 1 && nonzero_count == 1),
+                "seq={seq} unexpectedly produced an identity row"
+            );
+        }
+    }
+
+    #[test]
+    fn test_first_k_packets_decode() {
         let k = 10;
         let bs = 16;
-        let data: Vec<u8> = (0..(k * bs) as u8).collect();
-        let params = LtParams::new(k, bs);
-        let mut encoder = LtEncoder::new(&data, params.clone());
-        let mut decoder = LtDecoder::new(params);
+        let data = sample_data(k, bs);
+        let params = FountainParams::new(k, bs);
+        let mut encoder = FountainEncoder::new(&data, params.clone());
+        let mut decoder = FountainDecoder::new(params);
 
-        // Receive exactly the first 10 systematic packets
         for _ in 0..k {
-            let pkt = encoder.next_packet();
-            assert!(pkt.seq < k as u32);
-            decoder.receive(pkt);
+            decoder.receive(encoder.next_packet());
         }
 
-        assert_eq!(
-            decoder.current_rank, k,
-            "Systematic packets 0..9 should yield rank K"
-        );
-        let recovered = decoder
-            .decode()
-            .expect("Should be able to decode systematic packets");
-        assert_eq!(recovered, data);
+        assert_eq!(decoder.rank(), k);
+        assert_eq!(decoder.decode().as_deref(), Some(data.as_slice()));
     }
 
     #[test]
-    fn test_random_recovery() {
+    fn test_recover_after_dropping_prefix_packets() {
         let k = 10;
         let bs = 16;
-        let data: Vec<u8> = (0..(k * bs) as u8).collect();
-        let params = LtParams::new(k, bs);
-        let mut encoder = LtEncoder::new(&data, params.clone());
-        let mut decoder = LtDecoder::new(params);
+        let data = sample_data(k, bs);
+        let params = FountainParams::new(k, bs);
+        let mut encoder = FountainEncoder::new(&data, params.clone());
+        let mut decoder = FountainDecoder::new(params);
 
-        // Skip systematic packets, use only random fountain packets
-        encoder.next_seq = 10;
-        let mut count = 0;
-        while decoder.current_rank < k && count < 100 {
+        for _ in 0..k {
+            let _ = encoder.next_packet();
+        }
+        for _ in 0..k {
             decoder.receive(encoder.next_packet());
-            count += 1;
         }
 
-        assert_eq!(
-            decoder.current_rank, k,
-            "Should eventually reach rank K with fountain packets"
-        );
-        let recovered = decoder
-            .decode()
-            .expect("Should be able to decode fountain packets");
-        assert_eq!(recovered, data);
+        assert_eq!(decoder.rank(), k);
+        assert_eq!(decoder.decode().as_deref(), Some(data.as_slice()));
     }
 
     #[test]
-    fn test_k2_missing_both_systematic_packets_eventually_recovers() {
-        let k = 2;
+    fn test_duplicate_seq_is_detected() {
+        let k = 4;
         let bs = 16;
-        let data: Vec<u8> = (0..(k * bs) as u8).collect();
-        let params = LtParams::new(k, bs);
-        let mut encoder = LtEncoder::new(&data, params.clone());
-        let mut decoder = LtDecoder::new(params);
+        let data = sample_data(k, bs);
+        let params = FountainParams::new(k, bs);
+        let mut encoder = FountainEncoder::new(&data, params.clone());
+        let mut decoder = FountainDecoder::new(params);
 
-        // seq=0,1 (systematic) を欠落させる。
-        let _ = encoder.next_packet();
-        let _ = encoder.next_packet();
+        let pkt = encoder.next_packet();
+        assert_eq!(
+            decoder.receive_with_outcome(pkt.clone()),
+            ReceiveOutcome::AcceptedRankUp
+        );
+        assert_eq!(
+            decoder.receive_with_outcome(pkt),
+            ReceiveOutcome::DuplicateSeq
+        );
+    }
 
-        // 以降の fountain packet だけでも、singleton 再注入により rank=2 へ到達できること。
-        let mut reached_full_rank = false;
-        for _ in 0..16 {
-            decoder.receive(encoder.next_packet());
-            if decoder.rank() == k {
-                reached_full_rank = true;
-                break;
+    #[test]
+    fn test_linearly_dependent_packet_is_counted_without_rankup() {
+        let k = 4;
+        let bs = 16;
+        let data = sample_data(k, bs);
+        let params = FountainParams::new(k, bs);
+        let mut encoder = FountainEncoder::new(&data, params.clone());
+        let mut decoder = FountainDecoder::new(params);
+
+        let pkt0 = encoder.next_packet(); // seq=0
+        assert_eq!(
+            decoder.receive_with_outcome(pkt0),
+            ReceiveOutcome::AcceptedRankUp
+        );
+        assert_eq!(decoder.rank(), 1);
+
+        // seq=255 は seq=0 と同じ係数行になる（GF(256) の非ゼロ元周期）。
+        let mut pkt255 = None;
+        for _ in 0..255 {
+            pkt255 = Some(encoder.next_packet());
+        }
+        let pkt255 = pkt255.expect("packet must exist");
+        assert_eq!(
+            decoder.receive_with_outcome(pkt255),
+            ReceiveOutcome::AcceptedNoRankUp
+        );
+        assert_eq!(decoder.rank(), 1);
+    }
+
+    #[test]
+    fn test_invalid_packet_rejected() {
+        let params = FountainParams::new(4, 16);
+        let mut decoder = FountainDecoder::new(params);
+
+        let invalid = FountainPacket {
+            seq: 0,
+            coefficients: vec![0; 4],
+            data: vec![0; 16],
+        };
+        assert_eq!(
+            decoder.receive_with_outcome(invalid),
+            ReceiveOutcome::InvalidPacket
+        );
+    }
+
+    #[test]
+    fn test_full_rank_subset_decodes_original() {
+        let k = 4;
+        let bs = 16;
+        let data = sample_data(k, bs);
+        let params = FountainParams::new(k, bs);
+
+        for a in 0..8u32 {
+            for b in (a + 1)..8u32 {
+                for c in (b + 1)..8u32 {
+                    for d in (c + 1)..8u32 {
+                        let mut encoder = FountainEncoder::new(&data, params.clone());
+                        let mut packets = Vec::new();
+                        for _ in 0..=d {
+                            packets.push(encoder.next_packet());
+                        }
+                        let mut decoder = FountainDecoder::new(params.clone());
+                        decoder.receive(packets[a as usize].clone());
+                        decoder.receive(packets[b as usize].clone());
+                        decoder.receive(packets[c as usize].clone());
+                        decoder.receive(packets[d as usize].clone());
+                        if decoder.rank() == k {
+                            assert_eq!(decoder.decode().as_deref(), Some(data.as_slice()));
+                        }
+                    }
+                }
             }
         }
-        assert!(reached_full_rank, "k=2 should recover without seq=0,1");
-        assert!(decoder.decode().is_some());
     }
 }
