@@ -53,61 +53,63 @@ impl SyncDetector {
         let preamble_len = sym_len * repeat;
         let required_len = preamble_len + sym_len;
         let spc = self.spc;
+        let coarse_step = (spc * 2).max(1);
 
         // プリアンブル直後の1シンボル分まで見えてから同期確定する。
         // 部分一致による早期ロックを避けるためのガード。
         if i_ch.len() < start_offset + required_len {
-            return (None, start_offset);
-        }
+            (None, start_offset)
+        } else {
+            let search_range_end = i_ch.len() - required_len;
 
-        let search_range_end = i_ch.len() - required_len;
-
-        // --- 1. 粗同期 (チップ単位でのノンコヒーレント検索) ---
-        let mut best_power_score = 0.0f32;
-        let mut best_n = start_offset;
-
-        for n in (start_offset..=search_range_end).step_by(spc.max(1)) {
-            let (score, _) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
-            if score > best_power_score {
-                best_power_score = score;
-                best_n = n;
-            }
-        }
-
-        // --- 2. 精密同期 (ピーク周辺を1サンプル刻みで) ---
-        if best_power_score > 0.2 {
-            let start = best_n.saturating_sub(spc);
-            let end = (best_n + spc).min(search_range_end);
-
-            let mut fine_best_score = 0.0f32;
-            let mut fine_best_idx = best_n;
-            let mut last_sym_iq = (0.0, 0.0);
-
-            for n in start..=end {
-                let (score, last_iq) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
-                if score > fine_best_score {
-                    fine_best_score = score;
-                    fine_best_idx = n;
-                    last_sym_iq = last_iq;
+            // --- 1. 粗同期 (チップ単位でのノンコヒーレント検索) ---
+            let mut best_power_score = 0.0f32;
+            let mut best_n = start_offset;
+            for n in (start_offset..=search_range_end).step_by(coarse_step) {
+                let (score, _) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
+                if score > best_power_score {
+                    best_power_score = score;
+                    best_n = n;
                 }
             }
 
-            if fine_best_score > 0.4 {
-                return (
-                    Some(SyncResult {
-                        peak_sample_idx: fine_best_idx + preamble_len,
-                        peak_iq: last_sym_iq, // 最後のシンボル(-M)の位相を返す
-                        score: fine_best_score,
-                    }),
-                    fine_best_idx,
-                );
+            // --- 2. 精密同期 (ピーク周辺を1サンプル刻みで) ---
+            if best_power_score > 0.2 {
+                let start = best_n.saturating_sub(coarse_step);
+                let end = (best_n + coarse_step).min(search_range_end);
+
+                let mut fine_best_score = 0.0f32;
+                let mut fine_best_idx = best_n;
+                let mut last_sym_iq = (0.0, 0.0);
+                for n in start..=end {
+                    let (score, last_iq) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
+                    if score > fine_best_score {
+                        fine_best_score = score;
+                        fine_best_idx = n;
+                        last_sym_iq = last_iq;
+                    }
+                }
+
+                if fine_best_score > 0.4 {
+                    (
+                        Some(SyncResult {
+                            peak_sample_idx: fine_best_idx + preamble_len,
+                            peak_iq: last_sym_iq, // 最後のシンボル(-M)の位相を返す
+                            score: fine_best_score,
+                        }),
+                        fine_best_idx,
+                    )
+                } else {
+                    // ストリーミング時の取りこぼしを防ぐため、次回探索用に
+                    // 少なくとも preamble_len に加えて 2シンボル分を保持する。
+                    let keep_tail = sym_len * 2 + spc;
+                    (None, (search_range_end + 1).saturating_sub(keep_tail))
+                }
+            } else {
+                let keep_tail = sym_len * 2 + spc;
+                (None, (search_range_end + 1).saturating_sub(keep_tail))
             }
         }
-
-        // ストリーミング時の取りこぼしを防ぐため、次回探索用に
-        // 少なくとも preamble_len に加えて 2シンボル分を保持する。
-        let keep_tail = sym_len * 2 + spc;
-        (None, (search_range_end + 1).saturating_sub(keep_tail))
     }
 
     /// 1シンボル分だけの相関を計算
@@ -116,14 +118,15 @@ impl SyncDetector {
         let mut sum_q = 0.0f32;
         let mut sum_en = 0.0f32;
 
-        for chip_idx in 0..self.sf {
-            let p = offset + chip_idx * self.spc + (self.spc / 2);
-            if let (Some(&si), Some(&sq)) = (i_ch.get(p), q_ch.get(p)) {
-                let rv = self.pn[chip_idx];
-                sum_i += si * rv;
-                sum_q += sq * rv;
-                sum_en += si * si + sq * sq;
-            }
+        let mut p = offset + (self.spc / 2);
+        for &rv in &self.pn {
+            debug_assert!(p < i_ch.len() && p < q_ch.len());
+            let si = i_ch[p];
+            let sq = q_ch[p];
+            sum_i += si * rv;
+            sum_q += sq * rv;
+            sum_en += si * si + sq * sq;
+            p += self.spc;
         }
         (sum_i, sum_q, sum_en)
     }
@@ -139,47 +142,39 @@ impl SyncDetector {
         repeat: usize,
         sym_len: usize,
     ) -> (f32, (f32, f32)) {
-        let mut ci_buf = Vec::with_capacity(repeat);
-        let mut cq_buf = Vec::with_capacity(repeat);
-        let mut mag_buf = Vec::with_capacity(repeat);
-        let mut pow_buf = Vec::with_capacity(repeat);
         let mut total_power = 0.0f32;
+        let mut min_power = f32::INFINITY;
+        let mut pattern_score = 0.0f32;
+        let mut prev_i = 0.0f32;
+        let mut prev_q = 0.0f32;
+        let mut prev_mag = 0.0f32;
+        let mut has_prev = false;
+        let mut last_iq = (0.0f32, 0.0f32);
+        let inv_sf = 1.0f32 / self.sf as f32;
 
         for rep in 0..repeat {
             let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, n + rep * sym_len);
             let _ = en;
-            let power = (ci * ci + cq * cq) / self.sf as f32;
+            let mag2 = ci * ci + cq * cq;
+            let power = mag2 * inv_sf;
             total_power += power;
-            pow_buf.push(power);
-            ci_buf.push(ci);
-            cq_buf.push(cq);
-            mag_buf.push((ci * ci + cq * cq).sqrt());
-        }
-
-        let avg_power = total_power / repeat as f32;
-        let min_power = pow_buf.iter().copied().fold(f32::INFINITY, f32::min);
-
-        let mut pattern_score = 0.0f32;
-        if repeat >= 2 {
-            for rep in 1..repeat {
-                let prev_mag = mag_buf[rep - 1];
-                let cur_mag = mag_buf[rep];
-                if prev_mag < 1e-3 || cur_mag < 1e-3 {
-                    continue;
-                }
-                let dot = ci_buf[rep - 1] * ci_buf[rep] + cq_buf[rep - 1] * cq_buf[rep];
+            min_power = min_power.min(power);
+            let cur_mag = mag2.sqrt();
+            if has_prev && prev_mag >= 1e-3 && cur_mag >= 1e-3 {
+                let dot = prev_i * ci + prev_q * cq;
                 let denom = prev_mag * cur_mag + 1e-9;
                 let cos_rel = dot / denom;
                 let expected = if rep == repeat - 1 { -1.0 } else { 1.0 };
                 pattern_score += expected * cos_rel;
             }
+            prev_i = ci;
+            prev_q = cq;
+            prev_mag = cur_mag;
+            has_prev = true;
+            last_iq = (ci, cq);
         }
 
-        let last_iq = if repeat > 0 {
-            (ci_buf[repeat - 1], cq_buf[repeat - 1])
-        } else {
-            (0.0, 0.0)
-        };
+        let avg_power = total_power / repeat as f32;
 
         let mut score = avg_power + 0.75 * pattern_score;
 
