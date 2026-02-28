@@ -82,21 +82,34 @@ fn row_scale(dst: &mut [u8], factor: u8) {
     }
 }
 
+#[inline]
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 pub fn reconstruct_packet_coefficients(seq: u32, k: usize) -> Vec<u8> {
     if k == 0 {
         return Vec::new();
     }
 
     // Non-systematic RLNC:
-    // row(seq) = [1, x, x^2, ..., x^(k-1)] over GF(256), x != 0.
-    // step is coprime with 255 to cover all non-zero field elements before repeating.
-    let step = 73u32;
-    let x = ((seq * step) % 255 + 1) as u8;
-
+    // seq から決定論的に擬似乱数係数ベクトルを生成する。
+    // 係数は全て非ゼロ(1..=255)にし、低ランク化を抑える。
+    let mut state =
+        0xD1B5_4A32_D192_ED03u64 ^ ((seq as u64) << 1) ^ ((k as u64).wrapping_mul(0x9E37_79B9));
     let mut coeffs = vec![0u8; k];
-    coeffs[0] = 1;
-    for i in 1..k {
-        coeffs[i] = gf_mul(coeffs[i - 1], x);
+    for c in &mut coeffs {
+        loop {
+            let v = (splitmix64_next(&mut state) & 0xFF) as u8;
+            if v != 0 {
+                *c = v;
+                break;
+            }
+        }
     }
     coeffs
 }
@@ -358,22 +371,38 @@ mod tests {
 
         let pkt0 = encoder.next_packet(); // seq=0
         assert_eq!(
-            decoder.receive_with_outcome(pkt0),
+            decoder.receive_with_outcome(pkt0.clone()),
             ReceiveOutcome::AcceptedRankUp
         );
         assert_eq!(decoder.rank(), 1);
 
-        // seq=255 は seq=0 と同じ係数行になる（GF(256) の非ゼロ元周期）。
-        let mut pkt255 = None;
-        for _ in 0..255 {
-            pkt255 = Some(encoder.next_packet());
+        let factor = 7u8;
+        let mut dep_coeffs = pkt0.coefficients.clone();
+        let mut dep_data = pkt0.data.clone();
+        for c in &mut dep_coeffs {
+            *c = gf_mul(*c, factor);
         }
-        let pkt255 = pkt255.expect("packet must exist");
+        for d in &mut dep_data {
+            *d = gf_mul(*d, factor);
+        }
+        let dependent_pkt = FountainPacket {
+            seq: 10_000,
+            coefficients: dep_coeffs,
+            data: dep_data,
+        };
         assert_eq!(
-            decoder.receive_with_outcome(pkt255),
+            decoder.receive_with_outcome(dependent_pkt),
             ReceiveOutcome::AcceptedNoRankUp
         );
         assert_eq!(decoder.rank(), 1);
+    }
+
+    #[test]
+    fn test_coefficients_do_not_repeat_on_255_cycle() {
+        let k = 32;
+        let a = reconstruct_packet_coefficients(0, k);
+        let b = reconstruct_packet_coefficients(255, k);
+        assert_ne!(a, b, "coefficients should not repeat with period 255");
     }
 
     #[test]
