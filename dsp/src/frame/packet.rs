@@ -5,8 +5,8 @@
 //! [lt_meta: u16 2byte] [payload: 16bytes] [crc-16: 2bytes]
 //!
 //! lt_meta のビット割当:
-//! - 上位6bit: LT k - 1 (1..=64 を表現)
-//! - 下位10bit: LT seq (0..=1023)
+//! - 上位8bit: LT k - 1 (1..=255 を表現)
+//! - 下位8bit: LT seq (0..=255)
 //! ```
 //!
 //! プリアンブルと同期ワードは変調レイヤーで処理される。
@@ -16,10 +16,10 @@ use crate::params::PAYLOAD_SIZE;
 
 /// ヘッダサイズ (lt_seq u16 = 2 bytes)
 pub const HEADER_SIZE: usize = 2;
-pub const LT_K_BITS: usize = 6;
-pub const LT_SEQ_BITS: usize = 10;
-pub const LT_K_MAX: usize = 1 << LT_K_BITS; // 64
-pub const LT_SEQ_MAX: u16 = (1 << LT_SEQ_BITS) - 1; // 1023
+pub const LT_K_BITS: usize = 8;
+pub const LT_SEQ_BITS: usize = 8;
+pub const LT_K_MAX: usize = (1 << LT_K_BITS) - 1; // 255
+pub const LT_SEQ_MAX: u16 = (1 << LT_SEQ_BITS) - 1; // 255
 /// CRCサイズ
 pub const CRC_SIZE: usize = 2;
 /// 1パケットの合計バイト数 (ヘッダ + ペイロード + CRC = 20 bytes)
@@ -168,10 +168,10 @@ mod tests {
 
     #[test]
     fn test_lt_meta_pack_unpack() {
-        let pkt = Packet::new(1023, 64, &[0u8; PAYLOAD_SIZE]);
+        let pkt = Packet::new(255, 255, &[0u8; PAYLOAD_SIZE]);
         let raw = pkt.serialize();
         let parsed = Packet::deserialize(&raw).unwrap();
-        assert_eq!(parsed.lt_seq, 1023);
-        assert_eq!(parsed.lt_k, 64);
+        assert_eq!(parsed.lt_seq, 255);
+        assert_eq!(parsed.lt_k, 255);
     }
 }

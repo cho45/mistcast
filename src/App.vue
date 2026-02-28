@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onBeforeUnmount, ref } from 'vue';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from './worker';
+import sampleWebpUrl from './assets/sample-files/webp.webp';
 
 // Vite's worker loading
 import MistcastWorker from './worker?worker';
@@ -10,6 +11,8 @@ import processorsUrl from './audio-processors?url';
 
 const inputText = ref("Hello Acoustic World!");
 const outputText = ref("");
+const outputImageUrl = ref("");
+const outputImageMime = ref("");
 const status = ref("Idle");
 const isMicActive = ref(false);
 
@@ -33,6 +36,80 @@ let audioContext: AudioContext | null = null;
 let encoderNode: AudioWorkletNode | null = null;
 let decoderNode: AudioWorkletNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
+
+type ImagePayload = {
+  mime: string;
+  bytes: Uint8Array;
+};
+
+function clearOutput() {
+  outputText.value = "";
+  outputImageMime.value = "";
+  if (outputImageUrl.value) {
+    URL.revokeObjectURL(outputImageUrl.value);
+    outputImageUrl.value = "";
+  }
+}
+
+function trimTrailingZeros(data: Uint8Array): Uint8Array {
+  let last = data.length;
+  while (last > 0 && data[last - 1] === 0) last--;
+  return data.slice(0, last);
+}
+
+function detectImageMime(data: Uint8Array): string | null {
+  if (data.length >= 12 &&
+      data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 &&
+      data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) {
+    return "image/webp";
+  }
+  if (data.length >= 8 &&
+      data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47 &&
+      data[4] === 0x0d && data[5] === 0x0a && data[6] === 0x1a && data[7] === 0x0a) {
+    return "image/png";
+  }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (data.length >= 6 &&
+      data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46 &&
+      data[3] === 0x38 && (data[4] === 0x37 || data[4] === 0x39) && data[5] === 0x61) {
+    return "image/gif";
+  }
+  return null;
+}
+
+function extractImagePayload(data: Uint8Array): ImagePayload | null {
+  const mime = detectImageMime(data);
+  if (!mime) return null;
+
+  if (mime === "image/webp" && data.length >= 8) {
+    const riffSize = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
+    const total = Math.min(data.length, (riffSize >>> 0) + 8);
+    return { mime, bytes: data.slice(0, total) };
+  }
+
+  return { mime, bytes: trimTrailingZeros(data) };
+}
+
+function setDecodedOutput(recovered: Uint8Array) {
+  clearOutput();
+  const image = extractImagePayload(recovered);
+  if (image) {
+    outputImageMime.value = image.mime;
+    const blobBytes = new Uint8Array(image.bytes.length);
+    blobBytes.set(image.bytes);
+    outputImageUrl.value = URL.createObjectURL(new Blob([blobBytes.buffer], { type: image.mime }));
+    return;
+  }
+  outputText.value = new TextDecoder().decode(trimTrailingZeros(recovered));
+}
+
+async function loadSampleWebp(): Promise<Uint8Array> {
+  const res = await fetch(sampleWebpUrl);
+  const buf = await res.arrayBuffer();
+  return new Uint8Array(buf);
+}
 
 function pushRxLog(line: string) {
   rxLogs.value.push(line);
@@ -64,12 +141,12 @@ async function init() {
   status.value = "Ready";
 }
 
-async function startSending() {
+async function startSendingData(data: Uint8Array) {
   if (!backend || !audioContext) return;
   if (audioContext.state === 'suspended') await audioContext.resume();
 
   status.value = "Preparing...";
-  outputText.value = "";
+  clearOutput();
   receivedPackets.value = 0;
   rankPackets.value = 0;
   stalledPackets.value = 0;
@@ -84,16 +161,11 @@ async function startSending() {
   rxLogs.value = [];
   rxTick.value = 0;
 
-  const data = new TextEncoder().encode(inputText.value);
-  
   // デコーダはパケット内のk情報から自動追従する。
   await backend.startDecoder(
     audioContext.sampleRate, 
     Comlink.proxy((recovered: Uint8Array) => {
-        // パディングの除去
-        let last = recovered.length;
-        while(last > 0 && recovered[last-1] === 0) last--;
-        outputText.value = new TextDecoder().decode(recovered.slice(0, last));
+        setDecodedOutput(recovered);
         status.value = "Decoded!";
     }),
     Comlink.proxy((p: any) => {
@@ -123,6 +195,16 @@ async function startSending() {
 
   status.value = "Transmitting...";
   await backend.startEncoder(data, audioContext.sampleRate);
+}
+
+async function startSendingText() {
+  const data = new TextEncoder().encode(inputText.value);
+  await startSendingData(data);
+}
+
+async function startSendingSampleImage() {
+  const data = await loadSampleWebp();
+  await startSendingData(data);
 }
 
 async function stopSending() {
@@ -159,7 +241,7 @@ async function toggleMic() {
 
 async function reset() {
     await backend?.resetDecoder();
-    outputText.value = "";
+    clearOutput();
     receivedPackets.value = 0;
     rankPackets.value = 0;
     stalledPackets.value = 0;
@@ -176,6 +258,10 @@ async function reset() {
     rxTick.value = 0;
     status.value = "Ready";
 }
+
+onBeforeUnmount(() => {
+  clearOutput();
+});
 </script>
 
 <template>
@@ -194,7 +280,8 @@ async function reset() {
           <h3>Sender (Fountain Stream)</h3>
           <textarea v-model="inputText" rows="3" placeholder="Enter text to broadcast..."></textarea>
           <div class="btn-group">
-            <button @click="startSending" class="btn btn-primary" :disabled="status === 'Transmitting...'">Start Transmission</button>
+            <button @click="startSendingText" class="btn btn-primary" :disabled="status === 'Transmitting...'">Send Text</button>
+            <button @click="startSendingSampleImage" class="btn" :disabled="status === 'Transmitting...'">Send Sample Image</button>
             <button @click="stopSending" class="btn">Stop</button>
           </div>
         </div>
@@ -234,6 +321,10 @@ async function reset() {
           <div class="display">
             <p><strong>Decoded Result:</strong></p>
             <pre v-if="outputText">{{ outputText }}</pre>
+            <div v-else-if="outputImageUrl" class="image-result">
+              <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
+              <p class="image-meta">{{ outputImageMime }}</p>
+            </div>
             <p v-else class="placeholder">Waiting for synchronization...</p>
           </div>
         </div>
@@ -269,6 +360,9 @@ textarea { width: 100%; padding: 0.5rem; border: 1px solid #ccc; border-radius: 
 .display { margin-top: 1rem; background: #f8f9fa; border: 1px solid #e9ecef; padding: 1rem; border-radius: 4px; min-height: 120px; }
 .placeholder { color: #999; font-style: italic; }
 pre { white-space: pre-wrap; font-size: 1.1rem; color: #007bff; margin: 0; }
+.image-result { display: flex; flex-direction: column; gap: 0.5rem; }
+.image-result img { max-width: 100%; max-height: 240px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+.image-meta { margin: 0; color: #666; font-size: 0.85rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 button { padding: 0.6rem 1.2rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-weight: 600; }
 .btn-primary { background: #007bff; color: #fff; }
 .btn-active { background: #dc3545; color: #fff; }

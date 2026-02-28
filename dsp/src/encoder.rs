@@ -4,7 +4,7 @@ use crate::{
     coding::fec,
     coding::fountain::{FountainEncoder, FountainPacket, FountainParams},
     coding::interleaver::BlockInterleaver,
-    frame::packet::{Packet, LT_K_MAX},
+    frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX},
     params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
     phy::modulator::Modulator,
     DspConfig,
@@ -55,7 +55,7 @@ impl Encoder {
     }
 
     fn encode_packet_bits(&mut self, packet: &FountainPacket) -> Vec<u8> {
-        let seq = (packet.seq & (crate::frame::packet::LT_SEQ_MAX as u32)) as u16;
+        let seq = (packet.seq % (u32::from(LT_SEQ_MAX) + 1)) as u16;
         let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
         let pkt_bytes = pkt.serialize();
         let bits = fec::bytes_to_bits(&pkt_bytes);
