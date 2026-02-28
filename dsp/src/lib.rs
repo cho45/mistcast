@@ -84,6 +84,7 @@ pub struct WasmDecoder {
 impl WasmDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32) -> Self {
+        console_error_panic_hook::set_once();
         let config = DspConfig::new(sample_rate);
         WasmDecoder {
             inner: decoder::Decoder::new(

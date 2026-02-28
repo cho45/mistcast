@@ -16,7 +16,9 @@ use crate::{
 };
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::{f32x4, v128, v128_store};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
@@ -122,6 +124,7 @@ impl Decoder {
             let sync = if let Some(s) = self.current_sync.clone() {
                 s
             } else {
+                #[cfg(not(target_arch = "wasm32"))]
                 let sync_start = Instant::now();
                 let (sync_opt, next_search_idx) = self.sync_detector.detect(
                     &self.sample_buffer_i,
@@ -129,7 +132,10 @@ impl Decoder {
                     self.last_search_idx,
                 );
                 self.stats_sync_calls += 1;
-                self.stats_sync_time += sync_start.elapsed();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.stats_sync_time += sync_start.elapsed();
+                }
 
                 if let Some(s) = sync_opt {
                     self.current_sync = Some(s.clone());
