@@ -1,522 +1,68 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue';
-import * as Comlink from 'comlink';
-import type { MistcastBackend } from './worker';
-import sampleWebpUrl from './assets/sample-files/webp.webp';
-
-// Vite's worker loading
-import MistcastWorker from './worker?worker';
-// AudioWorklet module URL
+import Sender from './components/Sender.vue';
+import Receiver from './components/Receiver.vue';
 import processorsUrl from './audio-processors?url';
+import { createDemoRuntime, provideDemoRuntime, type AudioCore } from './demo-runtime';
 
-const inputText = ref("Hello Acoustic World!");
-const outputText = ref("");
-const outputImageUrl = ref("");
-const outputImageMime = ref("");
-const status = ref("Idle");
-const isMicActive = ref(false);
-
-const receivedPackets = ref(0);
-const totalNeededPackets = ref(0);
-const rankPackets = ref(0);
-const stalledPackets = ref(0);
-const dependentPackets = ref(0);
-const duplicatePackets = ref(0);
-const crcErrorPackets = ref(0);
-const parseErrorPackets = ref(0);
-const invalidNeighborPackets = ref(0);
-const lastPacketSeq = ref(-1);
-const lastRankUpSeq = ref(-1);
-const progressPercent = ref(0);
-const decoderProcAvgMs = ref(0);
-const decoderProcMaxMs = ref(0);
-const decoderProcLastMs = ref(0);
-const decoderProcBlockMs = ref(0);
-const decoderProcOverruns = ref(0);
-const decoderProcInputRms = ref(0);
-const decoderProcBlocks = ref(0);
-const rxLogs = ref<string[]>([]);
-const rxTick = ref(0);
-const rxNoChangeTicks = ref(0);
-const rxLogCopied = ref(false);
-const fftCanvas = ref<HTMLCanvasElement | null>(null);
-let rxLogCopiedTimer: number | null = null;
-let fftRafId: number | null = null;
-let analyserNode: AnalyserNode | null = null;
-let fftData: Float32Array<ArrayBuffer> | null = null;
-
-let backend: Comlink.Remote<MistcastBackend> | null = null;
 let audioContext: AudioContext | null = null;
-let encoderNode: AudioWorkletNode | null = null;
-let decoderNode: AudioWorkletNode | null = null;
-let rxInputGain: GainNode | null = null;
-let decoderStreamSink: MediaStreamAudioDestinationNode | null = null;
-let micSource: MediaStreamAudioSourceNode | null = null;
-let micStream: MediaStream | null = null;
+let demoAirGapNode: GainNode | null = null;
+let initPromise: Promise<AudioCore> | null = null;
+const appStatus = ref('Idle');
 
-type ImagePayload = {
-  mime: string;
-  bytes: Uint8Array;
-};
-
-function clearOutput() {
-  outputText.value = "";
-  outputImageMime.value = "";
-  if (outputImageUrl.value) {
-    URL.revokeObjectURL(outputImageUrl.value);
-    outputImageUrl.value = "";
+async function ensureAudioCore(): Promise<AudioCore> {
+  if (audioContext && demoAirGapNode) {
+    return { audioContext, demoAirGapNode };
   }
-}
+  if (initPromise) return initPromise;
 
-function trimTrailingZeros(data: Uint8Array): Uint8Array {
-  let last = data.length;
-  while (last > 0 && data[last - 1] === 0) last--;
-  return data.slice(0, last);
-}
+  initPromise = (async () => {
+    const context = new AudioContext({ sampleRate: 48000 });
+    await context.audioWorklet.addModule(processorsUrl);
+    const airGap = context.createGain();
+    airGap.gain.value = 1.0;
 
-function detectImageMime(data: Uint8Array): string | null {
-  if (data.length >= 12 &&
-      data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 &&
-      data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) {
-    return "image/webp";
-  }
-  if (data.length >= 8 &&
-      data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47 &&
-      data[4] === 0x0d && data[5] === 0x0a && data[6] === 0x1a && data[7] === 0x0a) {
-    return "image/png";
-  }
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
-    return "image/jpeg";
-  }
-  if (data.length >= 6 &&
-      data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46 &&
-      data[3] === 0x38 && (data[4] === 0x37 || data[4] === 0x39) && data[5] === 0x61) {
-    return "image/gif";
-  }
-  return null;
-}
+    audioContext = context;
+    demoAirGapNode = airGap;
+    runtime.coreReady.value = true;
+    appStatus.value = 'Ready (Rx standby)';
 
-function extractImagePayload(data: Uint8Array): ImagePayload | null {
-  const mime = detectImageMime(data);
-  if (!mime) return null;
+    return { audioContext: context, demoAirGapNode: airGap };
+  })();
 
-  if (mime === "image/webp" && data.length >= 8) {
-    const riffSize = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-    const total = Math.min(data.length, (riffSize >>> 0) + 8);
-    return { mime, bytes: data.slice(0, total) };
-  }
-
-  return { mime, bytes: trimTrailingZeros(data) };
-}
-
-function setDecodedOutput(recovered: Uint8Array) {
-  clearOutput();
-  const image = extractImagePayload(recovered);
-  if (image) {
-    outputImageMime.value = image.mime;
-    const blobBytes = new Uint8Array(image.bytes.length);
-    blobBytes.set(image.bytes);
-    outputImageUrl.value = URL.createObjectURL(new Blob([blobBytes.buffer], { type: image.mime }));
-    return;
-  }
-  outputText.value = new TextDecoder().decode(trimTrailingZeros(recovered));
-}
-
-function drawSenderSpectrumFrame() {
-  if (!audioContext || !analyserNode || !fftData || !fftCanvas.value) {
-    fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
-    return;
-  }
-
-  const canvas = fftCanvas.value;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
-    return;
-  }
-
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  const cssW = Math.max(10, canvas.clientWidth || 640);
-  const cssH = Math.max(10, canvas.clientHeight || 180);
-  const w = Math.floor(cssW * dpr);
-  const h = Math.floor(cssH * dpr);
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-  analyserNode.getFloatFrequencyData(fftData);
-  const nyquist = audioContext.sampleRate / 2;
-  const fMax = Math.max(1, Math.min(20000, nyquist));
-  const minDb = analyserNode.minDecibels;
-  const maxDb = analyserNode.maxDecibels;
-
-  const xFromFreq = (f: number) => (Math.max(0, Math.min(f, fMax)) / fMax) * cssW;
-  const yFromDb = (db: number) => {
-    const n = (db - minDb) / (maxDb - minDb);
-    return cssH - Math.min(1, Math.max(0, n)) * cssH;
-  };
-
-  ctx.clearRect(0, 0, cssW, cssH);
-  ctx.fillStyle = "#f9fcff";
-  ctx.fillRect(0, 0, cssW, cssH);
-
-  ctx.strokeStyle = "#d8e3ef";
-  ctx.lineWidth = 1;
-  const tickStep = fMax <= 12000 ? 1000 : 2000;
-  const freqTicks: number[] = [];
-  for (let f = 0; f <= fMax; f += tickStep) freqTicks.push(f);
-  for (const f of freqTicks) {
-    const x = xFromFreq(f);
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, cssH);
-    ctx.stroke();
-  }
-
-  const dbTicks = [-90, -75, -60, -45, -30, -15, 0];
-  for (const db of dbTicks) {
-    const y = yFromDb(db);
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(cssW, y);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "#0f6bd7";
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  const bins = fftData.length;
-  for (let x = 0; x < cssW; x++) {
-    const t = x / Math.max(1, cssW - 1);
-    const f = t * fMax;
-    const bin = Math.min(bins - 1, Math.max(0, Math.round((f / nyquist) * (bins - 1))));
-    const y = yFromDb(fftData[bin]);
-    if (x === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  ctx.fillStyle = "#5a6470";
-  ctx.font = "11px IBM Plex Mono, Menlo, monospace";
-  for (const f of freqTicks) {
-    const x = xFromFreq(f);
-    const label = f >= 1000 ? `${Math.round(f / 1000)}k` : `${f}`;
-    ctx.fillText(label, Math.min(cssW - 22, Math.max(0, x + 2)), cssH - 4);
-  }
-
-  fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
-}
-
-function startSenderSpectrum() {
-  if (fftRafId !== null) return;
-  fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
-}
-
-function stopSenderSpectrum() {
-  if (fftRafId !== null) {
-    window.cancelAnimationFrame(fftRafId);
-    fftRafId = null;
-  }
-}
-
-async function loadSampleWebp(): Promise<Uint8Array> {
-  const res = await fetch(sampleWebpUrl);
-  const buf = await res.arrayBuffer();
-  return new Uint8Array(buf);
-}
-
-function pushRxLog(line: string) {
-  rxLogs.value.push(line);
-  if (rxLogs.value.length > 120) {
-    rxLogs.value.splice(0, rxLogs.value.length - 120);
-  }
-}
-
-async function copyRxLogs() {
-  const text = rxLogs.value.join("\n");
-  if (!text) return;
   try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-  }
-  rxLogCopied.value = true;
-  if (rxLogCopiedTimer !== null) {
-    window.clearTimeout(rxLogCopiedTimer);
-  }
-  rxLogCopiedTimer = window.setTimeout(() => {
-    rxLogCopied.value = false;
-    rxLogCopiedTimer = null;
-  }, 1200);
-}
-
-function resetDecoderProgressState(clearLogs: boolean) {
-  receivedPackets.value = 0;
-  totalNeededPackets.value = 0;
-  rankPackets.value = 0;
-  stalledPackets.value = 0;
-  dependentPackets.value = 0;
-  duplicatePackets.value = 0;
-  crcErrorPackets.value = 0;
-  parseErrorPackets.value = 0;
-  invalidNeighborPackets.value = 0;
-  lastPacketSeq.value = -1;
-  lastRankUpSeq.value = -1;
-  progressPercent.value = 0;
-  if (clearLogs) {
-    rxLogs.value = [];
-    rxTick.value = 0;
-    rxNoChangeTicks.value = 0;
+    return await initPromise;
+  } finally {
+    initPromise = null;
   }
 }
 
-function resetDecoderProcessorStats() {
-  decoderProcAvgMs.value = 0;
-  decoderProcMaxMs.value = 0;
-  decoderProcLastMs.value = 0;
-  decoderProcBlockMs.value = 0;
-  decoderProcOverruns.value = 0;
-  decoderProcInputRms.value = 0;
-  decoderProcBlocks.value = 0;
-}
+const runtime = createDemoRuntime(ensureAudioCore);
+provideDemoRuntime(runtime);
 
-function makeOnPacketCallback() {
-  return Comlink.proxy((recovered: Uint8Array) => {
-    setDecodedOutput(recovered);
-    status.value = "Decoded!";
-  });
-}
-
-function makeOnProgressCallback() {
-  return Comlink.proxy((p: any) => {
-    const prevReceived = receivedPackets.value;
-    const prevRank = rankPackets.value;
-    receivedPackets.value = p.received;
-    totalNeededPackets.value = p.needed;
-    rankPackets.value = p.rank ?? 0;
-    stalledPackets.value = p.stalled ?? Math.max(0, receivedPackets.value - rankPackets.value);
-    dependentPackets.value = p.dependent ?? stalledPackets.value;
-    duplicatePackets.value = p.duplicate ?? 0;
-    crcErrorPackets.value = p.crcErrors ?? 0;
-    parseErrorPackets.value = p.parseErrors ?? 0;
-    invalidNeighborPackets.value = p.invalidNeighbors ?? 0;
-    lastPacketSeq.value = p.lastPacketSeq ?? -1;
-    lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
-    progressPercent.value = p.progress;
-    const proc = p.decoderProc;
-    if (proc) {
-      decoderProcAvgMs.value = proc.avgProcessMs ?? 0;
-      decoderProcMaxMs.value = proc.maxProcessMs ?? 0;
-      decoderProcLastMs.value = proc.lastProcessMs ?? 0;
-      decoderProcBlockMs.value = proc.blockDurationMs ?? 0;
-      decoderProcOverruns.value = proc.overruns ?? 0;
-      decoderProcInputRms.value = proc.inputRms ?? 0;
-      decoderProcBlocks.value = proc.blocks ?? 0;
-    }
-    rxTick.value += 1;
-    const changed = prevReceived !== receivedPackets.value || prevRank !== rankPackets.value || p.complete;
-    if (changed) {
-      rxNoChangeTicks.value = 0;
-      pushRxLog(
-        `#${rxTick.value} recv=${receivedPackets.value} rank=${rankPackets.value}/${totalNeededPackets.value} stall=${stalledPackets.value} dup=${duplicatePackets.value} crc=${crcErrorPackets.value} parse=${parseErrorPackets.value} invN=${invalidNeighborPackets.value} prog=${(progressPercent.value * 100).toFixed(1)}% lastSeq=${lastPacketSeq.value} lastRankUp=${lastRankUpSeq.value}${p.complete ? " COMPLETE" : ""}`
-      );
-      return;
-    }
-
-    rxNoChangeTicks.value += 1;
-    // 受信が進まない期間も、デコーダが生きているかを可視化するハートビートを残す。
-    if (rxNoChangeTicks.value % 64 === 0) {
-      pushRxLog(
-        `#${rxTick.value} heartbeat no-progress=${rxNoChangeTicks.value} recv=${receivedPackets.value} rank=${rankPackets.value}/${totalNeededPackets.value} rms=${decoderProcInputRms.value.toFixed(5)} avgMs=${decoderProcAvgMs.value.toFixed(3)} overrun=${decoderProcOverruns.value}`
-      );
-    }
-  });
-}
-
-async function startDecoderStandby() {
-  if (!backend || !audioContext) return;
-  await backend.startDecoder(
-    audioContext.sampleRate,
-    makeOnPacketCallback(),
-    makeOnProgressCallback()
-  );
-}
-
-function safeDisconnect<T extends AudioNode>(node: T | null, destination?: AudioNode | null) {
-  if (!node) return;
+async function initialize() {
+  if (runtime.coreReady.value) return;
+  appStatus.value = 'Initializing...';
   try {
-    if (destination) {
-      node.disconnect(destination);
-    } else {
-      node.disconnect();
-    }
-  } catch {
-    // no-op
+    await ensureAudioCore();
+  } catch (e) {
+    console.error(e);
+    appStatus.value = 'Init Error';
   }
-}
-
-function routeDecoderInput(source: "encoder" | "mic") {
-  if (!encoderNode || !rxInputGain) return;
-
-  safeDisconnect(encoderNode, rxInputGain);
-  safeDisconnect(micSource, rxInputGain);
-
-  if (source === "mic") {
-    micSource?.connect(rxInputGain);
-  } else {
-    encoderNode.connect(rxInputGain);
-  }
-}
-
-async function init() {
-  if (backend) return;
-  status.value = "Initializing...";
-
-  const worker = new MistcastWorker();
-  backend = Comlink.wrap<MistcastBackend>(worker);
-  await backend.init();
-
-  audioContext = new AudioContext({ sampleRate: 48000 });
-  await audioContext.audioWorklet.addModule(processorsUrl);
-
-  encoderNode = new AudioWorkletNode(audioContext, 'encoder-processor');
-  await backend.setAudioOutPort(Comlink.transfer(encoderNode.port, [encoderNode.port]));
-
-  decoderNode = new AudioWorkletNode(audioContext, 'decoder-processor', {
-    numberOfInputs: 1,
-    numberOfOutputs: 1,
-    channelCount: 1,
-    channelCountMode: "explicit",
-    channelInterpretation: "discrete",
-  });
-  await backend.setAudioInPort(Comlink.transfer(decoderNode.port, [decoderNode.port]));
-
-  rxInputGain = audioContext.createGain();
-  rxInputGain.gain.value = 1.0;
-  rxInputGain.connect(decoderNode);
-  // 無音Gain(0)->destination はブラウザ最適化で処理停止されることがあるため、
-  // スピーカーへ出さない MediaStreamDestination を常時シンクとして使う。
-  decoderStreamSink = audioContext.createMediaStreamDestination();
-  decoderNode.connect(decoderStreamSink);
-
-  analyserNode = audioContext.createAnalyser();
-  analyserNode.fftSize = 4096;
-  analyserNode.smoothingTimeConstant = 0.6;
-  analyserNode.minDecibels = -100;
-  analyserNode.maxDecibels = -20;
-  fftData = new Float32Array(
-    new ArrayBuffer(analyserNode.frequencyBinCount * Float32Array.BYTES_PER_ELEMENT)
-  );
-
-  encoderNode.connect(audioContext.destination);
-  encoderNode.connect(analyserNode);
-  routeDecoderInput("encoder");
-  startSenderSpectrum();
-
-  await startDecoderStandby();
-  
-  status.value = "Ready (Rx standby)";
-}
-
-async function startSendingData(data: Uint8Array) {
-  if (!backend || !audioContext) return;
-  if (audioContext.state === 'suspended') await audioContext.resume();
-
-  status.value = "Preparing...";
-  clearOutput();
-  // 送信開始で受信パケット表示はリセットするが、DecoderProcessor統計は保持する。
-  resetDecoderProgressState(true);
-
-  status.value = "Transmitting...";
-  await backend.startEncoder(data, audioContext.sampleRate);
-}
-
-async function startSendingText() {
-  const data = new TextEncoder().encode(inputText.value);
-  await startSendingData(data);
-}
-
-async function startSendingSampleImage() {
-  const data = await loadSampleWebp();
-  await startSendingData(data);
-}
-
-async function stopSending() {
-    await backend?.stopEncoder();
-    status.value = "Stopped";
-}
-
-async function toggleMic() {
-  if (!audioContext || !decoderNode || !encoderNode) return;
-  if (audioContext.state === 'suspended') await audioContext.resume();
-
-  if (!isMicActive.value) {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          channelCount: 1,
-          sampleRate: 48000,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        } 
-      });
-      micStream = stream;
-      micSource = audioContext.createMediaStreamSource(stream);
-      routeDecoderInput("mic");
-      isMicActive.value = true;
-      status.value = "Mic Active (Rx)";
-    } catch (e) {
-      console.error(e);
-      status.value = "Mic Error";
-    }
-  } else {
-    micSource?.disconnect();
-    micSource = null;
-    micStream?.getTracks().forEach((t) => t.stop());
-    micStream = null;
-    routeDecoderInput("encoder");
-    isMicActive.value = false;
-    status.value = "Internal Loopback";
-  }
-}
-
-async function reset() {
-  decoderNode?.port.postMessage({ type: "reset" });
-  await backend?.resetDecoder();
-  await startDecoderStandby();
-  clearOutput();
-  resetDecoderProgressState(true);
-  resetDecoderProcessorStats();
-  status.value = "Ready (Rx standby)";
 }
 
 onBeforeUnmount(() => {
-  stopSenderSpectrum();
-  safeDisconnect(encoderNode, analyserNode);
-  safeDisconnect(analyserNode);
-  analyserNode = null;
-  fftData = null;
-  if (rxLogCopiedTimer !== null) {
-    window.clearTimeout(rxLogCopiedTimer);
+  try {
+    demoAirGapNode?.disconnect();
+  } catch {
+    // no-op
   }
-  safeDisconnect(micSource);
-  safeDisconnect(encoderNode);
-  safeDisconnect(rxInputGain);
-  safeDisconnect(decoderNode, decoderStreamSink);
-  safeDisconnect(decoderNode);
-  micStream?.getTracks().forEach((t) => t.stop());
-  clearOutput();
+  demoAirGapNode = null;
+
+  if (audioContext && audioContext.state !== 'closed') {
+    void audioContext.close();
+  }
+  audioContext = null;
 });
 </script>
 
@@ -525,117 +71,30 @@ onBeforeUnmount(() => {
     <header class="hero">
       <h1>Mistcast Demo v2.3</h1>
       <p>Acoustic DSSS + RLNC playground</p>
-      <div class="status-chip" :class="status.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
-        {{ status }}
+      <div class="status-chip" :class="appStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
+        {{ appStatus }}
       </div>
     </header>
 
     <main class="content">
-      <section v-if="!backend" class="panel init-panel">
+      <section v-if="!runtime.coreReady.value" class="panel init-panel">
         <p>まず Audio System を初期化して、送受信ノードを作成します。</p>
-        <button @click="init" class="btn btn-primary btn-large">Initialize Audio System</button>
+        <button @click="initialize" class="btn btn-primary btn-large">Initialize Audio System</button>
       </section>
 
       <template v-else>
         <div class="split-panels">
-          <section class="panel sender-panel">
-            <h2>Sender</h2>
-            <p class="panel-sub">Text / Image を音響フレームへ変調して送信</p>
-            <textarea v-model="inputText" rows="4" placeholder="Enter text to broadcast..." />
-            <div class="button-row">
-              <button @click="startSendingText" class="btn btn-primary" :disabled="status === 'Transmitting...'">Send Text</button>
-              <button @click="startSendingSampleImage" class="btn" :disabled="status === 'Transmitting...'">Send Sample Image</button>
-              <button @click="stopSending" class="btn btn-danger">Stop</button>
-            </div>
-            <div class="spectrum-panel">
-              <p class="spectrum-title">Sender FFT (Linear Frequency Axis)</p>
-              <canvas ref="fftCanvas" class="spectrum-canvas"></canvas>
-            </div>
-          </section>
-
-          <section class="panel receiver-panel">
-            <div class="receiver-header">
-              <div>
-                <h2>Receiver</h2>
-                <p class="panel-sub">Adaptive K decode + progress tracing</p>
-              </div>
-              <div class="button-row compact">
-                <button @click="toggleMic" :class="{ 'btn-active': isMicActive }" class="btn">
-                  {{ isMicActive ? 'Disable Mic' : 'Enable Mic' }}
-                </button>
-                <button @click="reset" class="btn">Clear</button>
-              </div>
-            </div>
-
-            <div class="path-banner">
-              <span class="path-label">Input Path</span>
-              <code v-if="!isMicActive">[Encoder] -digital- [Decoder]</code>
-              <code v-else>[Mic] -acoustic- [Decoder]</code>
-            </div>
-
-            <div class="display">
-              <p class="display-title">Decoded Result</p>
-              <pre v-if="outputText">{{ outputText }}</pre>
-              <div v-else-if="outputImageUrl" class="image-result">
-                <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
-                <p class="image-meta">{{ outputImageMime }}</p>
-              </div>
-              <p v-else class="placeholder">Waiting for synchronization...</p>
-            </div>
-
-            <div class="progress-block">
-              <div class="progress-head">
-                <span>Rank {{ rankPackets }} / {{ totalNeededPackets || "?" }}</span>
-                <span>{{ (progressPercent * 100).toFixed(1) }}%</span>
-              </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill" :style="{ width: (progressPercent * 100) + '%' }" />
-              </div>
-            </div>
-
-            <div class="metric-grid">
-              <div class="metric"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
-              <div class="metric"><span>Stall</span><strong>{{ stalledPackets }}</strong></div>
-              <div class="metric"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
-              <div class="metric"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
-              <div class="metric"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
-              <div class="metric"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
-              <div class="metric"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
-              <div class="metric"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
-              <div class="metric"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
-            </div>
-
-            <div class="proc-stats">
-              <p class="proc-title">DecoderProcessor Timing</p>
-              <div class="proc-grid">
-                <div><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
-                <div><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
-                <div><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
-                <div><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
-                <div><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
-                <div><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
-                <div><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
-              </div>
-            </div>
-
-            <div class="rx-log" v-if="rxLogs.length > 0">
-              <div class="rx-log-header">
-                <span>Rx Log</span>
-                <button @click="copyRxLogs" class="btn btn-xs">{{ rxLogCopied ? "Copied" : "Copy" }}</button>
-              </div>
-              <pre>{{ rxLogs.join('\n') }}</pre>
-            </div>
-          </section>
+          <Sender />
+          <Receiver />
         </div>
       </template>
     </main>
 
     <footer class="footnote">
-      <div><strong>Speaker Out:</strong> <code>[Encoder] -sound- [Destination]</code></div>
+      <div><strong>Demo Bridge:</strong> <code>[Sender] -demoAirGapNode- [Receiver]</code></div>
     </footer>
   </div>
 </template>
-
 <style>
 * {
   box-sizing: border-box;
