@@ -38,7 +38,6 @@ const LLR_CLIP_ABS: f32 = 6.0;
 const LLR_NOISE_EMA_ALPHA: f32 = 0.04;
 const LLR_NOISE_VAR_MIN: f32 = 0.02;
 const LLR_NOISE_VAR_MAX: f32 = 2.0;
-const LLR_PHASE_ERR_REF_RAD: f32 = 0.9;
 const LLR_PHASE_ERR_ERASE_RAD: f32 = 0.55;
 const LLR_TIMING_ERR_ERASE: f32 = 0.45;
 
@@ -863,23 +862,21 @@ fn update_timing_offset(
 
 #[inline]
 fn decode_diff_symbol_soft(diff: Complex32) -> SymbolSoftDecision {
-    let amp = diff.norm().max(1e-6);
-    let diff_n = diff / amp;
     match MODULATION {
         DifferentialModulation::Dbpsk => {
-            let decided = if diff_n.re >= 0.0 {
+            let decided = if diff.re >= 0.0 {
                 Complex32::new(1.0, 0.0)
             } else {
                 Complex32::new(-1.0, 0.0)
             };
             SymbolSoftDecision {
                 decided,
-                llrs: [diff_n.re, 0.0],
+                llrs: [4.0 * diff.re, 0.0],
                 llr_count: 1,
             }
         }
         DifferentialModulation::Dqpsk => {
-            let (symbol, _pair, pair_llr) = dqpsk_hard_bits_and_llr(diff_n);
+            let (symbol, _pair, pair_llr) = dqpsk_hard_bits_and_llr(diff);
             SymbolSoftDecision {
                 decided: symbol,
                 llrs: pair_llr,
@@ -893,32 +890,21 @@ fn decode_diff_symbol_soft(diff: Complex32) -> SymbolSoftDecision {
 fn dqpsk_hard_bits_and_llr(diff: Complex32) -> (Complex32, [u8; 2], [f32; 2]) {
     // マッピング:
     // +1 -> 00, +j -> 01, -1 -> 11, -j -> 10
-    let d1 = (diff.re - 1.0).powi(2) + diff.im.powi(2); // +1
-    let dj = diff.re.powi(2) + (diff.im - 1.0).powi(2); // +j
-    let dm1 = (diff.re + 1.0).powi(2) + diff.im.powi(2); // -1
-    let dnj = diff.re.powi(2) + (diff.im + 1.0).powi(2); // -j
+    let llr0 = 2.0 * (diff.re + diff.im);
+    let llr1 = 2.0 * (diff.re - diff.im);
 
-    let (symbol, bits) = if d1 <= dj && d1 <= dm1 && d1 <= dnj {
-        (Complex32::new(1.0, 0.0), [0u8, 0u8])
-    } else if dj <= d1 && dj <= dm1 && dj <= dnj {
-        (Complex32::new(0.0, 1.0), [0u8, 1u8])
-    } else if dm1 <= d1 && dm1 <= dj && dm1 <= dnj {
-        (Complex32::new(-1.0, 0.0), [1u8, 1u8])
-    } else {
-        (Complex32::new(0.0, -1.0), [1u8, 0u8])
+    let b0 = if llr0 >= 0.0 { 0u8 } else { 1u8 };
+    let b1 = if llr1 >= 0.0 { 0u8 } else { 1u8 };
+
+    let symbol = match (b0, b1) {
+        (0, 0) => Complex32::new(1.0, 0.0),
+        (0, 1) => Complex32::new(0.0, 1.0),
+        (1, 0) => Complex32::new(0.0, -1.0),
+        (1, 1) => Complex32::new(-1.0, 0.0),
+        _ => unreachable!(),
     };
 
-    // Max-log LLR
-    // b0=0: {+1,+j}, b0=1: {-1,-j}
-    // b1=0: {+1,-j}, b1=1: {+j,-1}
-    let min_b0_0 = d1.min(dj);
-    let min_b0_1 = dm1.min(dnj);
-    let min_b1_0 = d1.min(dnj);
-    let min_b1_1 = dj.min(dm1);
-    let llr0 = min_b0_1 - min_b0_0;
-    let llr1 = min_b1_1 - min_b1_0;
-
-    (symbol, bits, [llr0, llr1])
+    (symbol, [b0, b1], [llr0, llr1])
 }
 
 #[inline]
@@ -932,7 +918,7 @@ fn llr_quality(phase_err: f32, timing_err: f32) -> f32 {
     if phase_err.abs() > LLR_PHASE_ERR_ERASE_RAD || timing_err.abs() > LLR_TIMING_ERR_ERASE {
         return 0.0;
     }
-    let phase_q = (1.0 - phase_err.abs() / LLR_PHASE_ERR_REF_RAD).clamp(0.0, 1.0);
+    let phase_q = (1.0 - phase_err.abs() / 0.9).clamp(0.0, 1.0);
     let timing_q = (1.0 - timing_err.abs()).clamp(0.0, 1.0);
     phase_q * timing_q
 }
@@ -941,8 +927,7 @@ fn llr_quality(phase_err: f32, timing_err: f32) -> f32 {
 fn estimate_noise_var_from_diff(diff: Complex32, decided_symbol: Complex32) -> f32 {
     let amp = diff.norm().max(1e-6);
     let diff_n = diff / amp;
-    // 単位振幅シンボルに対する差分誤差から雑音分散を近似。
-    // 2次元誤差のため 0.5 を掛けて1次元分散相当に落とす。
+    // 振幅のフェージング分散を含めると過少評価されるため、位相ズレをベースにする
     0.5 * (diff_n - decided_symbol).norm_sqr()
 }
 
@@ -1316,13 +1301,13 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_diff_symbol_soft_is_amplitude_invariant() {
+    fn test_decode_diff_symbol_soft_scales_with_amplitude() {
         let a = decode_diff_symbol_soft(Complex32::new(0.5, 0.5));
         let b = decode_diff_symbol_soft(Complex32::new(2.0, 2.0));
         assert_eq!(a.decided, b.decided);
         assert_eq!(a.llr_count, b.llr_count);
         for i in 0..a.llr_count {
-            assert!((a.llrs[i] - b.llrs[i]).abs() < 1e-4);
+            assert!((a.llrs[i] * 4.0 - b.llrs[i]).abs() < 1e-4);
         }
     }
 
