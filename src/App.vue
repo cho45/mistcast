@@ -39,7 +39,11 @@ const rxLogs = ref<string[]>([]);
 const rxTick = ref(0);
 const rxNoChangeTicks = ref(0);
 const rxLogCopied = ref(false);
+const fftCanvas = ref<HTMLCanvasElement | null>(null);
 let rxLogCopiedTimer: number | null = null;
+let fftRafId: number | null = null;
+let analyserNode: AnalyserNode | null = null;
+let fftData: Float32Array<ArrayBuffer> | null = null;
 
 let backend: Comlink.Remote<MistcastBackend> | null = null;
 let audioContext: AudioContext | null = null;
@@ -116,6 +120,105 @@ function setDecodedOutput(recovered: Uint8Array) {
     return;
   }
   outputText.value = new TextDecoder().decode(trimTrailingZeros(recovered));
+}
+
+function drawSenderSpectrumFrame() {
+  if (!audioContext || !analyserNode || !fftData || !fftCanvas.value) {
+    fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
+    return;
+  }
+
+  const canvas = fftCanvas.value;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
+    return;
+  }
+
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const cssW = Math.max(10, canvas.clientWidth || 640);
+  const cssH = Math.max(10, canvas.clientHeight || 180);
+  const w = Math.floor(cssW * dpr);
+  const h = Math.floor(cssH * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  analyserNode.getFloatFrequencyData(fftData);
+  const nyquist = audioContext.sampleRate / 2;
+  const fMax = Math.max(1, Math.min(20000, nyquist));
+  const minDb = analyserNode.minDecibels;
+  const maxDb = analyserNode.maxDecibels;
+
+  const xFromFreq = (f: number) => (Math.max(0, Math.min(f, fMax)) / fMax) * cssW;
+  const yFromDb = (db: number) => {
+    const n = (db - minDb) / (maxDb - minDb);
+    return cssH - Math.min(1, Math.max(0, n)) * cssH;
+  };
+
+  ctx.clearRect(0, 0, cssW, cssH);
+  ctx.fillStyle = "#f9fcff";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  ctx.strokeStyle = "#d8e3ef";
+  ctx.lineWidth = 1;
+  const tickStep = fMax <= 12000 ? 1000 : 2000;
+  const freqTicks: number[] = [];
+  for (let f = 0; f <= fMax; f += tickStep) freqTicks.push(f);
+  for (const f of freqTicks) {
+    const x = xFromFreq(f);
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, cssH);
+    ctx.stroke();
+  }
+
+  const dbTicks = [-90, -75, -60, -45, -30, -15, 0];
+  for (const db of dbTicks) {
+    const y = yFromDb(db);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(cssW, y);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = "#0f6bd7";
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  const bins = fftData.length;
+  for (let x = 0; x < cssW; x++) {
+    const t = x / Math.max(1, cssW - 1);
+    const f = t * fMax;
+    const bin = Math.min(bins - 1, Math.max(0, Math.round((f / nyquist) * (bins - 1))));
+    const y = yFromDb(fftData[bin]);
+    if (x === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = "#5a6470";
+  ctx.font = "11px IBM Plex Mono, Menlo, monospace";
+  for (const f of freqTicks) {
+    const x = xFromFreq(f);
+    const label = f >= 1000 ? `${Math.round(f / 1000)}k` : `${f}`;
+    ctx.fillText(label, Math.min(cssW - 22, Math.max(0, x + 2)), cssH - 4);
+  }
+
+  fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
+}
+
+function startSenderSpectrum() {
+  if (fftRafId !== null) return;
+  fftRafId = window.requestAnimationFrame(drawSenderSpectrumFrame);
+}
+
+function stopSenderSpectrum() {
+  if (fftRafId !== null) {
+    window.cancelAnimationFrame(fftRafId);
+    fftRafId = null;
+  }
 }
 
 async function loadSampleWebp(): Promise<Uint8Array> {
@@ -306,8 +409,19 @@ async function init() {
   decoderStreamSink = audioContext.createMediaStreamDestination();
   decoderNode.connect(decoderStreamSink);
 
+  analyserNode = audioContext.createAnalyser();
+  analyserNode.fftSize = 4096;
+  analyserNode.smoothingTimeConstant = 0.6;
+  analyserNode.minDecibels = -100;
+  analyserNode.maxDecibels = -20;
+  fftData = new Float32Array(
+    new ArrayBuffer(analyserNode.frequencyBinCount * Float32Array.BYTES_PER_ELEMENT)
+  );
+
   encoderNode.connect(audioContext.destination);
+  encoderNode.connect(analyserNode);
   routeDecoderInput("encoder");
+  startSenderSpectrum();
 
   await startDecoderStandby();
   
@@ -388,6 +502,11 @@ async function reset() {
 }
 
 onBeforeUnmount(() => {
+  stopSenderSpectrum();
+  safeDisconnect(encoderNode, analyserNode);
+  safeDisconnect(analyserNode);
+  analyserNode = null;
+  fftData = null;
   if (rxLogCopiedTimer !== null) {
     window.clearTimeout(rxLogCopiedTimer);
   }
@@ -427,6 +546,10 @@ onBeforeUnmount(() => {
               <button @click="startSendingText" class="btn btn-primary" :disabled="status === 'Transmitting...'">Send Text</button>
               <button @click="startSendingSampleImage" class="btn" :disabled="status === 'Transmitting...'">Send Sample Image</button>
               <button @click="stopSending" class="btn btn-danger">Stop</button>
+            </div>
+            <div class="spectrum-panel">
+              <p class="spectrum-title">Sender FFT (Linear Frequency Axis)</p>
+              <canvas ref="fftCanvas" class="spectrum-canvas"></canvas>
             </div>
           </section>
 
@@ -690,6 +813,30 @@ textarea {
   width: 100%;
   padding: 0.9rem 1rem;
   font-size: 1rem;
+}
+
+.spectrum-panel {
+  margin-top: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 0.55rem;
+}
+
+.spectrum-title {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.spectrum-canvas {
+  display: block;
+  width: 100%;
+  height: 190px;
+  border: 1px solid #d3e0ed;
+  border-radius: 8px;
+  background: #fdfefe;
 }
 
 .receiver-header {
