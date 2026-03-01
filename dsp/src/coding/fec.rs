@@ -92,6 +92,8 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
     // サバイバーパス: survivor[time][state] = 前の状態
     let mut survivors: Vec<Vec<u8>> = Vec::with_capacity(num_symbols);
 
+    let data_len = num_symbols.saturating_sub(CONSTRAINT_LEN - 1);
+
     for sym_idx in 0..num_symbols {
         let r0 = coded_bits[sym_idx * 2];
         let r1 = coded_bits[sym_idx * 2 + 1];
@@ -99,12 +101,14 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
         let mut new_metrics = vec![INF; NUM_STATES];
         let mut survivor = vec![0u8; NUM_STATES];
 
+        let bit_end = if sym_idx >= data_len { 1u8 } else { 2u8 };
+
         // 各状態への遷移を評価
         for (prev_state, &metric) in path_metrics.iter().enumerate().take(NUM_STATES) {
             if metric == INF {
                 continue;
             }
-            for bit in 0u8..2 {
+            for bit in 0u8..bit_end {
                 let (v1, v2) = conv_output(prev_state as u8, bit);
                 // ハミング距離
                 let branch_metric = (v1 ^ r0) as u32 + (v2 ^ r1) as u32;
@@ -122,15 +126,9 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
     }
 
     // 最良の終端状態を選択 (テールビットにより状態0に収束するはず)
-    let best_end_state = path_metrics
-        .iter()
-        .enumerate()
-        .min_by_key(|&(_, &m)| m)
-        .map(|(s, _)| s)
-        .unwrap_or(0);
+    let best_end_state = 0; // テールビットにより状態0に必ず収束する
 
     // トレースバック
-    let data_len = num_symbols.saturating_sub(CONSTRAINT_LEN - 1);
     let mut decoded = vec![0u8; data_len];
     let mut state = best_end_state as u8;
 
@@ -166,6 +164,8 @@ pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
 
     let mut survivors: Vec<Vec<u8>> = Vec::with_capacity(num_symbols);
 
+    let data_len = num_symbols.saturating_sub(CONSTRAINT_LEN - 1);
+
     for sym_idx in 0..num_symbols {
         let l0 = llrs[sym_idx * 2];
         let l1 = llrs[sym_idx * 2 + 1];
@@ -173,11 +173,13 @@ pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
         let mut new_metrics = vec![NEG_INF; NUM_STATES];
         let mut survivor = vec![0u8; NUM_STATES];
 
+        let bit_end = if sym_idx >= data_len { 1u8 } else { 2u8 };
+
         for (prev_state, &metric) in path_metrics.iter().enumerate().take(NUM_STATES) {
             if !metric.is_finite() {
                 continue;
             }
-            for bit in 0u8..2 {
+            for bit in 0u8..bit_end {
                 let (v1, v2) = conv_output(prev_state as u8, bit);
                 let branch_score = llr_score(l0, v1) + llr_score(l1, v2);
                 let ns = next_state(prev_state as u8, bit) as usize;
@@ -193,14 +195,7 @@ pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
         survivors.push(survivor);
     }
 
-    let best_end_state = path_metrics
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(s, _)| s)
-        .unwrap_or(0);
-
-    let data_len = num_symbols.saturating_sub(CONSTRAINT_LEN - 1);
+    let best_end_state = 0;
     let mut decoded = vec![0u8; data_len];
     let mut state = best_end_state as u8;
 
