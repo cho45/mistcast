@@ -1099,32 +1099,31 @@ mod tests {
         if input.is_empty() || ppm.abs() < 1.0 {
             return input.to_vec();
         }
-        let period = (1_000_000.0 / ppm.abs()).round() as usize;
-        if period < 2 {
-            return input.to_vec();
+
+        let out_len = input.len();
+        let mut out = Vec::with_capacity(out_len);
+
+        let mut time = 0.0f32;
+        let time_step = 1.0 + ppm / 1_000_000.0;
+
+        for _ in 0..out_len {
+            let i0 = time.floor() as usize;
+            let frac = (time - i0 as f32).clamp(0.0, 1.0);
+
+            if i0 + 1 < input.len() {
+                let a = input[i0];
+                let b = input[i0 + 1];
+                out.push(a + (b - a) * frac);
+            } else if i0 < input.len() {
+                out.push(input[i0]);
+            } else {
+                out.push(input[input.len() - 1]);
+            }
+
+            time += time_step;
         }
 
-        if ppm > 0.0 {
-            // 正のppm: 受信側クロックが遅い想定 -> 波形がわずかに伸びる（サンプル重複）
-            let mut out = Vec::with_capacity(input.len() + input.len() / period + 8);
-            for (i, &s) in input.iter().enumerate() {
-                out.push(s);
-                if (i + 1) % period == 0 {
-                    out.push(s);
-                }
-            }
-            out
-        } else {
-            // 負のppm: 受信側クロックが速い想定 -> 波形がわずかに縮む（サンプル間引き）
-            let mut out = Vec::with_capacity(input.len().saturating_sub(input.len() / period));
-            for (i, &s) in input.iter().enumerate() {
-                if (i + 1) % period == 0 {
-                    continue;
-                }
-                out.push(s);
-            }
-            out
-        }
+        out
     }
 
     #[test]
