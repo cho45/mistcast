@@ -1,15 +1,15 @@
-use dsp::decoder::Decoder;
-use dsp::encoder::{Encoder, EncoderConfig};
-use dsp::params::PAYLOAD_SIZE;
+use dsp::common::msequence::MSequence;
+use dsp::common::rrc_filter::RrcFilter;
+use dsp::params::MODULATION;
 use dsp::phy::fsk::{BfskConfig, BfskDemodulator, BfskModulator};
+use dsp::phy::modulator::Modulator;
+use dsp::phy::sync::downconvert;
 use dsp::DspConfig;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
+use std::collections::HashMap;
 use std::env;
-
-const CHUNK_SAMPLES: usize = 8192;
-const GAP_SAMPLES_DSSS: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
 enum PhyKind {
@@ -60,7 +60,6 @@ impl MultipathProfile {
     }
 
     fn parse_custom(spec: &str) -> Option<Self> {
-        // format: "0:1.0,9:0.4,23:0.2"
         let mut taps = Vec::new();
         for pair in spec.split(',') {
             let pair = pair.trim();
@@ -84,6 +83,10 @@ impl MultipathProfile {
             taps,
         })
     }
+
+    fn max_delay(&self) -> usize {
+        self.taps.iter().map(|(d, _)| *d).max().unwrap_or(0)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -99,7 +102,7 @@ struct ChannelImpairment {
 struct Cli {
     mode: String,
     trials: usize,
-    payload_len: usize,
+    payload_bits: usize,
     deadline_sec: f32,
     max_sec: f32,
     seed: u64,
@@ -116,11 +119,11 @@ struct TrialResult {
     success: bool,
     completion_sec: Option<f32>,
     elapsed_sec: f32,
-    tx_frames: usize,
-    frame_successes: usize,
-    tx_packets: usize,
-    packet_successes: usize,
-    dropped_bursts: usize,
+    attempts: usize,
+    first_attempt_success: bool,
+    bit_errors: usize,
+    bits_compared: usize,
+    dropped_attempts: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -128,30 +131,33 @@ struct Metrics {
     trials: usize,
     successes: usize,
     deadline_hits: usize,
-    completion_secs: Vec<f32>,
+    first_attempt_successes: usize,
+    total_attempts: usize,
+    total_bit_errors: usize,
+    total_bits_compared: usize,
     total_elapsed_sec: f32,
-    tx_frames: usize,
-    frame_successes: usize,
-    tx_packets: usize,
-    packet_successes: usize,
-    dropped_bursts: usize,
+    dropped_attempts: usize,
+    completion_secs: Vec<f32>,
 }
 
 impl Metrics {
-    fn push(&mut self, trial: TrialResult, deadline_sec: f32) {
+    fn push(&mut self, t: TrialResult, deadline_sec: f32) {
         self.trials += 1;
-        self.total_elapsed_sec += trial.elapsed_sec;
-        self.tx_frames += trial.tx_frames;
-        self.frame_successes += trial.frame_successes;
-        self.tx_packets += trial.tx_packets;
-        self.packet_successes += trial.packet_successes;
-        self.dropped_bursts += trial.dropped_bursts;
+        self.total_elapsed_sec += t.elapsed_sec;
+        self.total_attempts += t.attempts;
+        self.total_bit_errors += t.bit_errors;
+        self.total_bits_compared += t.bits_compared;
+        self.dropped_attempts += t.dropped_attempts;
 
-        if trial.success {
+        if t.first_attempt_success {
+            self.first_attempt_successes += 1;
+        }
+
+        if t.success {
             self.successes += 1;
-            if let Some(t) = trial.completion_sec {
-                self.completion_secs.push(t);
-                if t <= deadline_sec {
+            if let Some(c) = t.completion_sec {
+                self.completion_secs.push(c);
+                if c <= deadline_sec {
                     self.deadline_hits += 1;
                 }
             }
@@ -166,20 +172,21 @@ impl Metrics {
         ratio(self.deadline_hits, self.trials)
     }
 
-    fn per(&self) -> f32 {
-        if self.tx_packets == 0 {
+    fn ber(&self) -> f32 {
+        if self.total_bits_compared == 0 {
             0.0
         } else {
-            1.0 - (self.packet_successes as f32 / self.tx_packets as f32)
+            self.total_bit_errors as f32 / self.total_bits_compared as f32
         }
     }
 
     fn fer(&self) -> f32 {
-        if self.tx_frames == 0 {
-            0.0
-        } else {
-            1.0 - (self.frame_successes as f32 / self.tx_frames as f32)
-        }
+        1.0 - ratio(self.first_attempt_successes, self.trials)
+    }
+
+    fn per(&self) -> f32 {
+        // PHY-only評価では1 frame = 1 packetとして扱う
+        self.fer()
     }
 
     fn p95_completion_sec(&self) -> Option<f32> {
@@ -194,7 +201,7 @@ impl Metrics {
         }
     }
 
-    fn goodput_bps_effective(&self, payload_bits: usize) -> f32 {
+    fn goodput_effective_bps(&self, payload_bits: usize) -> f32 {
         if self.total_elapsed_sec <= 0.0 {
             0.0
         } else {
@@ -202,7 +209,7 @@ impl Metrics {
         }
     }
 
-    fn goodput_bps_success_mean(&self, payload_bits: usize) -> Option<f32> {
+    fn goodput_success_mean_bps(&self, payload_bits: usize) -> Option<f32> {
         if self.completion_secs.is_empty() {
             return None;
         }
@@ -256,8 +263,9 @@ fn parse_list(arg: Option<String>, fallback: &[f32]) -> Vec<f32> {
 }
 
 fn parse_cli() -> Cli {
-    let mut kv = std::collections::HashMap::<String, String>::new();
+    let mut kv = HashMap::<String, String>::new();
     let mut args = env::args().skip(1);
+
     while let Some(arg) = args.next() {
         if let Some(stripped) = arg.strip_prefix("--") {
             if let Some((k, v)) = stripped.split_once('=') {
@@ -287,48 +295,62 @@ fn parse_cli() -> Cli {
         .remove("mode")
         .unwrap_or_else(|| "point".to_string())
         .to_lowercase();
+
     let trials = kv
         .remove("trials")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(40)
         .max(1);
-    let payload_len = kv
-        .remove("payload-len")
+
+    let payload_bits = kv
+        .remove("payload-bits")
+        .or_else(|| {
+            kv.remove("payload-len")
+                .map(|s| (s.parse::<usize>().unwrap_or(32) * 8).to_string())
+        })
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(32)
+        .unwrap_or(256)
         .max(1);
+
     let deadline_sec = kv
         .remove("deadline-sec")
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(2.0)
-        .max(0.05);
+        .unwrap_or(0.8)
+        .max(0.01);
+
     let max_sec = kv
         .remove("max-sec")
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(4.0)
+        .unwrap_or(2.0)
         .max(deadline_sec);
+
     let seed = kv
         .remove("seed")
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0xBADC0FFE_u64);
+        .unwrap_or(0xA11CE_u64);
+
     let target_p_complete = kv
         .remove("target-p")
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.95)
         .clamp(0.0, 1.0);
+
     let sigma = kv
         .remove("sigma")
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.0)
         .max(0.0);
+
     let cfo_hz = kv
         .remove("cfo-hz")
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.0);
+
     let ppm = kv
         .remove("ppm")
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(0.0);
+
     let burst_loss = kv
         .remove("burst-loss")
         .and_then(|v| v.parse::<f32>().ok())
@@ -347,22 +369,25 @@ fn parse_cli() -> Cli {
 
     let sweep_awgn = parse_list(
         kv.remove("sweep-awgn"),
-        &[0.0, 0.005, 0.01, 0.015, 0.02, 0.03, 0.04],
+        &[0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0],
     );
+
     let sweep_cfo = parse_list(
         kv.remove("sweep-cfo"),
         &[0.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 120.0],
     );
+
     let sweep_ppm = parse_list(
         kv.remove("sweep-ppm"),
         &[-200.0, -120.0, -80.0, -40.0, 0.0, 40.0, 80.0, 120.0, 200.0],
     );
+
     let sweep_loss = parse_list(kv.remove("sweep-loss"), &[0.0, 0.05, 0.1, 0.2, 0.3, 0.4]);
 
     Cli {
         mode,
         trials,
-        payload_len,
+        payload_bits,
         deadline_sec,
         max_sec,
         seed,
@@ -381,11 +406,26 @@ fn parse_cli() -> Cli {
     }
 }
 
-fn make_payload(len: usize, seed: u64) -> Vec<u8> {
+fn make_bits(len: usize, seed: u64) -> Vec<u8> {
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut data = vec![0u8; len];
-    rng.fill(data.as_mut_slice());
-    data
+    (0..len)
+        .map(|_| if rng.gen::<bool>() { 1 } else { 0 })
+        .collect()
+}
+
+fn count_bit_errors(tx: &[u8], rx: Option<&[u8]>) -> usize {
+    let Some(rx) = rx else {
+        return tx.len();
+    };
+
+    let mut errs = 0usize;
+    for (idx, &b) in tx.iter().enumerate() {
+        let rb = rx.get(idx).copied().unwrap_or(1 - b);
+        if rb != b {
+            errs += 1;
+        }
+    }
+    errs
 }
 
 fn add_awgn_with_rng(samples: &mut [f32], sigma: f32, rng: &mut StdRng) {
@@ -393,7 +433,7 @@ fn add_awgn_with_rng(samples: &mut [f32], sigma: f32, rng: &mut StdRng) {
         return;
     }
     let normal = Normal::new(0.0, sigma).expect("normal distribution");
-    for s in samples.iter_mut() {
+    for s in samples {
         *s += normal.sample(rng);
     }
 }
@@ -403,7 +443,7 @@ fn apply_multipath(input: &[f32], mp: &MultipathProfile) -> Vec<f32> {
         return input.to_vec();
     }
 
-    let max_delay = mp.taps.iter().map(|(d, _)| *d).max().unwrap_or(0);
+    let max_delay = mp.max_delay();
     let mut out = vec![0.0f32; input.len() + max_delay];
     for &(delay, gain) in &mp.taps {
         for (i, &x) in input.iter().enumerate() {
@@ -411,7 +451,6 @@ fn apply_multipath(input: &[f32], mp: &MultipathProfile) -> Vec<f32> {
         }
     }
 
-    // チャネル利得で正規化（平均電力の極端な増減を避ける）
     let norm = mp
         .taps
         .iter()
@@ -476,147 +515,179 @@ fn apply_channel(
     sig
 }
 
-fn run_dsss_trial(payload: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) -> TrialResult {
-    let dsp_cfg = DspConfig::default_48k();
-    let sample_rate = dsp_cfg.sample_rate;
-    let max_samples = (max_sec * sample_rate).round() as usize;
-    let k = payload.len().div_ceil(PAYLOAD_SIZE).max(2);
+fn dsss_modulate_bits(bits: &[u8], cfg: &DspConfig) -> Vec<f32> {
+    let mut modulator = Modulator::new(cfg.clone());
+    modulator.reset();
+    let mut samples = modulator.modulate(bits);
+    // 受信側マッチドフィルタ遅延ぶんの末尾サンプルを確保する。
+    samples.extend(std::iter::repeat_n(0.0f32, cfg.rrc_num_taps() / 2));
+    samples
+}
 
-    let mut enc_cfg = EncoderConfig::new(dsp_cfg.clone());
-    enc_cfg.fountain_k = k;
-    let packets_per_burst = enc_cfg.packets_per_sync_burst.max(1);
-
-    let mut encoder = Encoder::new(enc_cfg);
-    let mut stream = encoder.encode_stream(payload);
-
-    let mut rx_cfg = dsp_cfg.clone();
-    rx_cfg.carrier_freq += imp.cfo_hz;
-    let mut decoder = Decoder::new(payload.len(), k, rx_cfg);
-
-    let gap = vec![0.0f32; GAP_SAMPLES_DSSS];
-    let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
-
-    let mut elapsed_samples = 0usize;
-    let mut tx_frames = 0usize;
-    let mut frame_successes = 0usize;
-    let mut tx_packets = 0usize;
-    let mut packet_successes = 0usize;
-    let mut dropped_bursts = 0usize;
-    let mut received_prev = 0usize;
-
-    while elapsed_samples < max_samples {
-        let mut burst = stream.next().expect("encoder stream should be infinite");
-        burst.extend_from_slice(&gap);
-
-        tx_frames += 1;
-        tx_packets += packets_per_burst;
-
-        let drop_burst = rng.gen::<f32>() < imp.burst_loss;
-        if drop_burst {
-            dropped_bursts += 1;
+fn decode_diff_to_bits_mode(diff_re: f32, diff_im: f32, out: &mut Vec<u8>) {
+    if diff_re.abs() >= diff_im.abs() {
+        if diff_re >= 0.0 {
+            out.extend_from_slice(&[0, 0]);
+        } else {
+            out.extend_from_slice(&[1, 1]);
         }
-
-        let burst = apply_channel(&burst, imp, &mut rng, drop_burst);
-
-        let recv_before = received_prev;
-        let mut recv_after = received_prev;
-
-        for chunk in burst.chunks(CHUNK_SAMPLES) {
-            elapsed_samples += chunk.len();
-            let progress = decoder.process_samples(chunk);
-            recv_after = progress.received_packets;
-
-            if progress.complete {
-                let delta = recv_after.saturating_sub(recv_before);
-                packet_successes += delta;
-                if delta > 0 {
-                    frame_successes += 1;
-                }
-                let ok = decoder
-                    .recovered_data()
-                    .is_some_and(|r| &r[..payload.len()] == payload);
-                return TrialResult {
-                    success: ok,
-                    completion_sec: Some(elapsed_samples as f32 / sample_rate),
-                    elapsed_sec: elapsed_samples as f32 / sample_rate,
-                    tx_frames,
-                    frame_successes,
-                    tx_packets,
-                    packet_successes,
-                    dropped_bursts,
-                };
-            }
-
-            if elapsed_samples >= max_samples {
-                break;
-            }
-        }
-
-        let delta = recv_after.saturating_sub(recv_before);
-        packet_successes += delta;
-        if delta > 0 {
-            frame_successes += 1;
-        }
-        received_prev = recv_after;
-    }
-
-    TrialResult {
-        success: false,
-        completion_sec: None,
-        elapsed_sec: elapsed_samples as f32 / sample_rate,
-        tx_frames,
-        frame_successes,
-        tx_packets,
-        packet_successes,
-        dropped_bursts,
+    } else if diff_im >= 0.0 {
+        out.extend_from_slice(&[0, 1]);
+    } else {
+        out.extend_from_slice(&[1, 0]);
     }
 }
 
-fn run_fsk_trial(payload: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) -> TrialResult {
-    let mut tx_cfg = BfskConfig::default_48k();
-    tx_cfg.freq0 += imp.cfo_hz;
-    tx_cfg.freq1 += imp.cfo_hz;
+fn dsss_demodulate_bits(samples: &[f32], rx_cfg: &DspConfig, bit_len: usize) -> Option<Vec<u8>> {
+    let (i_raw, q_raw) = downconvert(samples, 0, rx_cfg);
 
-    let rx_cfg = BfskConfig::default_48k();
-    let sample_rate = rx_cfg.sample_rate;
-    let max_samples = (max_sec * sample_rate).round() as usize;
+    let mut rrc_i = RrcFilter::from_config(rx_cfg);
+    let mut rrc_q = RrcFilter::from_config(rx_cfg);
 
-    let tx = BfskModulator::new(tx_cfg);
+    let mut i_f = Vec::with_capacity(i_raw.len());
+    let mut q_f = Vec::with_capacity(q_raw.len());
+    for (&i, &q) in i_raw.iter().zip(q_raw.iter()) {
+        i_f.push(rrc_i.process(i));
+        q_f.push(rrc_q.process(q));
+    }
+
+    let spc = rx_cfg.samples_per_chip().max(1);
+    let sf = rx_cfg.spread_factor();
+    let sym_len = sf * spc;
+    let payload_symbols = bit_len.div_ceil(MODULATION.bits_per_symbol());
+    let total_symbols = payload_symbols;
+    let total_delay = rx_cfg.rrc_num_taps().saturating_sub(1);
+
+    let mut mseq = MSequence::new(rx_cfg.mseq_order);
+    let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
+
+    let correlate_symbol = |sym_idx: usize, phase: usize, delay: usize| -> Option<(f32, f32)> {
+        let base = total_delay + delay + phase + sym_idx * sym_len;
+        if base + (sf - 1) * spc >= i_f.len() {
+            return None;
+        }
+        let mut ci = 0.0f32;
+        let mut cq = 0.0f32;
+        for (chip_idx, &pn_val) in pn.iter().enumerate() {
+            let p = base + chip_idx * spc;
+            ci += i_f[p] * pn_val;
+            cq += q_f[p] * pn_val;
+        }
+        Some((ci, cq))
+    };
+
+    let mut best_phase = 0usize;
+    let mut best_delay = 0usize;
+    let mut best_score = f32::NEG_INFINITY;
+    for delay in 0..=128usize {
+        for phase in 0..spc {
+            if total_symbols == 0 {
+                continue;
+            }
+
+            let mut total_power = 0.0f32;
+            let mut valid = true;
+            for sym_idx in 0..total_symbols {
+                let Some(cur) = correlate_symbol(sym_idx, phase, delay) else {
+                    valid = false;
+                    break;
+                };
+                total_power += cur.0 * cur.0 + cur.1 * cur.1;
+            }
+            if !valid {
+                continue;
+            }
+
+            if total_power > best_score {
+                best_score = total_power;
+                best_phase = phase;
+                best_delay = delay;
+            }
+        }
+    }
+
+    let mut payload_bits = Vec::with_capacity(payload_symbols * MODULATION.bits_per_symbol());
+    let mut prev = (1.0f32, 0.0f32);
+    for sym_idx in 0..payload_symbols {
+        let cur = correlate_symbol(sym_idx, best_phase, best_delay)?;
+        let diff_re = prev.0 * cur.0 + prev.1 * cur.1;
+        let diff_im = prev.0 * cur.1 - prev.1 * cur.0;
+        decode_diff_to_bits_mode(diff_re, diff_im, &mut payload_bits);
+        let norm = (cur.0 * cur.0 + cur.1 * cur.1).sqrt().max(1e-6);
+        prev = (cur.0 / norm, cur.1 / norm);
+    }
+    payload_bits.truncate(bit_len);
+    Some(payload_bits)
+}
+
+fn fsk_modulate_bits(bits: &[u8], tx_cfg: &BfskConfig) -> Vec<f32> {
+    let tx = BfskModulator::new(tx_cfg.clone());
+    tx.modulate_raw_bits(bits)
+}
+
+fn fsk_demodulate_bits(samples: &[f32], rx_cfg: &BfskConfig, bit_len: usize) -> Option<Vec<u8>> {
     let rx = BfskDemodulator::new(rx_cfg.clone());
+    rx.demodulate_aligned_bits(samples, bit_len)
+}
 
-    let mut rng = StdRng::seed_from_u64(seed ^ 0xF5F5_0001);
-    let mut elapsed_samples = 0usize;
-    let mut tx_frames = 0usize;
-    let mut dropped_bursts = 0usize;
+fn run_trial(
+    phy: PhyKind,
+    bits: &[u8],
+    imp: &ChannelImpairment,
+    max_sec: f32,
+    seed: u64,
+) -> TrialResult {
+    match phy {
+        PhyKind::Dsss => run_trial_dsss(bits, imp, max_sec, seed),
+        PhyKind::Fsk => run_trial_fsk(bits, imp, max_sec, seed),
+    }
+}
 
-    while elapsed_samples < max_samples {
-        let frame = tx.modulate_frame(payload);
-        let lead = rng.gen_range(0..rx_cfg.samples_per_bit());
+fn run_trial_dsss(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) -> TrialResult {
+    let tx_cfg = DspConfig::default_48k();
+    let mut rx_cfg = tx_cfg.clone();
+    rx_cfg.carrier_freq += imp.cfo_hz;
 
-        let mut burst = vec![0.0f32; lead];
-        burst.extend_from_slice(&frame);
-        burst.extend(std::iter::repeat_n(0.0f32, rx_cfg.samples_per_bit() * 2));
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
+    let mut elapsed_sec = 0.0f32;
+    let mut attempts = 0usize;
+    let mut bit_errors = 0usize;
+    let mut bits_compared = 0usize;
+    let mut dropped_attempts = 0usize;
+    let mut first_attempt_success = false;
 
-        tx_frames += 1;
-        let drop_burst = rng.gen::<f32>() < imp.burst_loss;
-        if drop_burst {
-            dropped_bursts += 1;
+    loop {
+        if elapsed_sec >= max_sec {
+            break;
         }
 
-        let burst = apply_channel(&burst, imp, &mut rng, drop_burst);
-        elapsed_samples += burst.len();
+        attempts += 1;
+        let tx = dsss_modulate_bits(bits, &tx_cfg);
+        let drop = rng.gen::<f32>() < imp.burst_loss;
+        if drop {
+            dropped_attempts += 1;
+        }
+        let rx = apply_channel(&tx, imp, &mut rng, drop);
 
-        let decoded = rx.find_and_decode(&burst);
-        if decoded.as_deref() == Some(payload) {
+        elapsed_sec += rx.len() as f32 / tx_cfg.sample_rate;
+        let decoded = dsss_demodulate_bits(&rx, &rx_cfg, bits.len());
+        let errs = count_bit_errors(bits, decoded.as_deref());
+        bit_errors += errs;
+        bits_compared += bits.len();
+
+        if errs == 0 {
+            if attempts == 1 {
+                first_attempt_success = true;
+            }
             return TrialResult {
                 success: true,
-                completion_sec: Some(elapsed_samples as f32 / sample_rate),
-                elapsed_sec: elapsed_samples as f32 / sample_rate,
-                tx_frames,
-                frame_successes: 1,
-                tx_packets: tx_frames,
-                packet_successes: 1,
-                dropped_bursts,
+                completion_sec: Some(elapsed_sec),
+                elapsed_sec,
+                attempts,
+                first_attempt_success,
+                bit_errors,
+                bits_compared,
+                dropped_attempts,
             };
         }
     }
@@ -624,39 +695,80 @@ fn run_fsk_trial(payload: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u6
     TrialResult {
         success: false,
         completion_sec: None,
-        elapsed_sec: elapsed_samples as f32 / sample_rate,
-        tx_frames,
-        frame_successes: 0,
-        tx_packets: tx_frames,
-        packet_successes: 0,
-        dropped_bursts,
+        elapsed_sec,
+        attempts,
+        first_attempt_success,
+        bit_errors,
+        bits_compared,
+        dropped_attempts,
     }
 }
 
-fn evaluate(phy: PhyKind, cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
-    let mut metrics = Metrics::default();
+fn run_trial_fsk(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) -> TrialResult {
+    let mut tx_cfg = BfskConfig::default_48k();
+    tx_cfg.freq0 += imp.cfo_hz;
+    tx_cfg.freq1 += imp.cfo_hz;
+    let rx_cfg = BfskConfig::default_48k();
 
-    for trial_idx in 0..cli.trials {
-        let trial_seed = cli
-            .seed
-            .wrapping_add((trial_idx as u64).wrapping_mul(0x9E37_79B9));
-        let payload = make_payload(cli.payload_len, trial_seed ^ 0xABCDEF01);
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xF5F5_0001);
+    let mut elapsed_sec = 0.0f32;
+    let mut attempts = 0usize;
+    let mut bit_errors = 0usize;
+    let mut bits_compared = 0usize;
+    let mut dropped_attempts = 0usize;
+    let mut first_attempt_success = false;
 
-        let result = match phy {
-            PhyKind::Dsss => run_dsss_trial(&payload, imp, cli.max_sec, trial_seed),
-            PhyKind::Fsk => run_fsk_trial(&payload, imp, cli.max_sec, trial_seed),
-        };
+    loop {
+        if elapsed_sec >= max_sec {
+            break;
+        }
 
-        metrics.push(result, cli.deadline_sec);
+        attempts += 1;
+        let tx = fsk_modulate_bits(bits, &tx_cfg);
+        let drop = rng.gen::<f32>() < imp.burst_loss;
+        if drop {
+            dropped_attempts += 1;
+        }
+        let rx = apply_channel(&tx, imp, &mut rng, drop);
+
+        elapsed_sec += rx.len() as f32 / rx_cfg.sample_rate;
+        let decoded = fsk_demodulate_bits(&rx, &rx_cfg, bits.len());
+        let errs = count_bit_errors(bits, decoded.as_deref());
+        bit_errors += errs;
+        bits_compared += bits.len();
+
+        if errs == 0 {
+            if attempts == 1 {
+                first_attempt_success = true;
+            }
+            return TrialResult {
+                success: true,
+                completion_sec: Some(elapsed_sec),
+                elapsed_sec,
+                attempts,
+                first_attempt_success,
+                bit_errors,
+                bits_compared,
+                dropped_attempts,
+            };
+        }
     }
 
-    print_metrics_row(scenario, phy, cli, imp, &metrics);
-    metrics
+    TrialResult {
+        success: false,
+        completion_sec: None,
+        elapsed_sec,
+        attempts,
+        first_attempt_success,
+        bit_errors,
+        bits_compared,
+        dropped_attempts,
+    }
 }
 
-fn print_metrics_header() {
+fn print_header() {
     println!(
-        "scenario,phy,trials,success,p_complete,p_complete_deadline,deadline_s,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,drop_bursts,multipath"
+        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,multipath"
     );
 }
 
@@ -665,46 +777,59 @@ fn fmt_opt(v: Option<f32>) -> String {
         .unwrap_or_else(|| "NaN".to_string())
 }
 
-fn print_metrics_row(
-    scenario: &str,
-    phy: PhyKind,
-    cli: &Cli,
-    imp: &ChannelImpairment,
-    m: &Metrics,
-) {
-    let payload_bits = cli.payload_len * 8;
+fn print_row(scenario: &str, phy: PhyKind, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
     println!(
-        "{scenario},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.3},{},{},{},{},{}",
+        "{scenario},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{},{}",
         phy.as_str(),
         m.trials,
         m.successes,
+        m.deadline_hits,
+        m.first_attempt_successes,
+        m.total_bits_compared,
+        m.total_bit_errors,
         m.p_complete(),
         m.p_complete_deadline(),
         cli.deadline_sec,
+        m.ber(),
         m.per(),
         m.fer(),
-        m.goodput_bps_effective(payload_bits),
-        fmt_opt(m.goodput_bps_success_mean(payload_bits)),
+        m.goodput_effective_bps(cli.payload_bits),
+        fmt_opt(m.goodput_success_mean_bps(cli.payload_bits)),
         fmt_opt(m.p95_completion_sec()),
         fmt_opt(m.mean_completion_sec()),
-        m.dropped_bursts,
+        m.total_attempts,
+        m.dropped_attempts,
         imp.multipath.name,
     );
 }
 
+fn evaluate(phy: PhyKind, cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
+    let mut metrics = Metrics::default();
+    for trial_idx in 0..cli.trials {
+        let trial_seed = cli
+            .seed
+            .wrapping_add((trial_idx as u64).wrapping_mul(0x9E37_79B9));
+        let bits = make_bits(cli.payload_bits, trial_seed ^ 0x1234_5678);
+        let tr = run_trial(phy, &bits, imp, cli.max_sec, trial_seed);
+        metrics.push(tr, cli.deadline_sec);
+    }
+
+    print_row(scenario, phy, cli, imp, &metrics);
+    metrics
+}
+
 fn run_point(cli: &Cli) {
-    print_metrics_header();
+    print_header();
     let scenario = format!(
-        "point(sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2})",
-        cli.base.sigma, cli.base.cfo_hz, cli.base.ppm, cli.base.burst_loss
+        "point(bits={},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2})",
+        cli.payload_bits, cli.base.sigma, cli.base.cfo_hz, cli.base.ppm, cli.base.burst_loss
     );
     evaluate(PhyKind::Dsss, cli, &cli.base, &scenario);
     evaluate(PhyKind::Fsk, cli, &cli.base, &scenario);
 }
 
 fn run_sweep_awgn(cli: &Cli) {
-    print_metrics_header();
-
+    print_header();
     let mut dsss_limit = None;
     let mut fsk_limit = None;
 
@@ -712,10 +837,9 @@ fn run_sweep_awgn(cli: &Cli) {
         let mut imp = cli.base.clone();
         imp.sigma = sigma;
         let scenario = format!(
-            "awgn(sigma={sigma:.3},cfo={:.1},ppm={:.1},loss={:.2})",
-            imp.cfo_hz, imp.ppm, imp.burst_loss
+            "awgn(bits={},sigma={sigma:.3},cfo={:.1},ppm={:.1},loss={:.2})",
+            cli.payload_bits, imp.cfo_hz, imp.ppm, imp.burst_loss
         );
-
         let d = evaluate(PhyKind::Dsss, cli, &imp, &scenario);
         let f = evaluate(PhyKind::Fsk, cli, &imp, &scenario);
 
@@ -741,13 +865,13 @@ fn run_sweep_awgn(cli: &Cli) {
 }
 
 fn run_sweep_cfo(cli: &Cli) {
-    print_metrics_header();
+    print_header();
     for &cfo in &cli.sweep_cfo {
         let mut imp = cli.base.clone();
         imp.cfo_hz = cfo;
         let scenario = format!(
-            "cfo(cfo={cfo:.1},sigma={:.3},ppm={:.1},loss={:.2})",
-            imp.sigma, imp.ppm, imp.burst_loss
+            "cfo(bits={},cfo={cfo:.1},sigma={:.3},ppm={:.1},loss={:.2})",
+            cli.payload_bits, imp.sigma, imp.ppm, imp.burst_loss
         );
         evaluate(PhyKind::Dsss, cli, &imp, &scenario);
         evaluate(PhyKind::Fsk, cli, &imp, &scenario);
@@ -755,13 +879,13 @@ fn run_sweep_cfo(cli: &Cli) {
 }
 
 fn run_sweep_ppm(cli: &Cli) {
-    print_metrics_header();
+    print_header();
     for &ppm in &cli.sweep_ppm {
         let mut imp = cli.base.clone();
         imp.ppm = ppm;
         let scenario = format!(
-            "ppm(ppm={ppm:.1},sigma={:.3},cfo={:.1},loss={:.2})",
-            imp.sigma, imp.cfo_hz, imp.burst_loss
+            "ppm(bits={},ppm={ppm:.1},sigma={:.3},cfo={:.1},loss={:.2})",
+            cli.payload_bits, imp.sigma, imp.cfo_hz, imp.burst_loss
         );
         evaluate(PhyKind::Dsss, cli, &imp, &scenario);
         evaluate(PhyKind::Fsk, cli, &imp, &scenario);
@@ -769,13 +893,13 @@ fn run_sweep_ppm(cli: &Cli) {
 }
 
 fn run_sweep_loss(cli: &Cli) {
-    print_metrics_header();
+    print_header();
     for &loss in &cli.sweep_loss {
         let mut imp = cli.base.clone();
         imp.burst_loss = loss.clamp(0.0, 1.0);
         let scenario = format!(
-            "loss(loss={:.2},sigma={:.3},cfo={:.1},ppm={:.1})",
-            imp.burst_loss, imp.sigma, imp.cfo_hz, imp.ppm
+            "loss(bits={},loss={:.2},sigma={:.3},cfo={:.1},ppm={:.1})",
+            cli.payload_bits, imp.burst_loss, imp.sigma, imp.cfo_hz, imp.ppm
         );
         evaluate(PhyKind::Dsss, cli, &imp, &scenario);
         evaluate(PhyKind::Fsk, cli, &imp, &scenario);
@@ -783,13 +907,13 @@ fn run_sweep_loss(cli: &Cli) {
 }
 
 fn run_sweep_multipath(cli: &Cli) {
-    print_metrics_header();
+    print_header();
     for name in ["none", "mild", "medium", "harsh"] {
         let mut imp = cli.base.clone();
         imp.multipath = MultipathProfile::preset(name).unwrap_or_else(MultipathProfile::none);
         let scenario = format!(
-            "multipath(profile={name},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2})",
-            imp.sigma, imp.cfo_hz, imp.ppm, imp.burst_loss
+            "multipath(bits={},profile={name},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2})",
+            cli.payload_bits, imp.sigma, imp.cfo_hz, imp.ppm, imp.burst_loss
         );
         evaluate(PhyKind::Dsss, cli, &imp, &scenario);
         evaluate(PhyKind::Fsk, cli, &imp, &scenario);
@@ -800,28 +924,28 @@ fn print_help() {
     println!(
         "usage: cargo run --release --bin phy_eval -- [options]\n\
          modes:\n\
-         - --mode point           単一点評価 (default)\n\
-         - --mode sweep-awgn      AWGN sweep + awgn_limit推定\n\
-         - --mode sweep-cfo       CFO sweep\n\
-         - --mode sweep-ppm       ppm sweep\n\
-         - --mode sweep-loss      バースト欠落率 sweep\n\
-         - --mode sweep-multipath マルチパス profile sweep\n\
-         - --mode sweep-all       上記 sweep を一括実行\n\n\
+         - --mode point             単点評価 (default)\n\
+         - --mode sweep-awgn        AWGN sweep + awgn_limit推定\n\
+         - --mode sweep-cfo         CFO sweep\n\
+         - --mode sweep-ppm         ppm sweep\n\
+         - --mode sweep-loss        バースト欠落率 sweep\n\
+         - --mode sweep-multipath   マルチパス profile sweep\n\
+         - --mode sweep-all         全sweep\n\n\
          common options:\n\
          --trials N\n\
-         --payload-len N\n\
+         --payload-bits N           送信ビット長 (default: 256)\n\
          --deadline-sec F\n\
          --max-sec F\n\
          --seed N\n\
          --sigma F\n\
          --cfo-hz F\n\
          --ppm F\n\
-         --burst-loss F      (0..1)\n\
+         --burst-loss F             (0..1)\n\
          --multipath NAME_OR_TAPS\n\
-           NAME: none|mild|medium|harsh\n\
-           TAPS: \"0:1.0,9:0.4,23:0.2\"\n\
-         --target-p F        (awgn_limit判定用, default 0.95)\n\n\
-         sweep lists (comma separated):\n\
+             NAME: none|mild|medium|harsh\n\
+             TAPS: \"0:1.0,9:0.4,23:0.2\"\n\
+         --target-p F               (awgn_limit判定用)\n\n\
+         sweep lists:\n\
          --sweep-awgn \"0,0.005,0.01\"\n\
          --sweep-cfo  \"0,2,5,10\"\n\
          --sweep-ppm  \"-120,-80,0,80,120\"\n\
@@ -831,7 +955,8 @@ fn print_help() {
 
 fn main() {
     let cli = parse_cli();
-    if cli.mode == "help" || cli.mode == "--help" || cli.mode == "-h" {
+
+    if matches!(cli.mode.as_str(), "help" | "--help" | "-h") {
         print_help();
         return;
     }
@@ -855,5 +980,33 @@ fn main() {
             print_help();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_bit_errors_none_is_all_error() {
+        let bits = vec![0, 1, 0, 1, 1, 0];
+        assert_eq!(count_bit_errors(&bits, None), bits.len());
+    }
+
+    #[test]
+    fn test_count_bit_errors_partial_len() {
+        let tx = vec![0, 1, 0, 1, 1, 0];
+        let rx = vec![0, 1, 1];
+        // idx2 mismatch + idx3..5 missing扱いでerror
+        assert_eq!(count_bit_errors(&tx, Some(&rx)), 4);
+    }
+
+    #[test]
+    fn test_apply_clock_drift_ppm_expand_and_shrink() {
+        let input = vec![1.0f32; 1000];
+        let expanded = apply_clock_drift_ppm(&input, 1000.0);
+        let shrunken = apply_clock_drift_ppm(&input, -1000.0);
+        assert!(expanded.len() > input.len());
+        assert!(shrunken.len() < input.len());
     }
 }

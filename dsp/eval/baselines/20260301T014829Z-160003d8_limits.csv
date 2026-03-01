@@ -1,0 +1,2 @@
+mode,target_p_complete_deadline,deadline_s,dsss_awgn_limit,fsk_awgn_limit,run_id,git_commit,created_at_utc
+sweep-awgn,0.95,0.80,0.500,0.300,20260301T014829Z-160003d8,160003d8ef14a11fe3389859e26daab38749a9dd,20260301T014829Z

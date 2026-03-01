@@ -62,10 +62,15 @@ impl BfskModulator {
         let mut bits = self.header_bits();
         bits.extend(bytes_to_bits(&bytes));
 
-        self.modulate_bits(&bits)
+        self.modulate_bits_internal(&bits)
     }
 
-    fn modulate_bits(&self, bits: &[u8]) -> Vec<f32> {
+    /// ヘッダなしで生ビット列をBFSK変調する（PHY単体評価向け）
+    pub fn modulate_raw_bits(&self, bits: &[u8]) -> Vec<f32> {
+        self.modulate_bits_internal(bits)
+    }
+
+    fn modulate_bits_internal(&self, bits: &[u8]) -> Vec<f32> {
         let spb = self.cfg.samples_per_bit();
         let mut out = Vec::with_capacity(bits.len() * spb);
         let mut phase = 0.0f32;
@@ -114,6 +119,11 @@ impl BfskDemodulator {
 
     pub fn decode_frame_aligned(&self, samples: &[f32]) -> Option<Vec<u8>> {
         self.decode_frame_at(samples, 0)
+    }
+
+    /// ヘッダなしの生ビット列を先頭アライン済みとして復調する（PHY単体評価向け）
+    pub fn demodulate_aligned_bits(&self, samples: &[f32], bit_count: usize) -> Option<Vec<u8>> {
+        self.demod_bits(samples, 0, bit_count)
     }
 
     pub fn find_and_decode(&self, samples: &[f32]) -> Option<Vec<u8>> {

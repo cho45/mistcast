@@ -135,6 +135,88 @@ cargo test --release
 
 特に `e2e_noise.rs` では、AWGN（加法性ホワイトガウスノイズ）環境下において、ストリームが細切れに入力される過酷な状況でもパケットをロスせず復元できるかを検証しています。
 
+## PHY評価ワークフロー（保存・比較・可視化）
+
+`cargo test` には載せず、必要時のみ実行するための評価スクリプトを用意しています。
+
+### 1. 依存（可視化）
+
+`.venv` を使う場合:
+
+```bash
+.venv/bin/pip install -r scripts/phy_eval/requirements.txt
+```
+
+### 2. 現状保存（ベースライン）
+
+軽量実行:
+
+```bash
+make phy-baseline
+```
+
+統計重視（試行回数多め）:
+
+```bash
+make phy-baseline-full
+```
+
+`phy_bench.py` は統計的有意差を見やすくするため、試行回数を自動的に底上げします。
+
+- 既定: `alpha=0.05`, `power=0.8`, `min_effect=0.20`, `min_trials=30`
+- 推奨試行回数（2標本比率差の近似式）を計算し、`trials` が不足していれば自動で引き上げます
+- `--auto-trials` を無効化する場合のみ、指定値そのままを使います
+
+出力先:
+- `dsp/eval/baselines/*_metrics.csv`
+- `dsp/eval/baselines/*_limits.csv`
+- `dsp/eval/baselines/*_meta.json`
+- `dsp/eval/baselines/*_raw.log`
+
+### 3. 前回との差分比較
+
+```bash
+make phy-compare \
+  BASE=dsp/eval/baselines/<base>_metrics.csv \
+  NEW=dsp/eval/baselines/<new>_metrics.csv \
+  OUT=dsp/eval/runs/compare.csv
+```
+
+### 3.5 DSSS改善用の3者比較（baseline FSK / baseline DSSS / new DSSS）
+
+```bash
+make phy-compare-threeway \
+  BASE=dsp/eval/baselines/<baseline>_metrics.csv \
+  NEW=dsp/eval/runs/<new>_metrics.csv \
+  OUT=dsp/eval/runs/threeway.csv \
+  ALPHA=0.05
+```
+
+この比較では、シナリオごとに以下を同時に出します。
+
+- `baseline_fsk_*`
+- `baseline_dsss_*`
+- `new_dsss_*`
+- `delta_new_vs_baseline_fsk_*`
+- `delta_new_vs_baseline_dsss_*`
+- 有意差判定 (`p_complete_deadline` / `ber`) の `p値` と `95% CI`
+
+### 4. 可視化（matplotlib）
+
+```bash
+make phy-plot \
+  INPUT=dsp/eval/baselines/<run>_metrics.csv \
+  OUT_DIR=dsp/eval/plots/<run> \
+  METRIC=p_complete_deadline \
+  OUTPUT=phy_summary.png
+```
+
+生成物:
+- `phy_summary.png`（1ファイル、5x2サブプロット）
+  - 左列: 指定メトリクス（例: `p_complete_deadline`）
+  - 右列: `ber`
+  - 行: `awgn` / `cfo` / `ppm` / `loss` / `multipath`
+
 ## 設計哲学
 - **数学的証明に基づく実装**: 曖昧なアサーションや閾値を排除し、フィルタ遅延や相関ピーク位置の理論値と1サンプルの狂いもなく一致する実装を追求しています。
 - **ストリーミングの安全性**: `Decoder` は入力データの長さに関わらず状態を安全に保持し、処理済みバッファの確実なガベージコレクションを行うため、メモリリークや処理の破綻を起こしません。

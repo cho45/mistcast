@@ -1,0 +1,37 @@
+{
+  "run_id": "baseline-160003d8",
+  "git_commit": "160003d8ef14a11fe3389859e26daab38749a9dd",
+  "created_at_utc": "20260301T013732Z",
+  "modes": [
+    "sweep-awgn",
+    "sweep-cfo",
+    "sweep-ppm",
+    "sweep-loss",
+    "sweep-multipath"
+  ],
+  "command_args": {
+    "name": "baseline-160003d8",
+    "out_dir": "dsp/eval/baselines",
+    "modes": "sweep-awgn,sweep-cfo,sweep-ppm,sweep-loss,sweep-multipath",
+    "trials": 10,
+    "payload_bits": 256,
+    "deadline_sec": 0.8,
+    "max_sec": 2.0,
+    "seed": 659918,
+    "target_p": 0.95,
+    "sigma": 0.0,
+    "cfo_hz": 0.0,
+    "ppm": 0.0,
+    "burst_loss": 0.0,
+    "multipath": "none",
+    "sweep_awgn": "",
+    "sweep_cfo": "",
+    "sweep_ppm": "",
+    "sweep_loss": "",
+    "release": true
+  },
+  "metrics_csv": "dsp/eval/baselines/baseline-160003d8_metrics.csv",
+  "limits_csv": "dsp/eval/baselines/baseline-160003d8_limits.csv",
+  "raw_log": "dsp/eval/baselines/baseline-160003d8_raw.log",
+  "cwd": "/Users/cho45/sketch/mistcast"
+}

@@ -34,3 +34,10 @@ lerna-debug.log*
 refs/
 /test_logic*
 /tmp/
+__pycache__/
+*.pyc
+
+# PHY eval artifacts
+/dsp/eval/runs/
+/dsp/eval/plots/
+/dsp/eval/.mplcache/
