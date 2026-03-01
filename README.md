@@ -182,46 +182,49 @@ make phy-compare \
   OUT=dsp/eval/runs/compare.csv
 ```
 
-### 3.5 DSSS改善用の3者比較（baseline FSK / baseline DSSS / new DSSS）
+### 4. DSSS実経路（Encoder -> Decoder）評価
+
+`phy_eval` は簡易復調器ベースです。`decoder.rs` の変更効果を見るには、実経路評価を使います。
+
+軽量実行:
 
 ```bash
-make phy-compare-threeway \
-  BASE=dsp/eval/baselines/<baseline>_metrics.csv \
-  NEW=dsp/eval/runs/<new>_metrics.csv \
-  OUT=dsp/eval/runs/threeway.csv \
-  ALPHA=0.05
+make dsss-e2e-baseline
 ```
 
-この比較では、シナリオごとに以下を同時に出します。
-
-- `baseline_fsk_*`
-- `baseline_dsss_*`
-- `new_dsss_*`
-- `delta_new_vs_baseline_fsk_*`
-- `delta_new_vs_baseline_dsss_*`
-- 有意差判定 (`p_complete_deadline` / `ber`) の `p値` と `95% CI`
-- AWGN時は `awgn_sigma`, `*_awgn_snr_db` も併記（`10*log10(tx_signal_power / sigma^2)`）
-
-### 4. 可視化（matplotlib）
+統計重視:
 
 ```bash
-make phy-plot \
-  INPUT=dsp/eval/baselines/<run>_metrics.csv \
-  OUT_DIR=dsp/eval/plots/<run> \
-  METRIC=p_complete_deadline \
-  OUTPUT=phy_summary.png \
-  AWGN_AXIS=snr-db
+make dsss-e2e-baseline-full
 ```
 
-生成物:
-- `phy_summary.png`（1ファイル、5x2サブプロット）
-  - 左列: 指定メトリクス（例: `p_complete_deadline`）
-  - 右列: `ber`
-  - 行: `awgn` / `cfo` / `ppm` / `loss` / `multipath`
-  - `awgn` 行の横軸は `AWGN_AXIS` で切替可能
-    - `snr-db`（既定）: `10*log10(tx_signal_power / sigma^2)` を使用
-    - `sigma`
-    - `sigma-db`（`20*log10(sigma)`）
+差分比較:
+
+```bash
+make dsss-e2e-compare
+```
+
+`*-compare` 実行時は比較CSVに加えて、**新旧を同じ1枚に重ねた**人間向けPNGを自動生成します。
+
+- `compare_overlay_summary.png`
+
+既定の比較対象:
+- `NEW`: `dsp/eval/dsss_e2e/baselines` 内の最新 `*_metrics.csv`
+- `BASE`: その1つ前の `*_metrics.csv`
+- baseline が1件しかない場合は、`dsss-e2e-compare` が `dsss-e2e-baseline` を1回自動実行して `BASE=既存, NEW=新規` で比較
+
+明示指定したい場合:
+
+```bash
+make dsss-e2e-compare \
+  BASE=dsp/eval/dsss_e2e/baselines/<base>_metrics.csv \
+  NEW=dsp/eval/dsss_e2e/baselines/<new>_metrics.csv \
+  OUT=dsp/eval/dsss_e2e/runs/compare.csv
+```
+
+注記:
+- デフォルト評価軸は `awgn / ppm / loss / fading / multipath`（`cfo`は除外）
+- `cfo` が必要な場合のみ `scripts/phy_eval/dsss_e2e_bench.py --modes ...` で明示指定します
 
 ## 設計哲学
 - **数学的証明に基づく実装**: 曖昧なアサーションや閾値を排除し、フィルタ遅延や相関ピーク位置の理論値と1サンプルの狂いもなく一致する実装を追求しています。

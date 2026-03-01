@@ -1,0 +1,52 @@
+{
+  "run_id": "flush-smoke",
+  "git_commit": "93c6d340a0ff8a00412029a829138b7e6b2f5dca",
+  "created_at_utc": "20260301T022553Z",
+  "modes": [
+    "point"
+  ],
+  "requested_trials": 1,
+  "effective_trials": 1,
+  "trials_policy": {
+    "auto_trials": false,
+    "alpha": 0.05,
+    "power": 0.8,
+    "min_effect": 0.2,
+    "min_trials": 1,
+    "recommended_trials": 97
+  },
+  "command_args": {
+    "name": "flush-smoke",
+    "out_dir": "dsp/eval/dsss_e2e/baselines",
+    "modes": "point",
+    "trials": 1,
+    "payload_bytes": 16,
+    "deadline_sec": 0.4,
+    "max_sec": 0.6,
+    "chunk_samples": 16384,
+    "gap_samples": 64,
+    "seed": 659918,
+    "target_p": 0.95,
+    "sigma": 0.0,
+    "cfo_hz": 0.0,
+    "ppm": 0.0,
+    "burst_loss": 0.0,
+    "fading_depth": 0.0,
+    "multipath": "none",
+    "sweep_awgn": "",
+    "sweep_cfo": "",
+    "sweep_ppm": "",
+    "sweep_loss": "",
+    "sweep_fading": "",
+    "alpha": 0.05,
+    "power": 0.8,
+    "min_effect": 0.2,
+    "min_trials": 1,
+    "auto_trials": false,
+    "release": true
+  },
+  "metrics_csv": "dsp/eval/dsss_e2e/baselines/flush-smoke_metrics.csv",
+  "limits_csv": "dsp/eval/dsss_e2e/baselines/flush-smoke_limits.csv",
+  "raw_log": "dsp/eval/dsss_e2e/baselines/flush-smoke_raw.log",
+  "cwd": "/Users/cho45/sketch/mistcast"
+}

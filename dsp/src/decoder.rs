@@ -407,17 +407,15 @@ impl Decoder {
         sample_shift: f32,
     ) -> Option<Complex32> {
         let spc = self.proc_config.samples_per_chip().max(1);
-        let shift = (timing_offset + sample_shift).round() as isize;
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         for (chip_idx, &pn_val) in pn.iter().enumerate() {
-            let p = symbol_start as isize + (chip_idx * spc + (spc / 2)) as isize + shift;
-            if p < 0 {
-                return None;
-            }
-            let p = p as usize;
-            let si = *self.sample_buffer_i.get(p)?;
-            let sq = *self.sample_buffer_q.get(p)?;
+            let p = symbol_start as f32
+                + (chip_idx * spc + (spc / 2)) as f32
+                + timing_offset
+                + sample_shift;
+            let si = sample_at_fractional(&self.sample_buffer_i, p)?;
+            let sq = sample_at_fractional(&self.sample_buffer_q, p)?;
             sum_i += si * pn_val;
             sum_q += sq * pn_val;
         }
@@ -786,6 +784,29 @@ fn timing_error_from_early_late(early_mag: f32, late_mag: f32) -> f32 {
 }
 
 #[inline]
+fn sample_at_fractional(buf: &[f32], pos: f32) -> Option<f32> {
+    if pos < 0.0 {
+        return None;
+    }
+    let i0 = pos.floor() as usize;
+    let frac = (pos - i0 as f32).clamp(0.0, 1.0);
+
+    if i0 >= buf.len() {
+        return None;
+    }
+    if i0 + 1 >= buf.len() {
+        if frac <= 1e-6 {
+            return Some(buf[i0]);
+        }
+        return None;
+    }
+
+    let a = buf[i0];
+    let b = buf[i0 + 1];
+    Some(a + (b - a) * frac)
+}
+
+#[inline]
 fn update_timing_rate(timing_rate: f32, timing_err: f32, timing_rate_limit: f32) -> f32 {
     (timing_rate + TRACKING_TIMING_RATE_GAIN * timing_err)
         .clamp(-timing_rate_limit, timing_rate_limit)
@@ -1086,6 +1107,17 @@ mod tests {
         assert!(p_step > 0.0);
         assert!(n_step < 0.0);
         assert!(c.abs() <= TRACKING_PHASE_STEP_CLAMP + 1e-6);
+    }
+
+    #[test]
+    fn test_sample_at_fractional_linear_interp() {
+        let buf = [0.0f32, 10.0, 20.0];
+        assert_eq!(sample_at_fractional(&buf, -0.1), None);
+        assert_eq!(sample_at_fractional(&buf, 0.0), Some(0.0));
+        assert_eq!(sample_at_fractional(&buf, 2.0), Some(20.0));
+        assert_eq!(sample_at_fractional(&buf, 2.1), None);
+        assert_eq!(sample_at_fractional(&buf, 0.5), Some(5.0));
+        assert_eq!(sample_at_fractional(&buf, 1.25), Some(12.5));
     }
 
     #[test]
