@@ -50,6 +50,18 @@ impl BlockInterleaver {
         matrix
     }
 
+    /// デインターリーブ処理 (受信側, f32値)
+    pub fn deinterleave_f32(&self, values: &[f32]) -> Vec<f32> {
+        let total = self.rows * self.cols;
+        let mut matrix = vec![0.0f32; total];
+        for (k, &value) in values.iter().enumerate().take(total) {
+            let col = k / self.rows;
+            let row = k % self.rows;
+            matrix[row * self.cols + col] = value;
+        }
+        matrix
+    }
+
     pub fn reset(&mut self) {}
 
     pub fn block_size(&self) -> usize {
@@ -67,6 +79,20 @@ mod tests {
         let input: Vec<u8> = (0..32u8).collect();
         let interleaved = il.interleave(&input);
         let recovered = il.deinterleave(&interleaved);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn test_deinterleave_f32_roundtrip() {
+        let il = BlockInterleaver::new(4, 8);
+        let input: Vec<f32> = (0..32).map(|i| i as f32 * 0.25 - 3.0).collect();
+        let mut interleaved = Vec::with_capacity(input.len());
+        for col in 0..il.cols() {
+            for row in 0..il.rows() {
+                interleaved.push(input[row * il.cols() + col]);
+            }
+        }
+        let recovered = il.deinterleave_f32(&interleaved);
         assert_eq!(recovered, input);
     }
 }

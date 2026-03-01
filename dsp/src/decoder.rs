@@ -34,6 +34,13 @@ const HEADER_PROBE_CHIP_SPAN: i32 = 6;
 const ITERATION_BUDGET_MIN: usize = 2;
 const ITERATION_BUDGET_MAX: usize = 8;
 const ITERATION_BUDGET_HEADROOM: usize = 1;
+const LLR_CLIP_ABS: f32 = 6.0;
+const LLR_NOISE_EMA_ALPHA: f32 = 0.04;
+const LLR_NOISE_VAR_MIN: f32 = 0.02;
+const LLR_NOISE_VAR_MAX: f32 = 2.0;
+const LLR_PHASE_ERR_REF_RAD: f32 = 0.9;
+const LLR_PHASE_ERR_ERASE_RAD: f32 = 0.55;
+const LLR_TIMING_ERR_ERASE: f32 = 0.45;
 
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
@@ -92,6 +99,19 @@ struct TrackingState {
     phase_rate: f32,
     timing_offset: f32,
     timing_rate: f32,
+    noise_var: f32,
+}
+
+#[derive(Debug)]
+struct DecodedSoftBits {
+    llrs: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SymbolSoftDecision {
+    decided: Complex32,
+    llrs: [f32; 2],
+    llr_count: usize,
 }
 
 impl Decoder {
@@ -239,6 +259,7 @@ impl Decoder {
                 phase_rate: 0.0,
                 timing_offset: 0.0,
                 timing_rate: 0.0,
+                noise_var: 0.2,
             };
             let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
             let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
@@ -429,7 +450,7 @@ impl Decoder {
         num_bits: usize,
         initial_state: TrackingState,
         pn: &[f32],
-    ) -> Option<Vec<u8>> {
+    ) -> Option<DecodedSoftBits> {
         let sf = self.config.spread_factor();
         let spc = self.proc_config.samples_per_chip().max(1);
         let symbol_len = sf * spc;
@@ -444,7 +465,10 @@ impl Decoder {
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
         let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-        let mut bits = Vec::with_capacity(num_bits);
+        let mut llrs = Vec::with_capacity(num_bits);
+        let mut noise_var = initial_state
+            .noise_var
+            .clamp(LLR_NOISE_VAR_MIN, LLR_NOISE_VAR_MAX);
 
         for s_idx in 0..symbols_needed {
             let symbol_start = start_sample + s_idx * symbol_len;
@@ -464,7 +488,9 @@ impl Decoder {
 
             let on_rot = on * phase_ref.conj();
             let diff = on_rot * prev_symbol.conj();
-            let decided = decode_diff_symbol_and_push_bits(diff, &mut bits, num_bits);
+            let soft = decode_diff_symbol_soft(diff);
+            let decided = soft.decided;
+            noise_var = update_noise_var_ema(noise_var, diff, decided);
             let phase_err = phase_error_from_diff(diff, decided);
             phase_rate = update_phase_rate(phase_rate, phase_err);
             let dphi = phase_step_from_phase_error(phase_err, phase_rate);
@@ -481,7 +507,20 @@ impl Decoder {
             timing_offset =
                 update_timing_offset(timing_offset, timing_rate, timing_err, timing_limit);
 
+            // LLR品質向上:
+            // 1) 差動誤差から推定した雑音分散で正規化
+            // 2) 位相誤差/タイミング誤差で減衰
+            // 3) クリップで過信を抑制
             let on_norm = on_rot.norm();
+            let quality = llr_quality(phase_err, timing_err);
+            for &raw_llr in soft.llrs.iter().take(soft.llr_count) {
+                if llrs.len() >= num_bits {
+                    break;
+                }
+                let llr = condition_llr(raw_llr, noise_var, quality);
+                llrs.push(llr);
+            }
+
             if on_norm > 1e-4 {
                 prev_symbol = on_rot / on_norm;
             } else {
@@ -489,8 +528,8 @@ impl Decoder {
             }
         }
 
-        bits.truncate(num_bits);
-        Some(bits)
+        llrs.truncate(num_bits);
+        Some(DecodedSoftBits { llrs })
     }
 
     fn decode_sync_word_with_tracking(
@@ -512,6 +551,7 @@ impl Decoder {
         let mut phase_rate = 0.0f32;
         let mut timing_offset = 0.0f32;
         let mut timing_rate = 0.0f32;
+        let mut noise_var = 0.2f32;
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
         let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
@@ -542,6 +582,7 @@ impl Decoder {
             } else {
                 Complex32::new(-1.0, 0.0)
             };
+            noise_var = update_noise_var_ema(noise_var, diff, decided);
 
             let phase_err = phase_error_from_diff(diff, decided);
             phase_rate = update_phase_rate(phase_rate, phase_err);
@@ -574,6 +615,7 @@ impl Decoder {
                 phase_rate,
                 timing_offset,
                 timing_rate,
+                noise_var,
             },
         ))
     }
@@ -595,12 +637,13 @@ impl Decoder {
         for bias in timing_biases {
             let mut st = initial_state;
             st.timing_offset = (st.timing_offset + bias).clamp(-timing_limit, timing_limit);
-            let Some(payload_bits) =
+            let Some(decoded_soft_bits) =
                 self.decode_bits_with_tracking(payload_start, burst_data_bits_len, st, pn)
             else {
                 continue;
             };
-            let candidate = self.parse_payload_packets(&payload_bits, fec_bits_len, p_bits_len);
+            let candidate =
+                self.parse_payload_packets(&decoded_soft_bits.llrs, fec_bits_len, p_bits_len);
             let replace = match &best {
                 None => true,
                 Some((best_packets, best_crc, best_parse)) => {
@@ -620,22 +663,17 @@ impl Decoder {
 
     fn parse_payload_packets(
         &self,
-        payload_bits: &[u8],
+        payload_llrs: &[f32],
         fec_bits_len: usize,
         p_bits_len: usize,
     ) -> (Vec<Packet>, usize, usize) {
         let mut decoded_packets = Vec::new();
         let mut crc_errors = 0usize;
         let mut parse_errors = 0usize;
-        for packet_bits in payload_bits.chunks_exact(fec_bits_len) {
-            let deinterleaved = self.interleaver.deinterleave(packet_bits);
-            let decoded_bits = fec::decode(&deinterleaved);
-            if decoded_bits.len() < p_bits_len {
-                parse_errors += 1;
-                continue;
-            }
-            let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-            match Packet::deserialize(&d_bytes) {
+        for packet_llrs in payload_llrs.chunks_exact(fec_bits_len) {
+            let deinterleaved_llr = self.interleaver.deinterleave_f32(packet_llrs);
+            let decoded_soft = fec::decode_soft(&deinterleaved_llr);
+            match parse_packet_from_decoded_bits(&decoded_soft, p_bits_len) {
                 Ok(packet) => decoded_packets.push(packet),
                 Err(PacketParseError::CrcMismatch { .. }) => crc_errors += 1,
                 Err(PacketParseError::InvalidLength { .. }) => parse_errors += 1,
@@ -824,42 +862,110 @@ fn update_timing_offset(
 }
 
 #[inline]
-fn decode_diff_symbol_and_push_bits(
-    diff: Complex32,
-    bits: &mut Vec<u8>,
-    target_bits: usize,
-) -> Complex32 {
+fn decode_diff_symbol_soft(diff: Complex32) -> SymbolSoftDecision {
+    let amp = diff.norm().max(1e-6);
+    let diff_n = diff / amp;
     match MODULATION {
         DifferentialModulation::Dbpsk => {
-            if bits.len() < target_bits {
-                bits.push(if diff.re >= 0.0 { 0 } else { 1 });
-            }
-            if diff.re >= 0.0 {
+            let decided = if diff_n.re >= 0.0 {
                 Complex32::new(1.0, 0.0)
             } else {
                 Complex32::new(-1.0, 0.0)
+            };
+            SymbolSoftDecision {
+                decided,
+                llrs: [diff_n.re, 0.0],
+                llr_count: 1,
             }
         }
         DifferentialModulation::Dqpsk => {
-            let (symbol, pair) = if diff.re.abs() >= diff.im.abs() {
-                if diff.re >= 0.0 {
-                    (Complex32::new(1.0, 0.0), [0u8, 0u8])
-                } else {
-                    (Complex32::new(-1.0, 0.0), [1u8, 1u8])
-                }
-            } else if diff.im >= 0.0 {
-                (Complex32::new(0.0, 1.0), [0u8, 1u8])
-            } else {
-                (Complex32::new(0.0, -1.0), [1u8, 0u8])
-            };
-            for &b in &pair {
-                if bits.len() < target_bits {
-                    bits.push(b);
-                }
+            let (symbol, _pair, pair_llr) = dqpsk_hard_bits_and_llr(diff_n);
+            SymbolSoftDecision {
+                decided: symbol,
+                llrs: pair_llr,
+                llr_count: 2,
             }
-            symbol
         }
     }
+}
+
+#[inline]
+fn dqpsk_hard_bits_and_llr(diff: Complex32) -> (Complex32, [u8; 2], [f32; 2]) {
+    // マッピング:
+    // +1 -> 00, +j -> 01, -1 -> 11, -j -> 10
+    let d1 = (diff.re - 1.0).powi(2) + diff.im.powi(2); // +1
+    let dj = diff.re.powi(2) + (diff.im - 1.0).powi(2); // +j
+    let dm1 = (diff.re + 1.0).powi(2) + diff.im.powi(2); // -1
+    let dnj = diff.re.powi(2) + (diff.im + 1.0).powi(2); // -j
+
+    let (symbol, bits) = if d1 <= dj && d1 <= dm1 && d1 <= dnj {
+        (Complex32::new(1.0, 0.0), [0u8, 0u8])
+    } else if dj <= d1 && dj <= dm1 && dj <= dnj {
+        (Complex32::new(0.0, 1.0), [0u8, 1u8])
+    } else if dm1 <= d1 && dm1 <= dj && dm1 <= dnj {
+        (Complex32::new(-1.0, 0.0), [1u8, 1u8])
+    } else {
+        (Complex32::new(0.0, -1.0), [1u8, 0u8])
+    };
+
+    // Max-log LLR
+    // b0=0: {+1,+j}, b0=1: {-1,-j}
+    // b1=0: {+1,-j}, b1=1: {+j,-1}
+    let min_b0_0 = d1.min(dj);
+    let min_b0_1 = dm1.min(dnj);
+    let min_b1_0 = d1.min(dnj);
+    let min_b1_1 = dj.min(dm1);
+    let llr0 = min_b0_1 - min_b0_0;
+    let llr1 = min_b1_1 - min_b1_0;
+
+    (symbol, bits, [llr0, llr1])
+}
+
+#[inline]
+fn condition_llr(raw_llr: f32, noise_var: f32, quality: f32) -> f32 {
+    let nv = noise_var.clamp(LLR_NOISE_VAR_MIN, LLR_NOISE_VAR_MAX);
+    (raw_llr * quality / nv).clamp(-LLR_CLIP_ABS, LLR_CLIP_ABS)
+}
+
+#[inline]
+fn llr_quality(phase_err: f32, timing_err: f32) -> f32 {
+    if phase_err.abs() > LLR_PHASE_ERR_ERASE_RAD || timing_err.abs() > LLR_TIMING_ERR_ERASE {
+        return 0.0;
+    }
+    let phase_q = (1.0 - phase_err.abs() / LLR_PHASE_ERR_REF_RAD).clamp(0.0, 1.0);
+    let timing_q = (1.0 - timing_err.abs()).clamp(0.0, 1.0);
+    phase_q * timing_q
+}
+
+#[inline]
+fn estimate_noise_var_from_diff(diff: Complex32, decided_symbol: Complex32) -> f32 {
+    let amp = diff.norm().max(1e-6);
+    let diff_n = diff / amp;
+    // 単位振幅シンボルに対する差分誤差から雑音分散を近似。
+    // 2次元誤差のため 0.5 を掛けて1次元分散相当に落とす。
+    0.5 * (diff_n - decided_symbol).norm_sqr()
+}
+
+#[inline]
+fn update_noise_var_ema(prev: f32, diff: Complex32, decided_symbol: Complex32) -> f32 {
+    let inst = estimate_noise_var_from_diff(diff, decided_symbol)
+        .clamp(LLR_NOISE_VAR_MIN, LLR_NOISE_VAR_MAX);
+    ((1.0 - LLR_NOISE_EMA_ALPHA) * prev + LLR_NOISE_EMA_ALPHA * inst)
+        .clamp(LLR_NOISE_VAR_MIN, LLR_NOISE_VAR_MAX)
+}
+
+#[inline]
+fn parse_packet_from_decoded_bits(
+    decoded_bits: &[u8],
+    p_bits_len: usize,
+) -> Result<Packet, PacketParseError> {
+    if decoded_bits.len() < p_bits_len {
+        return Err(PacketParseError::InvalidLength {
+            actual: decoded_bits.len() / 8,
+        });
+    }
+    let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
+    Packet::deserialize(&d_bytes)
 }
 
 #[inline]
@@ -1139,6 +1245,93 @@ mod tests {
             timing_offset = update_timing_offset(timing_offset, timing_rate, -0.5, timing_limit);
         }
         assert!(timing_offset < 0.5);
+    }
+
+    #[test]
+    fn test_dqpsk_hard_bits_and_llr_at_ideal_points() {
+        let (_s0, b0, l0) = dqpsk_hard_bits_and_llr(Complex32::new(1.0, 0.0));
+        assert_eq!(b0, [0, 0]);
+        assert!(l0[0] > 0.0 && l0[1] > 0.0);
+
+        let (_s1, b1, l1) = dqpsk_hard_bits_and_llr(Complex32::new(0.0, 1.0));
+        assert_eq!(b1, [0, 1]);
+        assert!(l1[0] > 0.0 && l1[1] < 0.0);
+
+        let (_s2, b2, l2) = dqpsk_hard_bits_and_llr(Complex32::new(-1.0, 0.0));
+        assert_eq!(b2, [1, 1]);
+        assert!(l2[0] < 0.0 && l2[1] < 0.0);
+
+        let (_s3, b3, l3) = dqpsk_hard_bits_and_llr(Complex32::new(0.0, -1.0));
+        assert_eq!(b3, [1, 0]);
+        assert!(l3[0] < 0.0 && l3[1] > 0.0);
+    }
+
+    #[test]
+    fn test_decode_diff_symbol_soft_outputs_expected_llr_count() {
+        let s0 = decode_diff_symbol_soft(Complex32::new(0.0, 1.0));
+        assert_eq!(s0.decided, Complex32::new(0.0, 1.0));
+        assert_eq!(s0.llr_count, MODULATION.bits_per_symbol());
+        assert!(s0.llrs[0].is_finite());
+
+        let s1 = decode_diff_symbol_soft(Complex32::new(-1.0, 0.0));
+        assert_eq!(s1.decided, Complex32::new(-1.0, 0.0));
+        assert_eq!(s1.llr_count, MODULATION.bits_per_symbol());
+        assert!(s1.llrs[0].is_finite());
+    }
+
+    #[test]
+    fn test_condition_llr_clips_and_preserves_sign() {
+        let p = condition_llr(10.0, LLR_NOISE_VAR_MIN, 1.0);
+        let n = condition_llr(-10.0, LLR_NOISE_VAR_MIN, 1.0);
+        assert_eq!(p, LLR_CLIP_ABS);
+        assert_eq!(n, -LLR_CLIP_ABS);
+
+        let m = condition_llr(0.8, 1.5, 0.5);
+        assert!(m > 0.0);
+        assert!(m < LLR_CLIP_ABS);
+    }
+
+    #[test]
+    fn test_condition_llr_quality_reduces_magnitude() {
+        let hi = condition_llr(1.0, 1.0, 1.0);
+        let lo = condition_llr(1.0, 1.0, 0.2);
+        assert!(lo.abs() < hi.abs());
+    }
+
+    #[test]
+    fn test_condition_llr_noise_var_reduces_magnitude() {
+        let low_noise = condition_llr(1.0, 0.1, 1.0);
+        let high_noise = condition_llr(1.0, 1.0, 1.0);
+        assert!(high_noise.abs() < low_noise.abs());
+    }
+
+    #[test]
+    fn test_llr_quality_erases_on_large_phase_or_timing_error() {
+        let q_ok = llr_quality(0.05, 0.05);
+        let q_phase_erase = llr_quality(LLR_PHASE_ERR_ERASE_RAD + 0.01, 0.0);
+        let q_timing_erase = llr_quality(0.0, LLR_TIMING_ERR_ERASE + 0.01);
+        assert!(q_ok > 0.0);
+        assert_eq!(q_phase_erase, 0.0);
+        assert_eq!(q_timing_erase, 0.0);
+    }
+
+    #[test]
+    fn test_decode_diff_symbol_soft_is_amplitude_invariant() {
+        let a = decode_diff_symbol_soft(Complex32::new(0.5, 0.5));
+        let b = decode_diff_symbol_soft(Complex32::new(2.0, 2.0));
+        assert_eq!(a.decided, b.decided);
+        assert_eq!(a.llr_count, b.llr_count);
+        for i in 0..a.llr_count {
+            assert!((a.llrs[i] - b.llrs[i]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_estimate_noise_var_from_diff_is_amplitude_invariant() {
+        let s = Complex32::new(1.0, 0.0);
+        let e0 = estimate_noise_var_from_diff(Complex32::new(0.9, 0.1), s);
+        let e1 = estimate_noise_var_from_diff(Complex32::new(1.8, 0.2), s);
+        assert!((e0 - e1).abs() < 1e-4);
     }
 
     #[test]

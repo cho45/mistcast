@@ -152,6 +152,83 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
     decoded
 }
 
+/// Viterbiデコーダ (ソフト判定, LLR入力)
+///
+/// `llrs` は coded bit ごとの対数尤度比 (LLR)。
+/// 正: bit=0 を支持、負: bit=1 を支持。
+pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
+    assert!(llrs.len().is_multiple_of(2), "LLR列は偶数長であること");
+    let num_symbols = llrs.len() / 2;
+
+    const NEG_INF: f32 = f32::NEG_INFINITY;
+    let mut path_metrics = vec![NEG_INF; NUM_STATES];
+    path_metrics[0] = 0.0;
+
+    let mut survivors: Vec<Vec<u8>> = Vec::with_capacity(num_symbols);
+
+    for sym_idx in 0..num_symbols {
+        let l0 = llrs[sym_idx * 2];
+        let l1 = llrs[sym_idx * 2 + 1];
+
+        let mut new_metrics = vec![NEG_INF; NUM_STATES];
+        let mut survivor = vec![0u8; NUM_STATES];
+
+        for (prev_state, &metric) in path_metrics.iter().enumerate().take(NUM_STATES) {
+            if !metric.is_finite() {
+                continue;
+            }
+            for bit in 0u8..2 {
+                let (v1, v2) = conv_output(prev_state as u8, bit);
+                let branch_score = llr_score(l0, v1) + llr_score(l1, v2);
+                let ns = next_state(prev_state as u8, bit) as usize;
+                let total = metric + branch_score;
+                if total > new_metrics[ns] {
+                    new_metrics[ns] = total;
+                    survivor[ns] = prev_state as u8;
+                }
+            }
+        }
+
+        path_metrics = new_metrics;
+        survivors.push(survivor);
+    }
+
+    let best_end_state = path_metrics
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(s, _)| s)
+        .unwrap_or(0);
+
+    let data_len = num_symbols.saturating_sub(CONSTRAINT_LEN - 1);
+    let mut decoded = vec![0u8; data_len];
+    let mut state = best_end_state as u8;
+
+    for t in (0..num_symbols).rev() {
+        let prev = survivors[t][state as usize];
+        let bit = if next_state(prev, 1) == state {
+            1u8
+        } else {
+            0u8
+        };
+        if t < data_len {
+            decoded[t] = bit;
+        }
+        state = prev;
+    }
+
+    decoded
+}
+
+#[inline]
+fn llr_score(llr: f32, expected: u8) -> f32 {
+    if expected == 0 {
+        llr
+    } else {
+        -llr
+    }
+}
+
 /// ビット列をバイト列に変換 (MSB first)
 pub fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
     bits.chunks(8)
@@ -249,6 +326,96 @@ mod tests {
 
         let decoded = decode(&coded);
         assert_eq!(decoded, original, "3ビットの分散エラーが訂正されること");
+    }
+
+    #[test]
+    fn test_soft_decode_no_error_llr() {
+        let original: Vec<u8> = (0..64u32).map(|i| ((i * 17 + 3) % 2) as u8).collect();
+        let coded = encode(&original);
+        let llrs: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 4.0 } else { -4.0 })
+            .collect();
+        let decoded = decode_soft(&llrs);
+        assert_eq!(decoded, original, "ソフト判定でも往復一致すること");
+    }
+
+    #[test]
+    fn test_soft_decode_matches_hard_on_strong_llr() {
+        let original: Vec<u8> = (0..48u32).map(|i| ((i * 13 + 5) % 2) as u8).collect();
+        let coded = encode(&original);
+        let hard_decoded = decode(&coded);
+        let llrs: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 6.0 } else { -6.0 })
+            .collect();
+        let soft_decoded = decode_soft(&llrs);
+        assert_eq!(soft_decoded, hard_decoded);
+        assert_eq!(soft_decoded, original);
+    }
+
+    #[test]
+    #[should_panic(expected = "LLR列は偶数長であること")]
+    fn test_soft_decode_panics_on_odd_llr_len() {
+        let _ = decode_soft(&[1.0, -1.0, 0.5]);
+    }
+
+    #[test]
+    fn test_soft_decode_invariant_to_positive_llr_scale() {
+        let original: Vec<u8> = (0..96u32).map(|i| ((i * 29 + 7) % 2) as u8).collect();
+        let coded = encode(&original);
+        let base_llr: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 1.7 } else { -1.7 })
+            .collect();
+        let scaled_llr: Vec<f32> = base_llr.iter().map(|v| v * 3.5).collect();
+
+        let d0 = decode_soft(&base_llr);
+        let d1 = decode_soft(&scaled_llr);
+        assert_eq!(d0, d1);
+        assert_eq!(d0, original);
+    }
+
+    #[test]
+    fn test_soft_decode_beats_hard_in_deterministic_noise_search() {
+        let original: Vec<u8> = (0..80u32).map(|i| ((i * 19 + 11) % 2) as u8).collect();
+        let coded = encode(&original);
+
+        let mut found = false;
+        let mut state = 0x9e3779b97f4a7c15u64;
+        for amp in [1.2f32, 1.4, 1.6, 1.8, 2.0] {
+            for _trial in 0..500 {
+                let mut llrs = Vec::with_capacity(coded.len());
+                for &b in &coded {
+                    // xorshift64*
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let u = (state as u32) as f32 / u32::MAX as f32; // [0,1]
+                    let noise = (u * 2.0 - 1.0) * amp; // [-amp, amp]
+                    let sym = if b == 0 { 1.0 } else { -1.0 };
+                    llrs.push(sym + noise);
+                }
+                let hard_bits: Vec<u8> = llrs
+                    .iter()
+                    .map(|&v| if v >= 0.0 { 0u8 } else { 1u8 })
+                    .collect();
+                let hard_decoded = decode(&hard_bits);
+                let soft_decoded = decode_soft(&llrs);
+                if hard_decoded != original && soft_decoded == original {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+
+        assert!(
+            found,
+            "deterministic search should find at least one case where soft Viterbi beats hard Viterbi"
+        );
     }
 
     /// バーストエラーの訂正限界確認
