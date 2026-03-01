@@ -53,7 +53,7 @@ impl SyncDetector {
         let preamble_len = sym_len * repeat;
         let required_len = preamble_len + sym_len;
         let spc = self.spc;
-        let coarse_step = spc.max(1);  // 修正: 2サンプル/チップ → 1サンプル/チップ
+        let coarse_step = (spc * 2).max(1);
 
         // プリアンブル直後の1シンボル分まで見えてから同期確定する。
         // 部分一致による早期ロックを避けるためのガード。
