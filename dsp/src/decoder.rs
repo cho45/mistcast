@@ -69,7 +69,8 @@ pub struct Decoder {
     interleaver: BlockInterleaver,
     fountain_decoder: FountainDecoder,
     recovered_data: Option<Vec<u8>>,
-    agc_peak: f32,
+    pub agc_peak_fast: f32,
+    pub agc_peak_slow: f32,
     decimation_factor: usize,
     packets_per_sync_burst: usize,
     lo_nco: Nco,
@@ -135,7 +136,8 @@ impl Decoder {
             recovered_data: None,
             config: dsp_config,
             proc_config,
-            agc_peak: 0.5,
+            agc_peak_fast: 0.5,
+            agc_peak_slow: 0.5,
             decimation_factor,
             packets_per_sync_burst: PACKETS_PER_SYNC_BURST,
             lo_nco,
@@ -717,9 +719,35 @@ impl Decoder {
 
     #[inline]
     fn agc_scale(&mut self, sample: f32) -> f32 {
-        self.agc_peak = self.agc_peak * 0.999 + sample.abs() * 0.001;
-        let gain = if self.agc_peak > 1e-6 {
-            0.5 / self.agc_peak
+        let sample_abs = sample.abs();
+
+        // 高速EMA: 信号の急激な変化に対応
+        let fast_alpha_rise = 0.1;
+        let fast_alpha_fall = 0.001;
+        if sample_abs > self.agc_peak_fast {
+            self.agc_peak_fast = self.agc_peak_fast * (1.0 - fast_alpha_rise) + sample_abs * fast_alpha_rise;
+        } else {
+            self.agc_peak_fast = self.agc_peak_fast * (1.0 - fast_alpha_fall) + sample_abs * fast_alpha_fall;
+        }
+
+        // 低速EMA: 安定したレベル推定
+        let slow_alpha_rise = 0.01;
+        let slow_alpha_fall = 0.0005;
+        if sample_abs > self.agc_peak_slow {
+            self.agc_peak_slow = self.agc_peak_slow * (1.0 - slow_alpha_rise) + sample_abs * slow_alpha_rise;
+        } else {
+            self.agc_peak_slow = self.agc_peak_slow * (1.0 - slow_alpha_fall) + sample_abs * slow_alpha_fall;
+        }
+
+        // 雑音過敏を防ぐため、低速EMAの1.5倍以上高速EMAが大きい場合のみ高速EMAを採用
+        let peak = if self.agc_peak_fast > self.agc_peak_slow * 1.5 {
+            self.agc_peak_fast
+        } else {
+            self.agc_peak_slow
+        };
+
+        let gain = if peak > 1e-6 {
+            0.5 / peak
         } else {
             1.0
         };
@@ -1051,6 +1079,73 @@ mod tests {
         assert!(!progress.complete);
         assert_eq!(progress.received_packets, 0);
         assert!(decoder.recovered_data().is_none());
+    }
+
+    #[test]
+    fn test_agc_fast_attack_response() {
+        let dsp_config = DspConfig::default_48k();
+        let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
+
+        // 初期状態: 低レベルで十分に安定化
+        let low_level = vec![0.01f32; 100];
+        for _ in 0..100 {
+            decoder.process_samples(&low_level);
+        }
+        let initial_fast_peak = decoder.agc_peak_fast;
+        let _initial_slow_peak = decoder.agc_peak_slow;
+
+        // 急激なレベル上昇（10倍）
+        let high_level = vec![0.1f32; 100];
+        decoder.process_samples(&high_level);
+
+        // 高速EMAが追従していることを確認
+        let fast_peak = decoder.agc_peak_fast;
+        assert!(
+            fast_peak > initial_fast_peak * 1.05,
+            "Fast EMA should track level increase: initial={}, fast={}",
+            initial_fast_peak,
+            fast_peak
+        );
+    }
+
+    #[test]
+    fn test_agc_slow_decay_stability() {
+        let dsp_config = DspConfig::default_48k();
+        let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
+
+        // 高レベルで安定化
+        let high_level = vec![0.1f32; 1000];
+        for _ in 0..20 {
+            decoder.process_samples(&high_level);
+        }
+        let stabilized_fast_peak = decoder.agc_peak_fast;
+        let stabilized_slow_peak = decoder.agc_peak_slow;
+
+        // 急激なレベル下降（1/10）
+        let low_level = vec![0.01f32; 100];
+        decoder.process_samples(&low_level);
+
+        // 低速EMAは緩やかに下降する（すぐには下がりすぎない）
+        let decayed_fast_peak = decoder.agc_peak_fast;
+        let decayed_slow_peak = decoder.agc_peak_slow;
+        assert!(
+            decayed_slow_peak > stabilized_slow_peak * 0.5,
+            "Slow EMA should decay gradually: stabilized={}, decayed={}",
+            stabilized_slow_peak,
+            decayed_slow_peak
+        );
+        assert!(
+            decayed_fast_peak < stabilized_fast_peak * 0.95,
+            "Fast EMA should decay faster: stabilized={}, decayed={}",
+            stabilized_fast_peak,
+            decayed_fast_peak
+        );
+        assert!(
+            decayed_slow_peak > stabilized_slow_peak * 0.5,
+            "Slow EMA should decay gradually: stabilized={}, decayed={}",
+            stabilized_slow_peak,
+            decayed_slow_peak
+        );
     }
 
     #[test]
