@@ -20,11 +20,15 @@ use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-const TRACKING_TIMING_LOOP_GAIN: f32 = 0.18;
-const TRACKING_PHASE_LOOP_GAIN: f32 = 0.04;
+const TRACKING_TIMING_PROP_GAIN: f32 = 0.18;
+const TRACKING_TIMING_RATE_GAIN: f32 = 0.01;
+const TRACKING_PHASE_PROP_GAIN: f32 = 0.22;
+const TRACKING_PHASE_FREQ_GAIN: f32 = 0.015;
 const TRACKING_TIMING_LIMIT_CHIP: f32 = 2.0;
+const TRACKING_TIMING_RATE_LIMIT_CHIP: f32 = 0.25;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
-const TRACKING_PHASE_STEP_CLAMP: f32 = 0.15;
+const TRACKING_PHASE_RATE_LIMIT_RAD: f32 = 2.6;
+const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
 const HEADER_PROBE_SYMBOL_SPAN: i32 = 3;
 const HEADER_PROBE_CHIP_SPAN: i32 = 6;
 const ITERATION_BUDGET_MIN: usize = 2;
@@ -85,7 +89,9 @@ pub struct Decoder {
 struct TrackingState {
     phase_ref: Complex32,
     prev_symbol: Complex32,
+    phase_rate: f32,
     timing_offset: f32,
+    timing_rate: f32,
 }
 
 impl Decoder {
@@ -230,7 +236,9 @@ impl Decoder {
             let mut best_tracking_after_sync = TrackingState {
                 phase_ref: Complex32::new(1.0, 0.0),
                 prev_symbol: Complex32::new(1.0, 0.0),
+                phase_rate: 0.0,
                 timing_offset: 0.0,
+                timing_rate: 0.0,
             };
             let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
             let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
@@ -432,8 +440,11 @@ impl Decoder {
 
         let mut phase_ref = initial_state.phase_ref;
         let mut prev_symbol = initial_state.prev_symbol;
+        let mut phase_rate = initial_state.phase_rate;
         let mut timing_offset = initial_state.timing_offset;
+        let mut timing_rate = initial_state.timing_rate;
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
+        let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
         let mut bits = Vec::with_capacity(num_bits);
 
@@ -456,18 +467,21 @@ impl Decoder {
             let on_rot = on * phase_ref.conj();
             let diff = on_rot * prev_symbol.conj();
             let decided = decode_diff_symbol_and_push_bits(diff, &mut bits, num_bits);
-            let dphi = phase_step_from_diff(diff, decided);
+            let phase_err = phase_error_from_diff(diff, decided);
+            phase_rate = update_phase_rate(phase_rate, phase_err);
+            let dphi = phase_step_from_phase_error(phase_err, phase_rate);
             let (sin_dphi, cos_dphi) = dphi.sin_cos();
             phase_ref *= Complex32::new(cos_dphi, sin_dphi);
             let phase_norm = phase_ref.norm().max(1e-6);
             phase_ref /= phase_norm;
 
-            // Early/Late timing tracking
+            // Early/Late timing tracking (PI loop)
             let early_mag = early.norm();
             let late_mag = late.norm();
             let timing_err = timing_error_from_early_late(early_mag, late_mag);
-            timing_offset = (timing_offset + TRACKING_TIMING_LOOP_GAIN * timing_err)
-                .clamp(-timing_limit, timing_limit);
+            timing_rate = update_timing_rate(timing_rate, timing_err, timing_rate_limit);
+            timing_offset =
+                update_timing_offset(timing_offset, timing_rate, timing_err, timing_limit);
 
             let on_norm = on_rot.norm();
             if on_norm > 1e-4 {
@@ -497,8 +511,11 @@ impl Decoder {
             Complex32::new(1.0, 0.0)
         };
         let mut prev_symbol = phase_ref;
+        let mut phase_rate = 0.0f32;
         let mut timing_offset = 0.0f32;
+        let mut timing_rate = 0.0f32;
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
+        let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
         let mut word = 0u32;
 
@@ -528,7 +545,9 @@ impl Decoder {
                 Complex32::new(-1.0, 0.0)
             };
 
-            let dphi = phase_step_from_diff(diff, decided);
+            let phase_err = phase_error_from_diff(diff, decided);
+            phase_rate = update_phase_rate(phase_rate, phase_err);
+            let dphi = phase_step_from_phase_error(phase_err, phase_rate);
             let (sin_dphi, cos_dphi) = dphi.sin_cos();
             phase_ref *= Complex32::new(cos_dphi, sin_dphi);
             let phase_norm = phase_ref.norm().max(1e-6);
@@ -537,8 +556,9 @@ impl Decoder {
             let early_mag = early.norm();
             let late_mag = late.norm();
             let timing_err = timing_error_from_early_late(early_mag, late_mag);
-            timing_offset = (timing_offset + TRACKING_TIMING_LOOP_GAIN * timing_err)
-                .clamp(-timing_limit, timing_limit);
+            timing_rate = update_timing_rate(timing_rate, timing_err, timing_rate_limit);
+            timing_offset =
+                update_timing_offset(timing_offset, timing_rate, timing_err, timing_limit);
 
             let on_norm = on_rot.norm();
             if on_norm > 1e-4 {
@@ -553,7 +573,9 @@ impl Decoder {
             TrackingState {
                 phase_ref,
                 prev_symbol,
+                phase_rate,
                 timing_offset,
+                timing_rate,
             },
         ))
     }
@@ -764,6 +786,23 @@ fn timing_error_from_early_late(early_mag: f32, late_mag: f32) -> f32 {
 }
 
 #[inline]
+fn update_timing_rate(timing_rate: f32, timing_err: f32, timing_rate_limit: f32) -> f32 {
+    (timing_rate + TRACKING_TIMING_RATE_GAIN * timing_err)
+        .clamp(-timing_rate_limit, timing_rate_limit)
+}
+
+#[inline]
+fn update_timing_offset(
+    timing_offset: f32,
+    timing_rate: f32,
+    timing_err: f32,
+    timing_limit: f32,
+) -> f32 {
+    (timing_offset + timing_rate + TRACKING_TIMING_PROP_GAIN * timing_err)
+        .clamp(-timing_limit, timing_limit)
+}
+
+#[inline]
 fn decode_diff_symbol_and_push_bits(
     diff: Complex32,
     bits: &mut Vec<u8>,
@@ -803,10 +842,22 @@ fn decode_diff_symbol_and_push_bits(
 }
 
 #[inline]
-fn phase_step_from_diff(diff: Complex32, decided_symbol: Complex32) -> f32 {
+fn phase_error_from_diff(diff: Complex32, decided_symbol: Complex32) -> f32 {
     let diff_data_removed = diff * decided_symbol.conj();
-    let phase_err = diff_data_removed.im / (diff_data_removed.re.abs() + 1e-6);
-    (TRACKING_PHASE_LOOP_GAIN * phase_err)
+    diff_data_removed.im.atan2(diff_data_removed.re)
+}
+
+#[inline]
+fn update_phase_rate(phase_rate: f32, phase_err: f32) -> f32 {
+    (phase_rate + TRACKING_PHASE_FREQ_GAIN * phase_err).clamp(
+        -TRACKING_PHASE_RATE_LIMIT_RAD,
+        TRACKING_PHASE_RATE_LIMIT_RAD,
+    )
+}
+
+#[inline]
+fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
+    (phase_rate + TRACKING_PHASE_PROP_GAIN * phase_err)
         .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
 }
 
@@ -984,7 +1035,7 @@ mod tests {
 
         let mut rx_cfg = DspConfig::default_48k();
         // 受信LOずれを模擬: 音響リンクで現実的な小さなCFO。
-        rx_cfg.carrier_freq += 5.0;
+        rx_cfg.carrier_freq += 10.0;
 
         let recovered = decode_signal(data, k, rx_cfg, &signal)
             .expect("decoder should recover under mild carrier offset");
@@ -999,7 +1050,7 @@ mod tests {
         signal.extend(build_test_signal(data, k, 3, 64));
 
         let mut rx_cfg = DspConfig::default_48k();
-        rx_cfg.carrier_freq += 5.0;
+        rx_cfg.carrier_freq += 10.0;
 
         let recovered = decode_signal(data, k, rx_cfg, &signal)
             .expect("decoder should recover with offset start + mild CFO");
@@ -1017,12 +1068,55 @@ mod tests {
     }
 
     #[test]
-    fn test_tracking_phase_step_sign_and_clamp() {
-        let p = phase_step_from_diff(Complex32::new(0.8, 0.8), Complex32::new(1.0, 0.0));
-        let n = phase_step_from_diff(Complex32::new(0.8, -0.8), Complex32::new(1.0, 0.0));
-        let c = phase_step_from_diff(Complex32::new(1e-6, 10.0), Complex32::new(1.0, 0.0));
-        assert!(p > 0.0);
-        assert!(n < 0.0);
+    fn test_tracking_phase_error_sign_and_clamp() {
+        let p_err = phase_error_from_diff(Complex32::new(0.8, 0.8), Complex32::new(1.0, 0.0));
+        let n_err = phase_error_from_diff(Complex32::new(0.8, -0.8), Complex32::new(1.0, 0.0));
+        let mut rate = 0.0f32;
+        rate = update_phase_rate(rate, p_err);
+        let p_step = phase_step_from_phase_error(p_err, rate);
+        rate = update_phase_rate(rate, n_err);
+        let n_step = phase_step_from_phase_error(n_err, rate);
+
+        let huge_err = phase_error_from_diff(Complex32::new(-1.0, 1e-6), Complex32::new(1.0, 0.0));
+        let huge_rate = update_phase_rate(TRACKING_PHASE_RATE_LIMIT_RAD, huge_err);
+        let c = phase_step_from_phase_error(huge_err, huge_rate);
+
+        assert!(p_err > 0.0);
+        assert!(n_err < 0.0);
+        assert!(p_step > 0.0);
+        assert!(n_step < 0.0);
         assert!(c.abs() <= TRACKING_PHASE_STEP_CLAMP + 1e-6);
+    }
+
+    #[test]
+    fn test_tracking_timing_pi_loop_direction() {
+        let timing_limit = 4.0f32;
+        let timing_rate_limit = 1.0f32;
+
+        let mut timing_rate = 0.0f32;
+        let mut timing_offset = 0.0f32;
+        for _ in 0..8 {
+            timing_rate = update_timing_rate(timing_rate, 0.5, timing_rate_limit);
+            timing_offset = update_timing_offset(timing_offset, timing_rate, 0.5, timing_limit);
+        }
+        assert!(timing_rate > 0.0);
+        assert!(timing_offset > 0.0);
+
+        for _ in 0..8 {
+            timing_rate = update_timing_rate(timing_rate, -0.5, timing_rate_limit);
+            timing_offset = update_timing_offset(timing_offset, timing_rate, -0.5, timing_limit);
+        }
+        assert!(timing_offset < 0.5);
+    }
+
+    #[test]
+    fn test_decoder_tracking_tolerates_larger_clock_drift_ppm() {
+        let data = b"tracking larger timing drift payload";
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let signal = build_test_signal(data, k, 8, 64);
+        let drifted = apply_clock_drift_ppm(&signal, 200.0);
+        let recovered = decode_signal(data, k, DspConfig::default_48k(), &drifted)
+            .expect("decoder should recover under larger clock drift");
+        assert_eq!(&recovered[..data.len()], data);
     }
 }
