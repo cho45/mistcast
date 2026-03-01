@@ -124,6 +124,8 @@ struct TrialResult {
     bit_errors: usize,
     bits_compared: usize,
     dropped_attempts: usize,
+    tx_signal_energy_sum: f64,
+    tx_signal_samples: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -137,6 +139,8 @@ struct Metrics {
     total_bits_compared: usize,
     total_elapsed_sec: f32,
     dropped_attempts: usize,
+    total_tx_signal_energy: f64,
+    total_tx_signal_samples: usize,
     completion_secs: Vec<f32>,
 }
 
@@ -148,6 +152,8 @@ impl Metrics {
         self.total_bit_errors += t.bit_errors;
         self.total_bits_compared += t.bits_compared;
         self.dropped_attempts += t.dropped_attempts;
+        self.total_tx_signal_energy += t.tx_signal_energy_sum;
+        self.total_tx_signal_samples += t.tx_signal_samples;
 
         if t.first_attempt_success {
             self.first_attempt_successes += 1;
@@ -219,6 +225,26 @@ impl Metrics {
             .map(|&t| payload_bits as f32 / t.max(1e-6))
             .sum::<f32>();
         Some(sum / self.completion_secs.len() as f32)
+    }
+
+    fn tx_signal_power(&self) -> Option<f32> {
+        if self.total_tx_signal_samples == 0 {
+            None
+        } else {
+            Some((self.total_tx_signal_energy / self.total_tx_signal_samples as f64) as f32)
+        }
+    }
+
+    fn awgn_snr_db(&self, sigma: f32) -> Option<f32> {
+        if sigma <= 0.0 {
+            return None;
+        }
+        let p_sig = self.tx_signal_power()?;
+        if p_sig <= 0.0 {
+            return None;
+        }
+        let p_noise = sigma * sigma;
+        Some(10.0 * (p_sig / p_noise).log10())
     }
 }
 
@@ -643,6 +669,16 @@ fn run_trial(
     }
 }
 
+fn signal_energy(samples: &[f32]) -> f64 {
+    samples
+        .iter()
+        .map(|&x| {
+            let v = x as f64;
+            v * v
+        })
+        .sum()
+}
+
 fn run_trial_dsss(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) -> TrialResult {
     let tx_cfg = DspConfig::default_48k();
     let mut rx_cfg = tx_cfg.clone();
@@ -655,6 +691,8 @@ fn run_trial_dsss(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64)
     let mut bits_compared = 0usize;
     let mut dropped_attempts = 0usize;
     let mut first_attempt_success = false;
+    let mut tx_signal_energy_sum = 0.0f64;
+    let mut tx_signal_samples = 0usize;
 
     loop {
         if elapsed_sec >= max_sec {
@@ -663,6 +701,8 @@ fn run_trial_dsss(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64)
 
         attempts += 1;
         let tx = dsss_modulate_bits(bits, &tx_cfg);
+        tx_signal_energy_sum += signal_energy(&tx);
+        tx_signal_samples += tx.len();
         let drop = rng.gen::<f32>() < imp.burst_loss;
         if drop {
             dropped_attempts += 1;
@@ -688,6 +728,8 @@ fn run_trial_dsss(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64)
                 bit_errors,
                 bits_compared,
                 dropped_attempts,
+                tx_signal_energy_sum,
+                tx_signal_samples,
             };
         }
     }
@@ -701,6 +743,8 @@ fn run_trial_dsss(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64)
         bit_errors,
         bits_compared,
         dropped_attempts,
+        tx_signal_energy_sum,
+        tx_signal_samples,
     }
 }
 
@@ -717,6 +761,8 @@ fn run_trial_fsk(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) 
     let mut bits_compared = 0usize;
     let mut dropped_attempts = 0usize;
     let mut first_attempt_success = false;
+    let mut tx_signal_energy_sum = 0.0f64;
+    let mut tx_signal_samples = 0usize;
 
     loop {
         if elapsed_sec >= max_sec {
@@ -725,6 +771,8 @@ fn run_trial_fsk(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) 
 
         attempts += 1;
         let tx = fsk_modulate_bits(bits, &tx_cfg);
+        tx_signal_energy_sum += signal_energy(&tx);
+        tx_signal_samples += tx.len();
         let drop = rng.gen::<f32>() < imp.burst_loss;
         if drop {
             dropped_attempts += 1;
@@ -750,6 +798,8 @@ fn run_trial_fsk(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) 
                 bit_errors,
                 bits_compared,
                 dropped_attempts,
+                tx_signal_energy_sum,
+                tx_signal_samples,
             };
         }
     }
@@ -763,12 +813,14 @@ fn run_trial_fsk(bits: &[u8], imp: &ChannelImpairment, max_sec: f32, seed: u64) 
         bit_errors,
         bits_compared,
         dropped_attempts,
+        tx_signal_energy_sum,
+        tx_signal_samples,
     }
 }
 
 fn print_header() {
     println!(
-        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,multipath"
+        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,multipath"
     );
 }
 
@@ -778,8 +830,13 @@ fn fmt_opt(v: Option<f32>) -> String {
 }
 
 fn print_row(scenario: &str, phy: PhyKind, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
+    let noise_power = if imp.sigma > 0.0 {
+        Some(imp.sigma * imp.sigma)
+    } else {
+        None
+    };
     println!(
-        "{scenario},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{},{}",
+        "{scenario},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{},{}",
         phy.as_str(),
         m.trials,
         m.successes,
@@ -787,6 +844,9 @@ fn print_row(scenario: &str, phy: PhyKind, cli: &Cli, imp: &ChannelImpairment, m
         m.first_attempt_successes,
         m.total_bits_compared,
         m.total_bit_errors,
+        fmt_opt(m.tx_signal_power()),
+        fmt_opt(noise_power),
+        fmt_opt(m.awgn_snr_db(imp.sigma)),
         m.p_complete(),
         m.p_complete_deadline(),
         cli.deadline_sec,

@@ -104,11 +104,12 @@ phy-compare-threeway:
 		--alpha "$(if $(ALPHA),$(ALPHA),0.05)" \
 		--out "$(if $(OUT),$(OUT),dsp/eval/runs/threeway_$(shell date -u +%Y%m%dT%H%M%SZ).csv)"
 
-# 可視化: INPUT=<metrics.csv> [OUT_DIR=<dir>] [METRIC=p_complete_deadline] [OUTPUT=phy_summary.png]
+# 可視化: INPUT=<metrics.csv> [OUT_DIR=<dir>] [METRIC=p_complete_deadline] [OUTPUT=phy_summary.png] [AWGN_AXIS=snr-db]
 phy-plot:
 	@test -n "$(INPUT)" || (echo "INPUT=... を指定してください" && exit 2)
 	MPLCONFIGDIR="$(CURDIR)/dsp/eval/.mplcache/mplconfig" XDG_CACHE_HOME="$(CURDIR)/dsp/eval/.mplcache/xdg" $(PYTHON) scripts/phy_eval/phy_plot.py \
 		--input "$(INPUT)" \
 		--out-dir "$(if $(OUT_DIR),$(OUT_DIR),dsp/eval/plots/$(shell date -u +%Y%m%dT%H%M%SZ))" \
 		--metric "$(if $(METRIC),$(METRIC),p_complete_deadline)" \
-		--output "$(if $(OUTPUT),$(OUTPUT),phy_summary.png)"
+		--output "$(if $(OUTPUT),$(OUTPUT),phy_summary.png)" \
+		--awgn-axis "$(if $(AWGN_AXIS),$(AWGN_AXIS),snr-db)"

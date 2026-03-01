@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import pathlib
+import re
 import statistics
 from typing import Dict, List, Optional, Tuple
 
@@ -19,6 +20,9 @@ NUMERIC_FIELDS = [
     "goodput_success_mean_bps",
     "p95_complete_s",
     "mean_complete_s",
+    "tx_signal_power",
+    "awgn_noise_power",
+    "awgn_snr_db",
 ]
 
 
@@ -65,6 +69,16 @@ def fmt(v: float) -> str:
     if v != v:
         return "NaN"
     return f"{v:.6f}"
+
+
+def parse_param(scenario: str, key: str) -> Optional[float]:
+    m = re.search(rf"{re.escape(key)}=([-+0-9.]+)", scenario)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
 
 
 def extract_count(row: Optional[Dict[str, str]], count_key: str, prob_key: str) -> Tuple[Optional[int], Optional[int]]:
@@ -181,6 +195,9 @@ def main() -> int:
             status = "missing_new_dsss"
 
         row: Dict[str, str] = {"mode": mode, "scenario": scenario, "status": status}
+        sigma = parse_param(scenario, "sigma")
+        row["awgn_sigma"] = fmt(sigma) if sigma is not None else "NaN"
+        row["is_awgn"] = "1" if mode == "sweep-awgn" else "0"
 
         for f in NUMERIC_FIELDS:
             bf = to_float((base_fsk or {}).get(f))
@@ -231,23 +248,52 @@ def main() -> int:
 
         out_rows.append(row)
 
+    # Console summary (readable)
+    print("=== THREE-WAY SUMMARY (baseline FSK / baseline DSSS / new DSSS) ===")
     print(
-        "mode,scenario,status,new_vs_base_dsss_delta_pcd,new_vs_base_dsss_p,new_vs_base_fsk_delta_pcd,new_vs_base_fsk_p"
+        "mode,scenario,status,awgn_sigma,base_dsss_snr_db,base_fsk_snr_db,new_dsss_snr_db,"
+        "delta_pcd(new-base_dsss),p(new-base_dsss),delta_pcd(new-base_fsk),p(new-base_fsk),"
+        "delta_ber(new-base_dsss),p_ber(new-base_dsss),delta_ber(new-base_fsk),p_ber(new-base_fsk)"
     )
-    for r in out_rows:
+
+    awgn_rows = [r for r in out_rows if r["mode"] == "sweep-awgn"]
+    non_awgn_rows = [r for r in out_rows if r["mode"] != "sweep-awgn"]
+
+    awgn_rows.sort(
+        key=lambda r: (
+            to_float(r.get("baseline_dsss_awgn_snr_db")),
+            to_float(r.get("baseline_fsk_awgn_snr_db")),
+        ),
+        reverse=True,
+    )
+
+    def print_row(r: Dict[str, str]) -> None:
         print(
             ",".join(
                 [
                     r["mode"],
                     r["scenario"],
                     r["status"],
+                    r["awgn_sigma"],
+                    r["baseline_dsss_awgn_snr_db"],
+                    r["baseline_fsk_awgn_snr_db"],
+                    r["new_dsss_awgn_snr_db"],
                     r["sig_p_complete_deadline_new_vs_baseline_dsss_delta"],
                     r["sig_p_complete_deadline_new_vs_baseline_dsss_p"],
                     r["sig_p_complete_deadline_new_vs_baseline_fsk_delta"],
                     r["sig_p_complete_deadline_new_vs_baseline_fsk_p"],
+                    r["sig_ber_new_vs_baseline_dsss_delta"],
+                    r["sig_ber_new_vs_baseline_dsss_p"],
+                    r["sig_ber_new_vs_baseline_fsk_delta"],
+                    r["sig_ber_new_vs_baseline_fsk_p"],
                 ]
             )
         )
+
+    for r in awgn_rows:
+        print_row(r)
+    for r in non_awgn_rows:
+        print_row(r)
 
     if args.out:
         out_path = pathlib.Path(args.out)
@@ -265,4 +311,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

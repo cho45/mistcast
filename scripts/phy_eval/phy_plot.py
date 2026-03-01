@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import pathlib
 import re
@@ -24,6 +25,12 @@ def parse_args() -> argparse.Namespace:
         "--output",
         default="phy_summary.png",
         help="output png filename (default: phy_summary.png)",
+    )
+    p.add_argument(
+        "--awgn-axis",
+        default="snr-db",
+        choices=["snr-db", "sigma", "sigma-db"],
+        help="x-axis for awgn row (default: snr-db)",
     )
     return p.parse_args()
 
@@ -58,7 +65,18 @@ def collect_line_points(
         scenario = r.get("scenario", "")
         if not scenario.startswith(mode_prefix + "("):
             continue
-        x = parse_param(scenario, x_key)
+        if x_key == "snr_db":
+            x = to_float(r.get("awgn_snr_db", "NaN"))
+            if x != x:
+                x = None
+        elif x_key == "sigma_db":
+            sigma = parse_param(scenario, "sigma")
+            if sigma is None or sigma <= 0.0:
+                x = None
+            else:
+                x = 20.0 * math.log10(sigma)
+        else:
+            x = parse_param(scenario, x_key)
         y = to_float(r.get(y_key, "NaN"))
         if x is None or y != y:
             continue
@@ -161,13 +179,19 @@ def main() -> int:
     fig, axes = plt.subplots(5, 2, figsize=(16, 22))
     fig.suptitle(f"PHY Summary: metric={args.metric}", fontsize=14)
 
-    plot_line_on_axis(axes[0, 0], rows, "awgn", "sigma", args.metric)
+    awgn_x = {
+        "snr-db": "snr_db",
+        "sigma-db": "sigma_db",
+        "sigma": "sigma",
+    }[args.awgn_axis]
+
+    plot_line_on_axis(axes[0, 0], rows, "awgn", awgn_x, args.metric)
     plot_line_on_axis(axes[1, 0], rows, "cfo", "cfo", args.metric)
     plot_line_on_axis(axes[2, 0], rows, "ppm", "ppm", args.metric)
     plot_line_on_axis(axes[3, 0], rows, "loss", "loss", args.metric)
     plot_multipath_on_axis(axes[4, 0], rows, args.metric)
 
-    plot_line_on_axis(axes[0, 1], rows, "awgn", "sigma", "ber")
+    plot_line_on_axis(axes[0, 1], rows, "awgn", awgn_x, "ber")
     plot_line_on_axis(axes[1, 1], rows, "cfo", "cfo", "ber")
     plot_line_on_axis(axes[2, 1], rows, "ppm", "ppm", "ber")
     plot_line_on_axis(axes[3, 1], rows, "loss", "loss", "ber")

@@ -200,6 +200,7 @@ make phy-compare-threeway \
 - `delta_new_vs_baseline_fsk_*`
 - `delta_new_vs_baseline_dsss_*`
 - 有意差判定 (`p_complete_deadline` / `ber`) の `p値` と `95% CI`
+- AWGN時は `awgn_sigma`, `*_awgn_snr_db` も併記（`10*log10(tx_signal_power / sigma^2)`）
 
 ### 4. 可視化（matplotlib）
 
@@ -208,7 +209,8 @@ make phy-plot \
   INPUT=dsp/eval/baselines/<run>_metrics.csv \
   OUT_DIR=dsp/eval/plots/<run> \
   METRIC=p_complete_deadline \
-  OUTPUT=phy_summary.png
+  OUTPUT=phy_summary.png \
+  AWGN_AXIS=snr-db
 ```
 
 生成物:
@@ -216,6 +218,10 @@ make phy-plot \
   - 左列: 指定メトリクス（例: `p_complete_deadline`）
   - 右列: `ber`
   - 行: `awgn` / `cfo` / `ppm` / `loss` / `multipath`
+  - `awgn` 行の横軸は `AWGN_AXIS` で切替可能
+    - `snr-db`（既定）: `10*log10(tx_signal_power / sigma^2)` を使用
+    - `sigma`
+    - `sigma-db`（`20*log10(sigma)`）
 
 ## 設計哲学
 - **数学的証明に基づく実装**: 曖昧なアサーションや閾値を排除し、フィルタ遅延や相関ピーク位置の理論値と1サンプルの狂いもなく一致する実装を追求しています。

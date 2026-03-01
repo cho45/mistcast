@@ -18,6 +18,9 @@ NUMERIC_FIELDS = [
     "goodput_success_mean_bps",
     "p95_complete_s",
     "mean_complete_s",
+    "tx_signal_power",
+    "awgn_noise_power",
+    "awgn_snr_db",
 ]
 
 KEY_FIELDS = ["mode", "scenario", "phy"]
