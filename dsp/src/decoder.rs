@@ -829,6 +829,12 @@ fn build_proc_config(config: &DspConfig, decimation_factor: usize) -> DspConfig 
 
 impl Drop for Decoder {
     fn drop(&mut self) {
+        let enable_stats = std::env::var("MISTCAST_DECODER_STATS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if !enable_stats {
+            return;
+        }
         println!("\n--- Decoder Statistics ---");
         println!("  Total samples processed: {}", self.stats_total_samples);
         println!("  Total detect() calls: {}", self.stats_sync_calls);
