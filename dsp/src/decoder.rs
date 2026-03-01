@@ -27,6 +27,9 @@ const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const TRACKING_PHASE_STEP_CLAMP: f32 = 0.15;
 const HEADER_PROBE_SYMBOL_SPAN: i32 = 3;
 const HEADER_PROBE_CHIP_SPAN: i32 = 6;
+const ITERATION_BUDGET_MIN: usize = 2;
+const ITERATION_BUDGET_MAX: usize = 8;
+const ITERATION_BUDGET_HEADROOM: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
@@ -156,9 +159,11 @@ impl Decoder {
         let payload_symbols = burst_data_bits_len.div_ceil(bits_per_symbol_payload);
         let total_symbols = sync_symbol_len + payload_symbols;
         let symbol_len = sf * spc;
-        // 1回の process_samples で探索しすぎると detect() が支配的になるため、
-        // 反復数を最小限に抑えてストリーミング側へ制御を返す。
-        let mut iteration_budget = 2usize;
+        let frame_samples = (total_symbols * symbol_len).max(1);
+        let queued_frames = self.sample_buffer_i.len() / frame_samples;
+        // バッファ量に応じて反復回数を決める。過不足を避けるために上下限を設ける。
+        let mut iteration_budget = (queued_frames + ITERATION_BUDGET_HEADROOM)
+            .clamp(ITERATION_BUDGET_MIN, ITERATION_BUDGET_MAX);
 
         loop {
             if iteration_budget == 0 {
