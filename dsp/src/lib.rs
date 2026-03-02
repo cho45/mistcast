@@ -102,6 +102,16 @@ pub struct WasmDecodeProgress {
     pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
+    #[wasm_bindgen(skip)]
+    pub basis_matrix: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WasmDecodeProgress {
+    #[wasm_bindgen(getter)]
+    pub fn basis_matrix(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(&self.basis_matrix[..])
+    }
 }
 
 #[wasm_bindgen]
@@ -139,6 +149,7 @@ impl WasmDecoder {
             last_rank_up_seq: progress.last_rank_up_seq,
             progress: progress.progress,
             complete: progress.complete,
+            basis_matrix: progress.basis_matrix,
         }
     }
     pub fn recovered_data(&self) -> Option<Vec<u8>> {

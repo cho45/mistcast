@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test --package dsp --lib test_ref_symbol_position_correctness 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast/dsp && cargo test --package dsp --lib test_ref_symbol_position_correctness 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast/dsp && cargo test --package dsp --lib test_sync_word_search_exhaustive_vs_first_match 2>&1)",
+      "Bash(cargo test --package dsp --lib test_tracking_at_boundary_vs_search_range 2>&1)",
+      "Bash(cargo test --package dsp --lib decoder::tests 2>&1 | head -100)",
+      "Bash(cargo test --package dsp --lib decoder::tests 2>&1 | head -50)",
+      "Bash(cargo test --package dsp --lib 2>&1 | tail -30)",
+      "Bash(cargo test --package dsp --lib 2>&1 | grep -A3 \"warning:\")",
+      "Bash(cargo test --package dsp --lib 2>&1 | grep -E \"\\(warning:|test result\\)\")",
+      "Bash(python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name p0-p2partial-p3-fixes \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast && python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name p0-p2partial-p3-fixes \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
+      "Bash(python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name p0-only-fixes \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast && python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name p0-only-fixes \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
+      "Bash(python3 scripts/phy_eval/phy_compare.py \\\\\n  --base dsp/eval/dsss_e2e/baselines/20260301T024242Z-93c6d340_metrics.csv \\\\\n  --new dsp/eval/dsss_e2e/runs/p0-only-fixes_metrics.csv \\\\\n  --out dsp/eval/dsss_e2e/runs/p0-only-fixes_compare.csv 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast/dsp && cargo test -q 2>&1 | tail -10)",
+      "Bash(python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name reverted-to-baseline \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn,sweep-ppm,sweep-loss,sweep-fading,sweep-multipath \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast && python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name reverted-to-baseline \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn,sweep-ppm,sweep-loss,sweep-fading,sweep-multipath \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
+      "Bash(cargo run --bin eval_awgn -- 2>&1 | tail -100)",
+      "Bash(cargo run --bin dsss_e2e_eval -- --help 2>&1)"
+    ]
+  }
+}

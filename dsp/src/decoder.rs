@@ -54,6 +54,7 @@ pub struct DecodeProgress {
     pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
+    pub basis_matrix: Vec<u8>,
 }
 
 pub struct Decoder {
@@ -545,6 +546,7 @@ impl Decoder {
             last_rank_up_seq: self.last_rank_up_seq.map(|v| v as i32).unwrap_or(-1),
             progress: self.fountain_decoder.progress(),
             complete: self.recovered_data.is_some(),
+            basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
     }
 

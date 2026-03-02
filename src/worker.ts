@@ -23,6 +23,7 @@ type WasmDecoderLike = {
     last_rank_up_seq: number;
     progress: number;
     complete: boolean;
+    basis_matrix: Uint8Array;
   };
   recovered_data(): Uint8Array | null | undefined;
   reset(): void;
@@ -283,6 +284,7 @@ export class MistcastBackend {
         lastRankUpSeq: progress.last_rank_up_seq,
         progress: progress.progress,
         complete: progress.complete,
+        basisMatrix: progress.basis_matrix,
         decoderProc: this.decoderProcessorStats,
     };
 

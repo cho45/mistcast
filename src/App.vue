@@ -570,4 +570,29 @@ code {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
+
+.basis-panel {
+  margin-top: 1rem;
+  padding: 0.8rem;
+  background: #f1f5f9;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.basis-title {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #64748b;
+  font-family: var(--mono);
+}
+
+.basis-canvas {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  image-rendering: pixelated;
+  max-width: 100%;
+}
 </style>

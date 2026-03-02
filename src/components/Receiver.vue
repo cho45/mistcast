@@ -30,6 +30,9 @@ const invalidNeighborPackets = ref(0);
 const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
+const basisCanvas = ref<HTMLCanvasElement | null>(null);
+const basisMatrixWidth = ref(120);
+const basisMatrixHeight = ref(120);
 const decoderProcAvgMs = ref(0);
 const decoderProcMaxMs = ref(0);
 const decoderProcLastMs = ref(0);
@@ -251,6 +254,49 @@ function makeOnProgressCallback() {
     lastPacketSeq.value = p.lastPacketSeq ?? -1;
     lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
     progressPercent.value = p.progress;
+
+    if (p.basisMatrix && basisCanvas.value) {
+      const matrix = p.basisMatrix as Uint8Array;
+      const k = Math.sqrt(matrix.length);
+      const canvas = basisCanvas.value;
+      const ctx = canvas.getContext('2d');
+      if (ctx && k > 0) {
+        const dpr = window.devicePixelRatio || 1;
+        const scale = 4; // 1係数あたりの論理ピクセル数
+        const logicalSize = k * scale;
+        basisMatrixWidth.value = logicalSize;
+        basisMatrixHeight.value = logicalSize;
+        const physicalSize = Math.floor(logicalSize * dpr);
+
+        if (canvas.width !== physicalSize || canvas.height !== physicalSize) {
+          canvas.width = physicalSize;
+          canvas.height = physicalSize;
+        }
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, logicalSize, logicalSize);
+
+        // 対角線の左側（下三角）を薄い灰色で塗る
+        ctx.fillStyle = '#f1f5f9';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, logicalSize);
+        ctx.lineTo(logicalSize, logicalSize);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#0f6bd7';
+        for (let row = 0; row < k; row++) {
+          const rowOffset = row * k;
+          for (let col = 0; col < k; col++) {
+            if (matrix[rowOffset + col] !== 0) {
+              ctx.fillRect(col * scale, row * scale, scale, scale);
+            }
+          }
+        }
+      }
+    }
 
     const proc = p.decoderProc;
     if (proc) {
@@ -474,6 +520,10 @@ onBeforeUnmount(() => {
       </div>
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" :style="{ width: `${progressPercent * 100}%` }" />
+      </div>
+      <div class="basis-panel">
+        <p class="basis-title">Basis Matrix (Gaussian Elimination)</p>
+        <canvas ref="basisCanvas" class="basis-canvas" :style="{ width: `${basisMatrixWidth}px`, height: `${basisMatrixHeight}px` }"></canvas>
       </div>
     </div>
 

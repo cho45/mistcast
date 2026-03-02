@@ -259,6 +259,18 @@ impl FountainDecoder {
         self.current_rank
     }
 
+    pub fn get_basis_matrix(&self) -> Vec<u8> {
+        let k = self.params.k;
+        let mut matrix = vec![0u8; k * k];
+        for (row_idx, row_opt) in self.basis.iter().enumerate() {
+            if let Some(row) = row_opt {
+                let start = row_idx * k;
+                matrix[start..start + k].copy_from_slice(&row.coeffs);
+            }
+        }
+        matrix
+    }
+
     pub fn needed_count(&self) -> usize {
         self.params.k
     }
