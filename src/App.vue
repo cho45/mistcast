@@ -40,6 +40,8 @@ async function ensureAudioCore(): Promise<AudioCore> {
 const runtime = createDemoRuntime(ensureAudioCore);
 provideDemoRuntime(runtime);
 
+const activeTab = ref<'sender' | 'receiver'>('receiver');
+
 async function initialize() {
   if (runtime.coreReady.value) return;
   appStatus.value = 'Initializing...';
@@ -83,9 +85,13 @@ onBeforeUnmount(() => {
       </section>
 
       <template v-else>
-        <div class="split-panels">
-          <Sender />
-          <Receiver />
+        <nav class="app-tabs">
+          <button @click="activeTab = 'sender'" class="tab-btn" :class="{ active: activeTab === 'sender' }">Sender</button>
+          <button @click="activeTab = 'receiver'" class="tab-btn" :class="{ active: activeTab === 'receiver' }">Receiver</button>
+        </nav>
+        <div class="panel-container">
+          <Sender class="panel-item" :class="{ 'is-active': activeTab === 'sender' }" />
+          <Receiver class="panel-item" :class="{ 'is-active': activeTab === 'receiver' }" />
         </div>
       </template>
     </main>
@@ -180,11 +186,44 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 
-.split-panels {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: 1fr;
-  min-width: 0;
+.app-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.5rem;
+}
+
+.tab-btn {
+  padding: 0.6rem 1.2rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--muted);
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  background: #f1f5f9;
+}
+
+.tab-btn.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.panel-container {
+  display: block;
+}
+
+.panel-item {
+  display: none;
+}
+
+.panel-item.is-active {
+  display: block;
 }
 
 .panel {
@@ -544,8 +583,19 @@ code {
     padding: 1.6rem;
   }
 
-  .split-panels {
+  .app-tabs {
+    display: none;
+  }
+
+  .panel-container {
+    display: grid;
+    gap: 1rem;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    min-width: 0;
+  }
+
+  .panel-item {
+    display: block !important;
   }
 
   .receiver-header {
