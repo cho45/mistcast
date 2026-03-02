@@ -64,6 +64,11 @@ impl Encoder {
         // インターリーバの全スロットを埋めるようにパディング
         let mut padded = coded;
         padded.resize(self.config.il_rows * self.config.il_cols, 0);
+
+        // ペイロード全体（パディング含む）をスクランブルしてトーンを抑圧
+        let mut scrambler = crate::coding::scrambler::Scrambler::default();
+        scrambler.process_bits(&mut padded);
+
         self.interleaver.interleave(&padded)
     }
 

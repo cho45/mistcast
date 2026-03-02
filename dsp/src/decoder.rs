@@ -672,7 +672,15 @@ impl Decoder {
         let mut crc_errors = 0usize;
         let mut parse_errors = 0usize;
         for packet_llrs in payload_llrs.chunks_exact(fec_bits_len) {
-            let deinterleaved_llr = self.interleaver.deinterleave_f32(packet_llrs);
+            let mut deinterleaved_llr = self.interleaver.deinterleave_f32(packet_llrs);
+
+            let mut scrambler = crate::coding::scrambler::Scrambler::default();
+            for llr in deinterleaved_llr.iter_mut() {
+                if scrambler.next_bit() == 1 {
+                    *llr = -*llr;
+                }
+            }
+
             let decoded_soft = fec::decode_soft(&deinterleaved_llr);
             match parse_packet_from_decoded_bits(&decoded_soft, p_bits_len) {
                 Ok(packet) => decoded_packets.push(packet),
