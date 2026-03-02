@@ -847,15 +847,18 @@ fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
         .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
 }
 
-fn choose_decimation_factor(config: &DspConfig) -> usize {
-    let spc = config.samples_per_chip();
-    if spc >= 6 {
-        3
-    } else if spc >= 4 {
-        2
-    } else {
-        1
+pub fn choose_decimation_factor(config: &DspConfig) -> usize {
+    let fs = config.sample_rate;
+    let rc = config.chip_rate;
+    // チップ境界がサンプル位置と整数倍で一致し、かつ spc が 2 以上になる最大の factor を探す。
+    // spc >= 2 を確保することで、エイリアシングを防ぎ RRC フィルタが機能するようにする。
+    for factor in (1..=8).rev() {
+        let divisor = rc * factor as f32;
+        if (fs / divisor).fract().abs() < 1e-6 && (fs / divisor) >= 2.0 {
+            return factor;
+        }
     }
+    1
 }
 
 fn build_proc_config(config: &DspConfig, decimation_factor: usize) -> DspConfig {

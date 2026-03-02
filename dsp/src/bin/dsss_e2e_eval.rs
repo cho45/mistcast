@@ -96,6 +96,10 @@ struct Cli {
     sweep_ppm: Vec<f32>,
     sweep_loss: Vec<f32>,
     sweep_fading: Vec<f32>,
+    chip_rate: f32,
+    carrier_freq: f32,
+    mseq_order: usize,
+    rrc_alpha: f32,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -386,6 +390,23 @@ fn parse_cli() -> Cli {
     let sweep_loss = parse_list(kv.remove("sweep-loss"), &[0.0, 0.05, 0.1, 0.2, 0.3, 0.4]);
     let sweep_fading = parse_list(kv.remove("sweep-fading"), &[0.0, 0.2, 0.4, 0.6, 0.8]);
 
+    let chip_rate = kv
+        .remove("chip-rate")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(dsp::params::CHIP_RATE);
+    let carrier_freq = kv
+        .remove("carrier-freq")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(dsp::params::CARRIER_FREQ);
+    let mseq_order = kv
+        .remove("mseq-order")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(dsp::params::MSEQ_ORDER);
+    let rrc_alpha = kv
+        .remove("rrc-alpha")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(dsp::params::RRC_ALPHA);
+
     Cli {
         mode,
         trials,
@@ -408,6 +429,10 @@ fn parse_cli() -> Cli {
         sweep_ppm,
         sweep_loss,
         sweep_fading,
+        chip_rate,
+        carrier_freq,
+        mseq_order,
+        rrc_alpha,
     }
 }
 
@@ -536,7 +561,12 @@ fn signal_energy(samples: &[f32]) -> f64 {
 }
 
 fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
-    let tx_cfg = DspConfig::default_48k();
+    let mut tx_cfg = DspConfig::default_48k();
+    tx_cfg.chip_rate = cli.chip_rate;
+    tx_cfg.carrier_freq = cli.carrier_freq;
+    tx_cfg.mseq_order = cli.mseq_order;
+    tx_cfg.rrc_alpha = cli.rrc_alpha;
+
     let mut rx_cfg = tx_cfg.clone();
     rx_cfg.carrier_freq += imp.cfo_hz;
 
