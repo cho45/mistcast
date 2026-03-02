@@ -225,6 +225,14 @@ function drawSenderSpectrumFrame(audioContext: AudioContext) {
     ctx.fillText(label, Math.min(cssW - 22, Math.max(0, x + 2)), cssH - 4);
   }
 
+  // Y軸のdBラベル
+  for (const db of dbTicks) {
+    const y = yFromDb(db);
+    // グラフ領域外に出ないように制限
+    const yPos = Math.max(12, Math.min(cssH - 4, y + 3));
+    ctx.fillText(`${db}`, 2, yPos);
+  }
+
   fftRafId = window.requestAnimationFrame(() => drawSenderSpectrumFrame(audioContext));
 }
 
