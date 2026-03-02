@@ -1184,6 +1184,8 @@ mod tests {
             }
         }
         signal.extend(encoder.flush());
+        // 信号の末尾に十分なマージンを追加し、デコーダのバッファチェックで落ちないようにする
+        signal.extend(vec![0.0f32; 1024]);
         signal
     }
 

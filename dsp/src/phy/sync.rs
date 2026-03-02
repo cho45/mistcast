@@ -76,10 +76,10 @@ pub struct SyncDetector {
 }
 
 impl SyncDetector {
-    /// 粗探索しきい値: ノイズの最大スコア付近に設定し、無用な精密探索を抑制
-    const THRESHOLD_COARSE: f32 = 0.15;
-    /// 精密探索しきい値: 誤検知率を極小化しつつ信号を確実に捕捉
-    const THRESHOLD_FINE: f32 = 0.21;
+    /// 粗探索しきい値: 信号検出率を最大化するため、極限まで引き下げ
+    const THRESHOLD_COARSE: f32 = 0.10;
+    /// 精密探索しきい値: -3dB SNR環境下での 95% 検出を目標とする極限設定
+    const THRESHOLD_FINE: f32 = 0.14;
 
     pub fn new(config: DspConfig) -> Self {
         let mut mseq = MSequence::new(config.mseq_order);
@@ -172,7 +172,9 @@ impl SyncDetector {
                                 // 登り坂: 暫定ベストを更新
                                 provisional_best = Some((
                                     SyncResult {
-                                        peak_sample_idx: fine_best_idx + preamble_len,
+                                        // 内部のサンプリングオフセット (spc/2) を加えて、
+                                        // 物理的なピーク位置（チップ中央）を指すように調整
+                                        peak_sample_idx: fine_best_idx + preamble_len + (spc / 2),
                                         peak_iq: last_sym_iq,
                                         score: fine_best_score,
                                     },
@@ -187,7 +189,7 @@ impl SyncDetector {
                             // 最初の THRESHOLD_FINE 超え
                             provisional_best = Some((
                                 SyncResult {
-                                    peak_sample_idx: fine_best_idx + preamble_len,
+                                    peak_sample_idx: fine_best_idx + preamble_len + (spc / 2),
                                     peak_iq: last_sym_iq,
                                     score: fine_best_score,
                                 },
@@ -340,6 +342,35 @@ mod tests {
         let i_ch: Vec<f32> = i_raw.iter().map(|&s| rrc_i.process(s)).collect();
         let q_ch: Vec<f32> = q_raw.iter().map(|&s| rrc_q.process(s)).collect();
         (i_ch, q_ch)
+    }
+
+    #[test]
+    fn test_sync_absolute_timing_accuracy() {
+        let config = DspConfig::default_48k();
+        let detector = SyncDetector::new(config.clone());
+        let sym_len = config.samples_per_symbol();
+        let preamble_len = config.preamble_repeat * sym_len;
+        let offset = 500;
+
+        // 1. 信号生成 (オフセットを正確に制御)
+        let (i, q) = generate_signal(&config, offset, 1.0);
+        
+        // 期待される SYNC_WORD 開始位置: 
+        // 生成時のオフセット + フィルタ遅延 + プリアンブル長
+        // ※Modulator と Receiver の RRC フィルタによる累積遅延を考慮
+        let total_filter_delay = config.rrc_num_taps() - 1;
+        let expected_idx = offset + total_filter_delay + preamble_len;
+
+        // 2. 同期捕捉実行
+        let (res, _) = detector.detect(&i, &q, 0);
+        let sync = res.expect("Should find sync");
+
+        println!("Detected idx: {}, Expected idx: {}", sync.peak_sample_idx, expected_idx);
+        
+        // 3. 絶対位置の完全一致を検証
+        // 1サンプルの狂いも許さない (±0 精度)
+        assert_eq!(sync.peak_sample_idx, expected_idx, 
+            "SYNC_WORD start position must match the physical signal exactly");
     }
 
     #[test]
