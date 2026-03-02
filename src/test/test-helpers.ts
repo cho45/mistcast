@@ -1,9 +1,9 @@
-import { h } from 'vue';
+import { h, ref } from 'vue';
 import { provideDemoRuntime } from '../demo-runtime';
 
 export function createMockRuntime() {
   return {
-    coreReady: { value: false },
+    coreReady: ref(false),
     ensureAudioCore: async () => ({
       audioContext: {
         sampleRate: 48000,

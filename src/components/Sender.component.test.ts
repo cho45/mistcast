@@ -70,7 +70,7 @@ describe('Sender.vue', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
 
       // Verify that the file input was reset (value is empty)
-      expect(fileInput.element.value).toBe('');
+      expect((fileInput.element as HTMLInputElement).value).toBe('');
 
       consoleWarnSpy.mockRestore();
     });
@@ -184,7 +184,7 @@ describe('Sender.vue', () => {
       vi.advanceTimersByTime(5100);
 
       // Verify that the file input was reset
-      expect(fileInput.element.value).toBe('');
+      expect((fileInput.element as HTMLInputElement).value).toBe('');
 
       vi.useRealTimers();
       consoleWarnSpy.mockRestore();

@@ -82,7 +82,7 @@ let decoderStreamSink: MediaStreamAudioDestinationNode | null = null;
 let rxInputGain: GainNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 let micStream: MediaStream | null = null;
-let demoAirGapNodeRef: AudioWorkletNode | null = null;
+let demoAirGapNodeRef: GainNode | null = null;
 
 let opQueue: Promise<void> = Promise.resolve();
 
@@ -124,7 +124,7 @@ function safeDisconnect<T extends AudioNode>(node: T | null, destination?: Audio
 
 function downloadBinary() {
   if (!outputBinaryData.value) return;
-  const blob = new Blob([outputBinaryData.value], { type: 'application/octet-stream' });
+  const blob = new Blob([outputBinaryData.value as BlobPart], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -143,7 +143,7 @@ function setDecodedOutput(recovered: Uint8Array) {
   if (image) {
     outputImageMime.value = image.mime;
     outputImageUrl.value = URL.createObjectURL(
-      new Blob([image.bytes], { type: image.mime })
+      new Blob([image.bytes as BlobPart], { type: image.mime })
     );
     return;
   }
