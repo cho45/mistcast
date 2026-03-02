@@ -9,7 +9,7 @@ use crate::{
     common::nco::Nco,
     common::rrc_filter::DecimatingRrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
-    params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD, SYNC_WORD_BITS},
+    params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD_BITS},
     phy::sync::{SyncDetector, SyncResult},
     DifferentialModulation, DspConfig,
 };
@@ -29,8 +29,6 @@ const TRACKING_TIMING_RATE_LIMIT_CHIP: f32 = 0.25;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const TRACKING_PHASE_RATE_LIMIT_RAD: f32 = 2.6;
 const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
-const HEADER_PROBE_SYMBOL_SPAN: i32 = 3;
-const HEADER_PROBE_CHIP_SPAN: i32 = 6;
 const ITERATION_BUDGET_MIN: usize = 2;
 const ITERATION_BUDGET_MAX: usize = 8;
 const ITERATION_BUDGET_HEADROOM: usize = 1;
@@ -237,8 +235,8 @@ impl Decoder {
             let start = sync.peak_sample_idx;
             let data_end_sample = start + total_symbols * sf * spc;
 
-            // データが溜まるのを待つ
-            if self.sample_buffer_i.len() < data_end_sample + spc {
+            // データが溜まるのを待つ (start は既に SYNC_WORD の開始点付近)
+            if self.sample_buffer_i.len() < data_end_sample {
                 // タイムアウト監視
                 if start + symbol_len < self.sample_buffer_i.len().saturating_sub(max_buffer_len) {
                     self.current_sync = None;
@@ -248,168 +246,103 @@ impl Decoder {
                 break;
             }
 
-            // --- Robust Header Search (Probing) ---
-            let mut found_header = false;
-            let mut best_sym_shift = 0;
-            let mut best_t_shift = 0;
-            let mut best_tracking_after_sync = TrackingState {
-                phase_ref: Complex32::new(1.0, 0.0),
-                prev_symbol: Complex32::new(1.0, 0.0),
+            // --- Unified Sync Trust Integration ---
+            // SyncDetector が既に 36シンボルで SYNC_WORD を検証済みのため、
+            // 改めて Probing する必要はない。
+
+            // start は SYNC_WORD 第1シンボルの中心を指している。
+            // ペイロードの開始位置はそこから 32シンボル先。
+            let payload_start = start + sync_symbol_len * sf * spc;
+
+            // SyncDetector が提供した IQ値を基準位相として使用する。
+            // これにより位相反転の曖昧さが完全に解消される。
+            let initial_ref = Complex32::new(sync.peak_iq.0, sync.peak_iq.1);
+            let initial_ref_norm = initial_ref.norm().max(1e-6);
+
+            let best_tracking_after_sync = TrackingState {
+                phase_ref: initial_ref / initial_ref_norm,
+                prev_symbol: initial_ref / initial_ref_norm,
                 phase_rate: 0.0,
                 timing_offset: 0.0,
                 timing_rate: 0.0,
                 noise_var: 0.2,
             };
+
             let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
             let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
-            'probe: for sym_shift in -HEADER_PROBE_SYMBOL_SPAN..=HEADER_PROBE_SYMBOL_SPAN {
-                let base_start = start as i32 + sym_shift * symbol_len as i32;
-                for t_shift in -((spc as i32) * HEADER_PROBE_CHIP_SPAN)
-                    ..=((spc as i32) * HEADER_PROBE_CHIP_SPAN)
-                {
-                    let p_start_i32 = base_start + t_shift;
-                    if p_start_i32 < 0 {
-                        continue;
-                    }
-                    let p_start = p_start_i32 as usize;
-                    let ref_sym_start = p_start.saturating_sub(sf * spc);
-                    let (ref_i, ref_q) = self.despread_at(ref_sym_start);
+            let p_bits_len = PACKET_BYTES * 8;
+            let Some((decoded_packets, crc_errors, parse_errors)) = self
+                .decode_payload_with_timing_retries(
+                    payload_start,
+                    burst_data_bits_len,
+                    best_tracking_after_sync,
+                    &pn,
+                    fec_bits_len,
+                    p_bits_len,
+                )
+            else {
+                // デコードに失敗した場合も、同じ場所を繰り返さないよう進める。
+                self.last_search_idx = (start + symbol_len).min(self.sample_buffer_i.len());
+                self.current_sync = None;
+                continue;
+            };
+            self.crc_error_packets += crc_errors;
+            self.parse_error_packets += parse_errors;
 
-                    for invert in [false, true] {
-                        let initial_ref = if invert {
-                            Complex32::new(-ref_i, -ref_q)
-                        } else {
-                            Complex32::new(ref_i, ref_q)
-                        };
-                        let Some((val, tracking_after_sync)) = self.decode_sync_word_with_tracking(
-                            p_start,
-                            sync_bits_len,
-                            initial_ref,
-                            &pn,
-                        ) else {
-                            continue;
-                        };
-
-                        if val == SYNC_WORD {
-                            found_header = true;
-                            best_sym_shift = sym_shift;
-                            best_t_shift = t_shift;
-                            best_tracking_after_sync = tracking_after_sync;
-                            break 'probe;
-                        }
-                    }
-                }
-            }
-
-            if found_header {
-                let p_start =
-                    (start as i32 + best_sym_shift * symbol_len as i32 + best_t_shift) as usize;
-                let payload_start = p_start + sync_symbol_len * symbol_len;
-                let p_bits_len = PACKET_BYTES * 8;
-                let Some((decoded_packets, crc_errors, parse_errors)) = self
-                    .decode_payload_with_timing_retries(
-                        payload_start,
-                        burst_data_bits_len,
-                        best_tracking_after_sync,
-                        &pn,
-                        fec_bits_len,
-                        p_bits_len,
-                    )
-                else {
-                    // デコードに失敗した場合も、同じ場所を繰り返さないよう進める。
-                    self.last_search_idx = (start + symbol_len).min(self.sample_buffer_i.len());
-
-                    self.current_sync = None;
-                    continue;
-                };
-                self.crc_error_packets += crc_errors;
-                self.parse_error_packets += parse_errors;
-
-                if decoded_packets.is_empty() {
-                    // 同期語一致後に payload が全滅したら偽ロック/境界ずれを疑い、
-                    // 次回探索のためにインデックスを少し進める。
-                    self.last_search_idx =
-                        (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
-                    self.current_sync = None;
-                    continue;
-                }
-
-                for packet in decoded_packets {
-                    let pkt_k = packet.lt_k as usize;
-                    if pkt_k != self.fountain_decoder.params().k {
-                        self.rebuild_fountain_decoder(pkt_k);
-                    }
-                    let seq = packet.lt_seq as u32;
-                    let coefficients = crate::coding::fountain::reconstruct_packet_coefficients(
-                        seq,
-                        self.fountain_decoder.params().k,
-                    );
-                    let outcome = self.fountain_decoder.receive_with_outcome(FountainPacket {
-                        seq,
-                        coefficients,
-                        data: packet.payload.to_vec(),
-                    });
-                    match outcome {
-                        ReceiveOutcome::AcceptedRankUp => {
-                            self.last_packet_seq = Some(seq);
-                            self.last_rank_up_seq = Some(seq);
-                        }
-                        ReceiveOutcome::AcceptedNoRankUp => {
-                            self.last_packet_seq = Some(seq);
-                            self.dependent_packets += 1;
-                        }
-                        ReceiveOutcome::DuplicateSeq => {
-                            self.duplicate_packets += 1;
-                        }
-                        ReceiveOutcome::InvalidPacket => {
-                            self.invalid_neighbor_packets += 1;
-                        }
-                    }
-                    if let Some(data) = self.fountain_decoder.decode() {
-                        self.recovered_data = Some(data);
-                        break;
-                    }
-                }
-                // lock判定は preamble+sync のみで行う。
-                // CRC失敗パケットは捨てるだけにして、受信窓は常にバースト分前進させる。
-                let actual_end =
-                    (p_start + total_symbols * sf * spc).min(self.sample_buffer_i.len());
-                self.sample_buffer_i.drain(0..actual_end);
-                self.sample_buffer_q.drain(0..actual_end);
-                self.last_search_idx = 0;
+            if decoded_packets.is_empty() {
+                // 同期語一致後に payload が全滅したら境界ずれを疑う
+                self.last_search_idx = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
                 self.current_sync = None;
                 continue;
             }
 
-            // ヘッダ未検出: 偽同期として、インデックスを進めて次を探す
-            self.last_search_idx =
-                (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
+            for packet in decoded_packets {
+                // ... (FountainDecoder への供給ロジック) ...
+                let pkt_k = packet.lt_k as usize;
+                if pkt_k != self.fountain_decoder.params().k {
+                    self.rebuild_fountain_decoder(pkt_k);
+                }
+                let seq = packet.lt_seq as u32;
+                let coefficients = crate::coding::fountain::reconstruct_packet_coefficients(
+                    seq,
+                    self.fountain_decoder.params().k,
+                );
+                let outcome = self.fountain_decoder.receive_with_outcome(FountainPacket {
+                    seq,
+                    coefficients,
+                    data: packet.payload.to_vec(),
+                });
+                match outcome {
+                    ReceiveOutcome::AcceptedRankUp => {
+                        self.last_packet_seq = Some(seq);
+                        self.last_rank_up_seq = Some(seq);
+                    }
+                    ReceiveOutcome::AcceptedNoRankUp => {
+                        self.last_packet_seq = Some(seq);
+                        self.dependent_packets += 1;
+                    }
+                    ReceiveOutcome::DuplicateSeq => {
+                        self.duplicate_packets += 1;
+                    }
+                    ReceiveOutcome::InvalidPacket => {
+                        self.invalid_neighbor_packets += 1;
+                    }
+                }
+                if let Some(data) = self.fountain_decoder.decode() {
+                    self.recovered_data = Some(data);
+                    break;
+                }
+            }
+            // 受信窓をバースト分前進させる
+            let actual_end = (payload_start + burst_data_bits_len / bits_per_symbol_payload * sf * spc).min(self.sample_buffer_i.len());
+            self.sample_buffer_i.drain(0..actual_end);
+            self.sample_buffer_q.drain(0..actual_end);
+            self.last_search_idx = 0;
             self.current_sync = None;
-            continue;
         }
 
         self.progress()
-    }
-
-    fn despread_at(&self, start_sample: usize) -> (f32, f32) {
-        let sf = self.config.spread_factor();
-        let spc = self.proc_config.samples_per_chip();
-        let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
-        let pn = mseq.generate(sf);
-
-        let mut sum_i = 0.0;
-        let mut sum_q = 0.0;
-        for (j, &chip) in pn.iter().enumerate() {
-            let p = start_sample + j * spc + (spc / 2);
-            if let (Some(&si), Some(&sq)) =
-                (self.sample_buffer_i.get(p), self.sample_buffer_q.get(p))
-            {
-                sum_i += si * chip as f32;
-                sum_q += sq * chip as f32;
-            }
-        }
-        (sum_i / sf as f32, sum_q / sf as f32)
     }
 
     fn despread_symbol_with_timing(
@@ -522,94 +455,6 @@ impl Decoder {
 
         llrs.truncate(num_bits);
         Some(DecodedSoftBits { llrs })
-    }
-
-    fn decode_sync_word_with_tracking(
-        &self,
-        start_sample: usize,
-        num_bits: usize,
-        initial_phase_ref: Complex32,
-        pn: &[f32],
-    ) -> Option<(u32, TrackingState)> {
-        let spc = self.proc_config.samples_per_chip().max(1);
-        let symbol_len = self.config.spread_factor() * spc;
-
-        let mut phase_ref = if initial_phase_ref.norm_sqr() > 1e-8 {
-            initial_phase_ref / initial_phase_ref.norm()
-        } else {
-            Complex32::new(1.0, 0.0)
-        };
-        let mut prev_symbol = phase_ref;
-        let mut phase_rate = 0.0f32;
-        let mut timing_offset = 0.0f32;
-        let mut timing_rate = 0.0f32;
-        let mut noise_var = 0.2f32;
-        let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
-        let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
-        let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-        let mut word = 0u32;
-
-        for s_idx in 0..num_bits {
-            let symbol_start = start_sample + s_idx * symbol_len;
-            let on = self.despread_symbol_with_timing(symbol_start, pn, timing_offset, 0.0)?;
-            let early = self.despread_symbol_with_timing(
-                symbol_start,
-                pn,
-                timing_offset,
-                -early_late_delta,
-            )?;
-            let late = self.despread_symbol_with_timing(
-                symbol_start,
-                pn,
-                timing_offset,
-                early_late_delta,
-            )?;
-
-            let on_rot = on * phase_ref.conj();
-            let diff = on_rot * prev_symbol.conj();
-            let bit = if diff.re >= 0.0 { 0 } else { 1 };
-            word = (word << 1) | bit;
-            let decided = if bit == 0 {
-                Complex32::new(1.0, 0.0)
-            } else {
-                Complex32::new(-1.0, 0.0)
-            };
-            noise_var = update_noise_var_ema(noise_var, diff, decided);
-
-            let phase_err = phase_error_from_diff(diff, decided);
-            phase_rate = update_phase_rate(phase_rate, phase_err);
-            let dphi = phase_step_from_phase_error(phase_err, phase_rate);
-            let (sin_dphi, cos_dphi) = dphi.sin_cos();
-            phase_ref *= Complex32::new(cos_dphi, sin_dphi);
-            let phase_norm = phase_ref.norm().max(1e-6);
-            phase_ref /= phase_norm;
-
-            let early_mag = early.norm();
-            let late_mag = late.norm();
-            let timing_err = timing_error_from_early_late(early_mag, late_mag);
-            timing_rate = update_timing_rate(timing_rate, timing_err, timing_rate_limit);
-            timing_offset =
-                update_timing_offset(timing_offset, timing_rate, timing_err, timing_limit);
-
-            let on_norm = on_rot.norm();
-            if on_norm > 1e-4 {
-                prev_symbol = on_rot / on_norm;
-            } else {
-                prev_symbol = decided;
-            }
-        }
-
-        Some((
-            word,
-            TrackingState {
-                phase_ref,
-                prev_symbol,
-                phase_rate,
-                timing_offset,
-                timing_rate,
-                noise_var,
-            },
-        ))
     }
 
     fn decode_payload_with_timing_retries(
