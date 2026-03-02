@@ -2,7 +2,8 @@
 import { onBeforeUnmount, ref } from 'vue';
 import Sender from './components/Sender.vue';
 import Receiver from './components/Receiver.vue';
-import processorsUrl from './audio-processors?url';
+// @ts-ignore
+import processorsUrl from './audio-processors?worker&url';
 import { createDemoRuntime, provideDemoRuntime, type AudioCore } from './demo-runtime';
 
 let audioContext: AudioContext | null = null;
