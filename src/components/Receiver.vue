@@ -31,6 +31,7 @@ const progressPercent = ref(0);
 
 const basisMatrixWidth = ref(0);
 const basisMatrixHeight = ref(0);
+const basisMatrixK = ref(0);
 
 const decoderProcAvgMs = ref(0);
 const decoderProcMaxMs = ref(0);
@@ -234,6 +235,7 @@ function makeOnProgressCallback() {
     if (p.basisMatrix && basisCanvas.value) {
       const matrix = p.basisMatrix as Uint8Array;
       const k = Math.sqrt(matrix.length);
+      basisMatrixK.value = Math.floor(k);
       const canvas = basisCanvas.value;
       const ctx = canvas.getContext('2d');
       if (ctx && k > 0) {
@@ -502,34 +504,34 @@ onBeforeUnmount(() => {
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" :style="{ width: `${progressPercent * 100}%` }" />
       </div>
-      <div class="basis-panel">
-        <p class="basis-title">Basis Matrix (Gaussian Elimination)</p>
+      <div class="basis-panel" data-tooltip="ガウスの消去法によるランク更新の可視化。各パケットは行ベクトルとして表現され、青いセルは非ゼロ要素を表します。左下三角領域（灰色）は、前進消去によって常にゼロに保たれる領域です。白色のセルはまだ処理されていない上三角部分のゼロ要素です。">
+        <p class="basis-title">Basis Matrix (Gaussian Elimination) ({{ basisMatrixK }}x{{ basisMatrixK }}, {{ basisMatrixK * 16 * 8 }}bits)</p>
         <canvas ref="basisCanvas" class="basis-canvas" :style="{ width: `${basisMatrixWidth}px`, height: `${basisMatrixHeight}px` }"></canvas>
       </div>
     </div>
 
     <div class="metric-grid">
-      <div class="metric"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
-      <div class="metric"><span>Stall</span><strong>{{ stalledPackets }}</strong></div>
-      <div class="metric"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
-      <div class="metric"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
-      <div class="metric"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
-      <div class="metric"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
-      <div class="metric"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
-      <div class="metric"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
-      <div class="metric"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
+      <div class="metric" data-tooltip="正常に受信してシステムに受け入れられたパケットの総数"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
+      <div class="metric" data-tooltip="受信したが、既存のパケットと線形従属の関係にあるため行列のランク上昇に寄与していないパケット数"><span>Stall</span><strong>{{ stalledPackets }}</strong></div>
+      <div class="metric" data-tooltip="他のパケットと線形従属の関係にあり、行列のランクを上げるためにまだ他のパケットの受信を待っているパケット数"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
+      <div class="metric" data-tooltip="以前に受信したパケットと同じシーケンス番号を持つ重複パケット数"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
+      <div class="metric" data-tooltip="CRCチェックに失敗したパケット数（ノイズや伝送エラーでデータが破損）"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
+      <div class="metric" data-tooltip="パケットの解析に失敗したパケット数（フォーマット不正や構造エラー）"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
+      <div class="metric" data-tooltip="近隣パケット間の整合性チェックに失敗したパケット数"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
+      <div class="metric" data-tooltip="最後に受信したパケットのシーケンス番号（-1は未受信）"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
+      <div class="metric" data-tooltip="最後に行列のランクが上昇した際のパケットシーケンス番号（復号の進捗指標）"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
     </div>
 
     <div class="proc-stats">
       <p class="proc-title">DecoderProcessor Timing</p>
       <div class="proc-grid">
-        <div><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
-        <div><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
-        <div><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
-        <div><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
-        <div><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
-        <div><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
-        <div><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
+        <div data-tooltip="1ブロックあたりの平均処理時間（全ブロックの平均値）"><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
+        <div data-tooltip="1ブロックの処理時間の最大値（ピーク負荷時のパフォーマンス指標）"><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
+        <div data-tooltip="直近のブロック処理時間（最新の処理パフォーマンス）"><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
+        <div data-tooltip="1ブロックの処理に割り当てられた時間バジェット（サンプリングレートとバッファサイズから算出）"><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
+        <div data-tooltip="処理時間がバジェットを超過した回数（リアルタイム処理失敗の指標、超過するとパケット損失の原因）"><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
+        <div data-tooltip="入力信号の実効値（0に近いほど静寂、大きいほど信号あり）"><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
+        <div data-tooltip="処理したオーディオブロックの総数"><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
       </div>
     </div>
 

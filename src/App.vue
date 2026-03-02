@@ -646,4 +646,63 @@ code {
   image-rendering: pixelated;
   max-width: 100%;
 }
+
+/* Tooltip styles */
+.metric[data-tooltip],
+.proc-grid div[data-tooltip],
+.basis-panel[data-tooltip] {
+  position: relative;
+  cursor: help;
+}
+
+.metric[data-tooltip]::before,
+.metric[data-tooltip]::after,
+.proc-grid div[data-tooltip]::before,
+.proc-grid div[data-tooltip]::after,
+.basis-panel[data-tooltip]::before,
+.basis-panel[data-tooltip]::after {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+  z-index: 100;
+}
+
+.metric[data-tooltip]::before,
+.proc-grid div[data-tooltip]::before,
+.basis-panel[data-tooltip]::before {
+  content: attr(data-tooltip);
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  background: #1b2229;
+  color: #fff;
+  padding: 0.5em 0.8em;
+  border-radius: 6px;
+  font-size: 0.85em;
+  font-weight: 400;
+  width: 16em;
+  text-align: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.metric[data-tooltip]::after,
+.proc-grid div[data-tooltip]::after,
+.basis-panel[data-tooltip]::after {
+  content: '';
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  border: 5px solid transparent;
+  border-top-color: #1b2229;
+}
+
+.metric[data-tooltip]:hover::before,
+.metric[data-tooltip]:hover::after,
+.proc-grid div[data-tooltip]:hover::before,
+.proc-grid div[data-tooltip]:hover::after,
+.basis-panel[data-tooltip]:hover::before,
+.basis-panel[data-tooltip]:hover::after {
+  opacity: 1;
+}
 </style>
