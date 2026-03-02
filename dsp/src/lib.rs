@@ -72,19 +72,25 @@ impl DspConfig {
         }
     }
 
-    /// 内部処理用の設定を生成する。
+    /// 指定された設定を基に、内部処理用の設定を生成する。
     /// サンプルレートは chip_rate * INTERNAL_SPC に固定され、
     /// ベースバンド処理を前提とするため carrier_freq は 0 となる。
     pub fn new_for_processing(chip_rate: f32) -> Self {
-        let sample_rate = chip_rate * (params::INTERNAL_SPC as f32);
+        let mut config = DspConfig::new(params::DEFAULT_SAMPLE_RATE);
+        config.chip_rate = chip_rate;
+        Self::new_for_processing_from(&config)
+    }
+
+    pub fn new_for_processing_from(base: &DspConfig) -> Self {
+        let sample_rate = base.chip_rate * (params::INTERNAL_SPC as f32);
         DspConfig {
             sample_rate,
             carrier_freq: 0.0, // ベースバンド
-            mseq_order: params::MSEQ_ORDER,
-            chip_rate,
-            rrc_alpha: params::RRC_ALPHA,
-            rrc_taps_per_symbol: 16,
-            preamble_repeat: params::PREAMBLE_REPEAT,
+            mseq_order: base.mseq_order,
+            chip_rate: base.chip_rate,
+            rrc_alpha: base.rrc_alpha,
+            rrc_taps_per_symbol: base.rrc_taps_per_symbol,
+            preamble_repeat: base.preamble_repeat,
         }
     }
     pub fn default_48k() -> Self {

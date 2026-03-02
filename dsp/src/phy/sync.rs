@@ -5,8 +5,6 @@
 //!
 //! # 統計的性質としきい値の導出
 //!
-//! ## 電力相似度 rho_p の分布
-//!
 /// 各シンボルの相関出力: mag2 = |C|^2
 /// 信号あり: E[mag2] = A^2 * sf^2 + σ^2 * sf
 /// 信号ありの入力エネルギー: E[en] = A^2 * sf + σ^2 * sf
@@ -73,15 +71,16 @@ pub struct SyncDetector {
     sf: usize,
     spc: usize,
     sym_len: usize,
+    pub threshold_coarse: f32,
+    pub threshold_fine: f32,
 }
 
 impl SyncDetector {
-    /// 粗探索しきい値: 信号検出率を最大化するため、極限まで引き下げ
-    const THRESHOLD_COARSE: f32 = 0.10;
-    /// 精密探索しきい値: -3dB SNR環境下での 95% 検出を目標とする極限設定
-    const THRESHOLD_FINE: f32 = 0.14;
+    /// 基準となるデフォルトのしきい値 (SF=15 用に最適化)
+    pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.10;
+    pub const THRESHOLD_FINE_DEFAULT: f32 = 0.14;
 
-    pub fn new(config: DspConfig) -> Self {
+    pub fn new(config: DspConfig, threshold_coarse: f32, threshold_fine: f32) -> Self {
         let mut mseq = MSequence::new(config.mseq_order);
         let sf = config.spread_factor();
         let spc = config.samples_per_chip().max(1);
@@ -114,6 +113,8 @@ impl SyncDetector {
             sf,
             spc,
             sym_len,
+            threshold_coarse,
+            threshold_fine,
         }
     }
 
@@ -146,7 +147,7 @@ impl SyncDetector {
             for n in (start_offset..=search_range_end).step_by(coarse_step) {
                 let (score, _) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
 
-                if score > Self::THRESHOLD_COARSE || provisional_best.is_some() {
+                if score > self.threshold_coarse || provisional_best.is_some() {
                     // --- 2. 精密同期 (ピーク周辺を1サンプル刻みで) ---
                     // 精密同期では、プリアンブル + SYNC_WORD の全36シンボルでロックを確認する
                     let f_start = n.saturating_sub(coarse_step);
@@ -165,8 +166,8 @@ impl SyncDetector {
                         }
                     }
 
-                    // 信頼しきい値 (THRESHOLD_FINE) を超えた場合に追従を開始
-                    if fine_best_score > Self::THRESHOLD_FINE {
+                    // 信頼しきい値 (threshold_fine) を超えた場合に追従を開始
+                    if fine_best_score > self.threshold_fine {
                         if let Some((ref best, _)) = provisional_best {
                             if fine_best_score >= best.score {
                                 // 登り坂: 暫定ベストを更新
@@ -185,7 +186,7 @@ impl SyncDetector {
                                 return (Some(res), idx);
                             }
                         } else {
-                            // 最初の THRESHOLD_FINE 超え
+                            // 最初の threshold_fine 超え
                         provisional_best = Some((
                                         SyncResult {
                                     peak_sample_idx: fine_best_idx + preamble_len + (spc / 2),
@@ -343,10 +344,41 @@ mod tests {
         (i_ch, q_ch)
     }
 
+    fn new_detector_default(config: DspConfig) -> SyncDetector {
+        SyncDetector::new(
+            config,
+            SyncDetector::THRESHOLD_COARSE_DEFAULT,
+            SyncDetector::THRESHOLD_FINE_DEFAULT,
+        )
+    }
+
+    #[test]
+    fn test_sync_with_different_spread_factors() {
+        for &m in &[4, 5, 6] {
+            let mut config = DspConfig::default_48k();
+            config.mseq_order = m;
+            let sf = config.spread_factor();
+            println!("Testing m={}, SF={}", m, sf);
+
+            // SF=15 を基準としたスケーリングをしきい値に適用
+            let scale = 15.0 / sf as f32;
+            let tc = SyncDetector::THRESHOLD_COARSE_DEFAULT * scale;
+            let tf = SyncDetector::THRESHOLD_FINE_DEFAULT * scale;
+
+            let detector = SyncDetector::new(config.clone(), tc, tf);
+            let (i, q) = generate_signal(&config, 500, 1.0);
+            
+            let (res, _) = detector.detect(&i, &q, 0);
+            let sync = res.expect(&format!("Should find sync for SF={}", sf));
+            println!("  SF={} Score: {:.4} (Threshold: {:.4})", sf, sync.score, detector.threshold_fine);
+            assert!(sync.score > detector.threshold_fine);
+        }
+    }
+
     #[test]
     fn test_sync_absolute_timing_accuracy() {
         let config = DspConfig::default_48k();
-        let detector = SyncDetector::new(config.clone());
+        let detector = new_detector_default(config.clone());
         let sym_len = config.samples_per_symbol();
         let preamble_len = config.preamble_repeat * sym_len;
         let offset = 500;
@@ -375,7 +407,7 @@ mod tests {
     #[test]
     fn test_sync_first_match_scenarios() {
         let config = DspConfig::default_48k();
-        let detector = SyncDetector::new(config.clone());
+        let detector = new_detector_default(config.clone());
         let sym_len = config.samples_per_symbol();
         let repeat = config.preamble_repeat;
 
@@ -401,10 +433,11 @@ mod tests {
         {
             let (i, q) = generate_signal(&config, 1000, 1.0);
             let (gt_score, gt_idx) = find_ground_truth(&i, &q);
-            assert!(gt_score > SyncDetector::THRESHOLD_FINE);
+            assert!(gt_score > detector.threshold_fine);
 
             let (res, _) = detector.detect(&i, &q, 0);
             let sync = res.expect("Should find strong peak");
+            assert!(sync.score > detector.threshold_fine);
             let detected_idx = sync.peak_sample_idx - (sym_len * repeat);
             assert!((detected_idx as i32 - gt_idx as i32).abs() <= 2);
         }
@@ -458,7 +491,7 @@ mod tests {
     #[test]
     fn test_sync_boundary_conditions() {
         let config = DspConfig::default_48k();
-        let detector = SyncDetector::new(config.clone());
+        let detector = new_detector_default(config.clone());
         let sym_len = config.samples_per_symbol();
         let preamble_len = sym_len * config.preamble_repeat;
 
@@ -492,7 +525,7 @@ mod tests {
     #[test]
     fn test_sync_low_snr_sensitivity() {
         let config = DspConfig::default_48k();
-        let detector = SyncDetector::new(config.clone());
+        let detector = new_detector_default(config.clone());
         const NUM_TRIALS: usize = 100;
         const REQUIRED_DETECTION_RATE: f64 = 0.95;
 
@@ -523,7 +556,7 @@ mod tests {
     #[test]
     fn test_roc_curve_analysis() {
         let config = DspConfig::default_48k();
-        let detector = SyncDetector::new(config.clone());
+        let detector = new_detector_default(config.clone());
         let snr_db_list = [-10.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0];
         const NUM_TRIALS: usize = 50;
 
@@ -572,11 +605,11 @@ mod tests {
         println!("  Max Noise Score Observed: {:.4}", noise_scores.last().unwrap());
         println!();
 
-        // 現在のしきい値 (THRESHOLD_FINE) での性能評価
+        // 現在のしきい値 (threshold_fine) での性能評価
 
         println!(
             "=== ROC Curve Analysis (Threshold = {:.4}) ===",
-            SyncDetector::THRESHOLD_FINE
+            detector.threshold_fine
         );
         println!(
             "{:>8} | {:>13} | {:>13}",
@@ -669,7 +702,7 @@ mod tests {
     #[test]
     fn test_score_candidate_mathematical_verification() {
         let config = DspConfig::default_48k();
-        let detector = SyncDetector::new(config.clone());
+        let detector = new_detector_default(config.clone());
         let sym_len = config.samples_per_symbol();
         let repeat = config.preamble_repeat;
         let spc = config.samples_per_chip();

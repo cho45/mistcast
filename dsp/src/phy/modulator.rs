@@ -61,7 +61,7 @@ pub struct Modulator {
 impl Modulator {
     /// `DspConfig` を指定して変調器を作成する
     pub fn new(config: DspConfig) -> Self {
-        let proc_config = DspConfig::new_for_processing(config.chip_rate);
+        let proc_config = DspConfig::new_for_processing_from(&config);
         let rrc_i = RrcFilter::from_config(&proc_config);
         let rrc_q = RrcFilter::from_config(&proc_config);
         let nco = Nco::new(config.carrier_freq, config.sample_rate);

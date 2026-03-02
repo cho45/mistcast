@@ -117,7 +117,7 @@ struct SymbolSoftDecision {
 
 impl Decoder {
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
-        let proc_config = DspConfig::new_for_processing(dsp_config.chip_rate);
+        let proc_config = DspConfig::new_for_processing_from(&dsp_config);
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         let raw_bits = PACKET_BYTES * 8 + 6;
         let fec_bits = raw_bits * 2;
@@ -130,6 +130,14 @@ impl Decoder {
         // エイリアシングを防ぐために proc_config.sample_rate / 2 以下に設定する。
         let rrc_bw = dsp_config.chip_rate * (1.0 + dsp_config.rrc_alpha) * 0.5;
         let cutoff = Some(rrc_bw);
+
+        // 拡散率に応じて同期しきい値をスケールさせる。
+        // 処理利得 (Processing Gain) によりノイズフロアが 1/sf に比例して下がるため、
+        // しきい値もそれに合わせて引き下げることで感度を維持する。
+        let sf = proc_config.spread_factor();
+        let scale = 15.0 / sf as f32;
+        let tc = SyncDetector::THRESHOLD_COARSE_DEFAULT * scale;
+        let tf = SyncDetector::THRESHOLD_FINE_DEFAULT * scale;
 
         Decoder {
             resampler_i: Resampler::new_with_cutoff(
@@ -146,7 +154,7 @@ impl Decoder {
             rrc_filter_q: RrcFilter::from_config(&proc_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
-            sync_detector: SyncDetector::new(proc_config.clone()),
+            sync_detector: SyncDetector::new(proc_config.clone(), tc, tf),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
