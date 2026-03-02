@@ -17,6 +17,8 @@ type ImagePayload = {
 const outputText = ref('');
 const outputImageUrl = ref('');
 const outputImageMime = ref('');
+const outputBinaryData = ref<Uint8Array | null>(null);
+const outputBinarySize = ref(0);
 
 const receivedPackets = ref(0);
 const totalNeededPackets = ref(0);
@@ -30,9 +32,10 @@ const invalidNeighborPackets = ref(0);
 const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
-const basisCanvas = ref<HTMLCanvasElement | null>(null);
-const basisMatrixWidth = ref(120);
-const basisMatrixHeight = ref(120);
+
+const basisMatrixWidth = ref(0);
+const basisMatrixHeight = ref(0);
+
 const decoderProcAvgMs = ref(0);
 const decoderProcMaxMs = ref(0);
 const decoderProcLastMs = ref(0);
@@ -40,26 +43,47 @@ const decoderProcBlockMs = ref(0);
 const decoderProcOverruns = ref(0);
 const decoderProcInputRms = ref(0);
 const decoderProcBlocks = ref(0);
+
 const rxLogs = ref<string[]>([]);
 const rxTick = ref(0);
 const rxNoChangeTicks = ref(0);
 const rxLogCopied = ref(false);
+let rxLogCopiedTimer: number | null = null;
+
 const receiverStatus = ref('Idle');
 
 const inputMode = ref<InputMode>('loopback');
 const isMicActive = computed(() => inputMode.value === 'mic');
 
-let rxLogCopiedTimer: number | null = null;
+const basisCanvas = ref<HTMLCanvasElement | null>(null);
+
 let receiverWorker: Worker | null = null;
 let receiverBackend: Comlink.Remote<MistcastBackend> | null = null;
 let decoderNode: AudioWorkletNode | null = null;
-let rxInputGain: GainNode | null = null;
 let decoderStreamSink: MediaStreamAudioDestinationNode | null = null;
-let demoAirGapNodeRef: GainNode | null = null;
+let rxInputGain: GainNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 let micStream: MediaStream | null = null;
+let demoAirGapNodeRef: AudioWorkletNode | null = null;
 
 let opQueue: Promise<void> = Promise.resolve();
+
+function clearOutput() {
+  outputText.value = '';
+  outputImageMime.value = '';
+  outputBinaryData.value = null;
+  outputBinarySize.value = 0;
+  if (outputImageUrl.value) {
+    URL.revokeObjectURL(outputImageUrl.value);
+    outputImageUrl.value = '';
+  }
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} kB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
   const next = opQueue.then(() => fn(), () => fn());
@@ -80,91 +104,95 @@ function safeDisconnect<T extends AudioNode>(node: T | null, destination?: Audio
   }
 }
 
-function clearOutput() {
-  outputText.value = '';
-  outputImageMime.value = '';
-  if (outputImageUrl.value) {
-    URL.revokeObjectURL(outputImageUrl.value);
-    outputImageUrl.value = '';
-  }
-}
-
 function trimTrailingZeros(data: Uint8Array): Uint8Array {
-  let last = data.length;
-  while (last > 0 && data[last - 1] === 0) last--;
-  return data.slice(0, last);
-}
-
-function detectImageMime(data: Uint8Array): string | null {
-  if (
-    data.length >= 12 &&
-    data[0] === 0x52 &&
-    data[1] === 0x49 &&
-    data[2] === 0x46 &&
-    data[3] === 0x46 &&
-    data[8] === 0x57 &&
-    data[9] === 0x45 &&
-    data[10] === 0x42 &&
-    data[11] === 0x50
-  ) {
-    return 'image/webp';
+  let end = data.length;
+  while (end > 0 && data[end - 1] === 0) {
+    end--;
   }
-  if (
-    data.length >= 8 &&
-    data[0] === 0x89 &&
-    data[1] === 0x50 &&
-    data[2] === 0x4e &&
-    data[3] === 0x47 &&
-    data[4] === 0x0d &&
-    data[5] === 0x0a &&
-    data[6] === 0x1a &&
-    data[7] === 0x0a
-  ) {
-    return 'image/png';
-  }
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
-    return 'image/jpeg';
-  }
-  if (
-    data.length >= 6 &&
-    data[0] === 0x47 &&
-    data[1] === 0x49 &&
-    data[2] === 0x46 &&
-    data[3] === 0x38 &&
-    (data[4] === 0x37 || data[4] === 0x39) &&
-    data[5] === 0x61
-  ) {
-    return 'image/gif';
-  }
-  return null;
+  return data.slice(0, end);
 }
 
 function extractImagePayload(data: Uint8Array): ImagePayload | null {
-  const mime = detectImageMime(data);
-  if (!mime) return null;
+  if (data.length < 4) return null;
 
-  if (mime === 'image/webp' && data.length >= 8) {
-    const riffSize = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-    const total = Math.min(data.length, (riffSize >>> 0) + 8);
-    return { mime, bytes: data.slice(0, total) };
+  const checkHeader = (offset: number, magic: number[]) => {
+    if (offset + magic.length > data.length) return false;
+    for (let i = 0; i < magic.length; i++) {
+      if (data[offset + i] !== magic[i]) return false;
+    }
+    return true;
+  };
+
+  const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const JPEG_MAGIC = [0xff, 0xd8, 0xff];
+
+  if (checkHeader(0, PNG_MAGIC)) {
+    return { mime: 'image/png', bytes: data };
   }
 
-  return { mime, bytes: trimTrailingZeros(data) };
+  if (checkHeader(0, JPEG_MAGIC)) {
+    return { mime: 'image/jpeg', bytes: data };
+  }
+
+  const GIF_MAGIC = [0x47, 0x49, 0x46, 0x38];
+  const WEBP_MAGIC = [0x52, 0x49, 0x46, 0x46];
+
+  for (let offset = 0; offset <= Math.min(16, data.length - 4); offset++) {
+    if (checkHeader(offset, GIF_MAGIC) && data.length > offset + 4) {
+      const nextByte = data[offset + 4];
+      if (nextByte === 0x37 || nextByte === 0x39) {
+        return { mime: 'image/gif', bytes: data.slice(offset) };
+      }
+    }
+    if (checkHeader(offset, WEBP_MAGIC) && data.length > offset + 8) {
+      if (data[offset + 8] === 0x57 && data[offset + 9] === 0x45 && data[offset + 10] === 0x42 && data[offset + 11] === 0x50) {
+        return { mime: 'image/webp', bytes: data.slice(offset) };
+      }
+    }
+  }
+
+  return null;
+}
+
+function downloadBinary() {
+  if (!outputBinaryData.value) return;
+  const blob = new Blob([outputBinaryData.value], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'received.bin';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function setDecodedOutput(recovered: Uint8Array) {
   clearOutput();
-  const image = extractImagePayload(recovered);
+  const trimmed = trimTrailingZeros(recovered);
+  if (trimmed.length === 0) return;
+
+  const image = extractImagePayload(trimmed);
   if (image) {
     outputImageMime.value = image.mime;
-    const blobBytes = new Uint8Array(image.bytes.length);
-    blobBytes.set(image.bytes);
     outputImageUrl.value = URL.createObjectURL(
-      new Blob([blobBytes.buffer], { type: image.mime })
+      new Blob([image.bytes], { type: image.mime })
     );
     return;
   }
-  outputText.value = new TextDecoder().decode(trimTrailingZeros(recovered));
+
+  try {
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const text = decoder.decode(trimmed);
+    // null文字が含まれておらず、制御文字が少なければテキストとみなす
+    if (!text.includes('\0')) {
+      outputText.value = text;
+      return;
+    }
+  } catch {
+    // UTF-8として不正な場合はバイナリ扱い
+  }
+
+  outputBinaryData.value = trimmed;
+  outputBinarySize.value = trimmed.length;
 }
 
 function pushRxLog(line: string) {
@@ -509,6 +537,11 @@ onBeforeUnmount(() => {
       <div v-else-if="outputImageUrl" class="image-result">
         <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
         <p class="image-meta">{{ outputImageMime }}</p>
+      </div>
+      <div v-else-if="outputBinaryData" class="binary-result">
+        <button @click="downloadBinary" class="btn btn-primary">
+          [received.bin: {{ formatSize(outputBinarySize) }}]
+        </button>
       </div>
       <p v-else class="placeholder">Waiting for synchronization...</p>
     </div>

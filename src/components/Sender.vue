@@ -10,8 +10,10 @@ const runtime = useDemoRuntime();
 
 const inputText = ref('Hello Acoustic World!');
 const fftCanvas = ref<HTMLCanvasElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
 const isTransmitting = ref(false);
 const senderStatus = ref('Idle');
+const isDragging = ref(false);
 
 let senderWorker: Worker | null = null;
 let senderBackend: Comlink.Remote<MistcastBackend> | null = null;
@@ -21,6 +23,49 @@ let fftData: Float32Array<ArrayBuffer> | null = null;
 let fftRafId: number | null = null;
 
 let opQueue: Promise<void> = Promise.resolve();
+
+function triggerFileSelect() {
+  fileInput.value?.click();
+}
+
+async function startSendingFile(file: File) {
+  const buf = await file.arrayBuffer();
+  const data = new Uint8Array(buf);
+  await startSendingData(data);
+}
+
+async function handleFileSelect(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (file) {
+    await startSendingFile(file);
+  }
+  // input要素の値をリセットして同じファイルを再度選択可能にする
+  target.value = '';
+}
+
+function handleDragEnter(event: DragEvent) {
+  event.preventDefault();
+  isDragging.value = true;
+}
+
+function handleDragLeave(event: DragEvent) {
+  event.preventDefault();
+  isDragging.value = false;
+}
+
+function handleDragOver(event: DragEvent) {
+  event.preventDefault();
+}
+
+async function handleDrop(event: DragEvent) {
+  event.preventDefault();
+  isDragging.value = false;
+  const file = event.dataTransfer?.files?.[0];
+  if (file) {
+    await startSendingFile(file);
+  }
+}
 
 function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
   const next = opQueue.then(() => fn(), () => fn());
@@ -252,7 +297,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="panel sender-panel">
+  <section
+    class="panel sender-panel"
+    :class="{ 'is-dragging': isDragging }"
+    @dragenter="handleDragEnter"
+    @dragleave="handleDragLeave"
+    @dragover="handleDragOver"
+    @drop="handleDrop"
+  >
     <h2>Sender</h2>
     <p class="panel-sub">Text / Image を音響フレームへ変調して送信</p>
     <div class="status-chip" :class="senderStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
@@ -260,9 +312,13 @@ onBeforeUnmount(() => {
     </div>
     <textarea v-model="inputText" rows="4" placeholder="Enter text to broadcast..." />
     <div class="button-row">
-      <button @click="startSendingText" class="btn btn-primary" :disabled="!runtime.coreReady.value || isTransmitting">Send Text</button>
-      <button @click="startSendingSampleImage" class="btn" :disabled="!runtime.coreReady.value || isTransmitting">Send Sample Image</button>
-      <button @click="stopSending" class="btn btn-danger" :disabled="!runtime.coreReady.value">Stop</button>
+      <template v-if="!isTransmitting">
+        <button @click="startSendingText" class="btn btn-primary" :disabled="!runtime.coreReady.value">Send</button>
+        <button @click="startSendingSampleImage" class="btn" :disabled="!runtime.coreReady.value">Send Sample Image</button>
+        <button @click="triggerFileSelect" class="btn" :disabled="!runtime.coreReady.value">Send File</button>
+        <input type="file" ref="fileInput" style="display: none" @change="handleFileSelect" />
+      </template>
+      <button v-else @click="stopSending" class="btn btn-danger" :disabled="!runtime.coreReady.value">Stop</button>
     </div>
     <div class="spectrum-panel">
       <p class="spectrum-title">Sender FFT (Linear Frequency Axis)</p>

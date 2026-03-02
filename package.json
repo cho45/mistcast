@@ -13,6 +13,7 @@
     "build:wasm:simd": "WASM_FLAVOR=simd WASM_NO_OPT=1 node scripts/build-wasm.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:components": "vitest run --config vitest.component.config.ts",
     "bench": "vitest run tests/performance.test.ts"
   },
   "keywords": [],
