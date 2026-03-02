@@ -64,7 +64,7 @@ jobs:
 
       - name: Build
         run: |
-          npm run build:wasm
+          WASM_MODE=normal npm run build:wasm
           npm run build
 
       - name: Upload artifact

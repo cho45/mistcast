@@ -57,7 +57,7 @@ jobs:
         run: cd dsp && cargo test --locked
 
       - name: Build WASM
-        run: npm run build:wasm
+        run: WASM_MODE=normal npm run build:wasm
 
       - name: Run tests
         run: npm test -- --reporter=verbose

@@ -17,7 +17,7 @@
   },
   "keywords": [],
   "author": "cho45 <cho45@lowreal.net> (http://www.lowreal.net/)",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^25.3.2",
     "@vitejs/plugin-vue": "^6.0.4",
