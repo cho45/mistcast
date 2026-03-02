@@ -329,7 +329,8 @@ impl Decoder {
                 if decoded_packets.is_empty() {
                     // 同期語一致後に payload が全滅したら偽ロック/境界ずれを疑い、
                     // 次回探索のためにインデックスを少し進める。
-                    self.last_search_idx = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
+                    self.last_search_idx =
+                        (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
                     self.current_sync = None;
                     continue;
                 }
@@ -382,7 +383,8 @@ impl Decoder {
             }
 
             // ヘッダ未検出: 偽同期として、インデックスを進めて次を探す
-            self.last_search_idx = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
+            self.last_search_idx =
+                (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
             self.current_sync = None;
             continue;
         }
@@ -722,18 +724,22 @@ impl Decoder {
         let fast_alpha_rise = 0.1;
         let fast_alpha_fall = 0.001;
         if sample_abs > self.agc_peak_fast {
-            self.agc_peak_fast = self.agc_peak_fast * (1.0 - fast_alpha_rise) + sample_abs * fast_alpha_rise;
+            self.agc_peak_fast =
+                self.agc_peak_fast * (1.0 - fast_alpha_rise) + sample_abs * fast_alpha_rise;
         } else {
-            self.agc_peak_fast = self.agc_peak_fast * (1.0 - fast_alpha_fall) + sample_abs * fast_alpha_fall;
+            self.agc_peak_fast =
+                self.agc_peak_fast * (1.0 - fast_alpha_fall) + sample_abs * fast_alpha_fall;
         }
 
         // 低速EMA: 安定したレベル推定
         let slow_alpha_rise = 0.01;
         let slow_alpha_fall = 0.0005;
         if sample_abs > self.agc_peak_slow {
-            self.agc_peak_slow = self.agc_peak_slow * (1.0 - slow_alpha_rise) + sample_abs * slow_alpha_rise;
+            self.agc_peak_slow =
+                self.agc_peak_slow * (1.0 - slow_alpha_rise) + sample_abs * slow_alpha_rise;
         } else {
-            self.agc_peak_slow = self.agc_peak_slow * (1.0 - slow_alpha_fall) + sample_abs * slow_alpha_fall;
+            self.agc_peak_slow =
+                self.agc_peak_slow * (1.0 - slow_alpha_fall) + sample_abs * slow_alpha_fall;
         }
 
         // 雑音過敏を防ぐため、低速EMAの1.5倍以上高速EMAが大きい場合のみ高速EMAを採用
@@ -743,11 +749,7 @@ impl Decoder {
             self.agc_peak_slow
         };
 
-        let gain = if peak > 1e-6 {
-            0.5 / peak
-        } else {
-            1.0
-        };
+        let gain = if peak > 1e-6 { 0.5 / peak } else { 1.0 };
         sample * gain * 2.0
     }
 
@@ -1040,8 +1042,8 @@ impl Drop for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::FIXED_K;
     use crate::coding::fountain::{FountainEncoder, FountainParams};
+    use crate::params::FIXED_K;
     use crate::{
         encoder::{Encoder, EncoderConfig},
         DspConfig,
@@ -1444,7 +1446,7 @@ mod tests {
             }
             let frame = encoder.encode_burst(&packets);
 
-            if i >= 5 && i <= 9 {
+            if (5..=9).contains(&i) {
                 continue;
             }
 
@@ -1454,11 +1456,14 @@ mod tests {
             let progress = decoder.process_samples(&signal);
             println!(
                 "Iteration {}: rank={}, sync={:?}, buf_len={}, last_seq={:?}",
-                i, progress.rank_packets, decoder.current_sync.as_ref().map(|s| s.peak_sample_idx),
-                decoder.sample_buffer_i.len(), progress.last_packet_seq
+                i,
+                progress.rank_packets,
+                decoder.current_sync.as_ref().map(|s| s.peak_sample_idx),
+                decoder.sample_buffer_i.len(),
+                progress.last_packet_seq
             );
             seen_ranks.push(progress.rank_packets);
-            
+
             if progress.complete {
                 complete = true;
                 break;
@@ -1467,6 +1472,10 @@ mod tests {
 
         println!("Seen ranks: {:?}", seen_ranks);
         assert!(complete, "Should complete eventually");
-        assert!(seen_ranks.len() <= 6, "Regression detected: took {} iterations, expected <= 6", seen_ranks.len());
+        assert!(
+            seen_ranks.len() <= 6,
+            "Regression detected: took {} iterations, expected <= 6",
+            seen_ranks.len()
+        );
     }
 }

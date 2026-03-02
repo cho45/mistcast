@@ -5,6 +5,12 @@ pub struct Scrambler {
     state: u16,
 }
 
+impl Default for Scrambler {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_SEED)
+    }
+}
+
 impl Scrambler {
     pub const DEFAULT_SEED: u16 = 0x1FF;
 
@@ -12,10 +18,6 @@ impl Scrambler {
         Scrambler {
             state: if seed == 0 { 0x1FF } else { seed & 0x1FF },
         }
-    }
-
-    pub fn default() -> Self {
-        Self::new(Self::DEFAULT_SEED)
     }
 
     /// 状態をリセット
@@ -47,15 +49,15 @@ mod tests {
     fn test_scrambler_reversibility() {
         let original = vec![0u8, 1, 0, 1, 1, 0, 0, 1];
         let mut bits = original.clone();
-        
+
         let mut s1 = Scrambler::default();
         s1.process_bits(&mut bits);
-        
+
         assert_ne!(original, bits, "Scrambled bits must be different");
-        
+
         let mut s2 = Scrambler::default();
         s2.process_bits(&mut bits);
-        
+
         assert_eq!(original, bits, "Double scramble must return original bits");
     }
 
@@ -65,12 +67,16 @@ mod tests {
         let mut data = vec![0u8; 1000];
         let mut s = Scrambler::default();
         s.process_bits(&mut data);
-        
+
         let ones = data.iter().filter(|&&b| b == 1).count() as u32;
         let total = data.len() as u32;
-        
+
         // 1の出現率が50%に近いことを確認
         let ratio = ones as f32 / total as f32;
-        assert!(ratio > 0.4 && ratio < 0.6, "Scrambler should produce roughly 50% ones: ratio={}", ratio);
+        assert!(
+            ratio > 0.4 && ratio < 0.6,
+            "Scrambler should produce roughly 50% ones: ratio={}",
+            ratio
+        );
     }
 }

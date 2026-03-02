@@ -340,17 +340,19 @@ mod tests {
 
         // Generate frame after a long time
         let frame2 = mod_.encode_frame(&bits);
-        
-        // We expect the amplitude envelope to be essentially the same 
+
+        // We expect the amplitude envelope to be essentially the same
         // (no high frequency distortion/attenuation from f32 precision loss)
-        
-        let rms1 = (frame1.iter().map(|&x| x*x).sum::<f32>() / frame1.len() as f32).sqrt();
-        let rms2 = (frame2.iter().map(|&x| x*x).sum::<f32>() / frame2.len() as f32).sqrt();
-        
+
+        let rms1 = (frame1.iter().map(|&x| x * x).sum::<f32>() / frame1.len() as f32).sqrt();
+        let rms2 = (frame2.iter().map(|&x| x * x).sum::<f32>() / frame2.len() as f32).sqrt();
+
         // RMS should not change more than 1%
         assert!(
             (rms1 - rms2).abs() < rms1 * 0.01,
-            "Carrier phase precision loss detected! rms1: {}, rms2: {}", rms1, rms2
+            "Carrier phase precision loss detected! rms1: {}, rms2: {}",
+            rms1,
+            rms2
         );
     }
 
@@ -401,21 +403,21 @@ mod tests {
     fn test_gapless_continuity() {
         let mut mod_ = make_modulator();
         let bits = vec![0x55; 4];
-        
+
         // 1回で2フレーム分のビットをまとめて変調
         let mut bits2 = bits.clone();
         bits2.extend_from_slice(&bits);
         let samples_all = mod_.modulate(&bits2);
-        
+
         mod_.reset();
-        
+
         // 分割して変調
         let samples_part1 = mod_.modulate(&bits);
         let samples_part2 = mod_.modulate(&bits);
-        
+
         let mut samples_combined = samples_part1;
         samples_combined.extend_from_slice(&samples_part2);
-        
+
         assert_eq!(samples_all.len(), samples_combined.len());
         // 浮動小数点の誤差を考慮して比較
         for (&a, &b) in samples_all.iter().zip(samples_combined.iter()) {

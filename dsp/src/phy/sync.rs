@@ -56,7 +56,6 @@
 ///   0 dB SNR 信号 2σ下限 (0.5) とノイズ 3σ上限 (0.31) の間
 ///   誤検出率と感度のバランスを考慮
 ///   設定値: 0.38
-
 use crate::common::msequence::MSequence;
 use crate::DspConfig;
 
@@ -94,10 +93,14 @@ impl SyncDetector {
         // SYNC_WORD: 32 bits
         let mut sync_symbols = Vec::with_capacity(config.preamble_repeat + 32);
         for rep in 0..config.preamble_repeat {
-            let sign = if rep == config.preamble_repeat - 1 { -1.0 } else { 1.0 };
+            let sign = if rep == config.preamble_repeat - 1 {
+                -1.0
+            } else {
+                1.0
+            };
             sync_symbols.push(sign);
         }
-        
+
         let word = crate::params::SYNC_WORD;
         for i in 0..crate::params::SYNC_WORD_BITS {
             let bit = (word >> (crate::params::SYNC_WORD_BITS - 1 - i)) & 1;
@@ -238,7 +241,7 @@ impl SyncDetector {
         let mut total_rho_p = 0.0f32;
         let mut min_power = f32::INFINITY;
         let mut max_power = 0.0f32;
-        
+
         let mut sum_re = 0.0f32;
         let mut sum_im = 0.0f32;
         let mut sum_mag = 0.0f32;
@@ -262,17 +265,15 @@ impl SyncDetector {
             min_power = min_power.min(mag2);
             max_power = max_power.max(mag2);
 
-            if rep > 0 {
-                if last_mag > 1e-9 && mag > 1e-9 {
-                    let re = last_ci * ci + last_cq * cq;
-                    let im = last_ci * cq - last_cq * ci;
-                    let pair_mag = last_mag * mag;
+            if rep > 0 && last_mag > 1e-9 && mag > 1e-9 {
+                let re = last_ci * ci + last_cq * cq;
+                let im = last_ci * cq - last_cq * ci;
+                let pair_mag = last_mag * mag;
 
-                    let expected = self.sync_symbols[rep - 1] * self.sync_symbols[rep];
-                    sum_re += expected * re;
-                    sum_im += expected * im;
-                    sum_mag += pair_mag;
-                }
+                let expected = self.sync_symbols[rep - 1] * self.sync_symbols[rep];
+                sum_re += expected * re;
+                sum_im += expected * im;
+                sum_mag += pair_mag;
             }
 
             last_ci = ci;
@@ -353,7 +354,9 @@ mod tests {
             let mut best_score = -1.0f32;
             let mut best_idx = 0;
             let required_len = sym_len * (repeat + 1);
-            if i.len() < required_len { return (0.0, 0); }
+            if i.len() < required_len {
+                return (0.0, 0);
+            }
             for n in 0..=(i.len() - required_len) {
                 let (score, _) = detector.score_candidate(i, q, n, repeat, sym_len);
                 if score > best_score {
@@ -464,7 +467,6 @@ mod tests {
         const REQUIRED_DETECTION_RATE: f64 = 0.95;
 
         let mut num_detected = 0;
-        let mut rng = thread_rng();
 
         for trial in 0..NUM_TRIALS {
             // -3 dB SNR: やや厳しい条件
@@ -476,10 +478,16 @@ mod tests {
         }
 
         let detection_rate = num_detected as f64 / NUM_TRIALS as f64;
-        println!("Low SNR (-3 dB) detection rate: {:.2}%", detection_rate * 100.0);
-        assert!(detection_rate >= REQUIRED_DETECTION_RATE,
-                "Detection rate {}% below required {}%",
-                detection_rate * 100.0, REQUIRED_DETECTION_RATE * 100.0);
+        println!(
+            "Low SNR (-3 dB) detection rate: {:.2}%",
+            detection_rate * 100.0
+        );
+        assert!(
+            detection_rate >= REQUIRED_DETECTION_RATE,
+            "Detection rate {}% below required {}%",
+            detection_rate * 100.0,
+            REQUIRED_DETECTION_RATE * 100.0
+        );
     }
 
     #[test]
@@ -492,7 +500,7 @@ mod tests {
         // --- 1. ノイズ分布の精密測定 (しきい値決定のため) ---
         let noise_trials = 200;
         let mut noise_scores = Vec::with_capacity(noise_trials * 100);
-        
+
         for trial in 0..noise_trials {
             let mut rng = StdRng::seed_from_u64(trial as u64 + 5000);
             let dist = Normal::new(0.0, 0.1).unwrap();
@@ -501,13 +509,21 @@ mod tests {
             let q: Vec<f32> = (0..2000).map(|_| dist.sample(&mut rng)).collect();
 
             // 10サンプルおきにスコアを収集 (スライディング窓の近似)
-            for n in (0..=(i.len() - config.samples_per_symbol() * (config.preamble_repeat + 1))).step_by(10) {
-                let (score, _) = detector.score_candidate(&i, &q, n, config.preamble_repeat, config.samples_per_symbol());
+            for n in (0..=(i.len() - config.samples_per_symbol() * (config.preamble_repeat + 1)))
+                .step_by(10)
+            {
+                let (score, _) = detector.score_candidate(
+                    &i,
+                    &q,
+                    n,
+                    config.preamble_repeat,
+                    config.samples_per_symbol(),
+                );
                 noise_scores.push(score);
             }
         }
         noise_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         // 目標誤検知率 (False Alarm Rate) ごとの推奨しきい値を計算
         let get_threshold = |target_far: f64| {
             let idx = ((1.0 - target_far) * noise_scores.len() as f64) as usize;
@@ -518,14 +534,24 @@ mod tests {
         let target_far_01pct = get_threshold(0.001);
 
         println!("=== Threshold Analysis (based on Noise Distribution) ===");
-        println!("  Target FAR 1.0%: Recommended Threshold = {:.4}", target_far_1pct);
+        println!(
+            "  Target FAR 1.0%: Recommended Threshold = {:.4}",
+            target_far_1pct
+        );
         println!("  Target FAR 0.1%: Recommended Threshold = {:.4}", target_far_01pct);
         println!("  Max Noise Score Observed: {:.4}", noise_scores.last().unwrap());
-        println!("");
+        println!();
 
         // 現在のしきい値 (THRESHOLD_FINE) での性能評価
-        println!("=== ROC Curve Analysis (Threshold = {:.4}) ===", SyncDetector::THRESHOLD_FINE);
-        println!("{:>8} | {:>13} | {:>13}", "SNR(dB)", "Detection Rate", "Score (avg)");
+
+        println!(
+            "=== ROC Curve Analysis (Threshold = {:.4}) ===",
+            SyncDetector::THRESHOLD_FINE
+        );
+        println!(
+            "{:>8} | {:>13} | {:>13}",
+            "SNR(dB)", "Detection Rate", "Score (avg)"
+        );
         println!("---------|---------------|-------------");
 
         for &snr_db in &snr_db_list {
@@ -542,47 +568,72 @@ mod tests {
             }
 
             let detection_rate = num_detected as f64 / NUM_TRIALS as f64;
-            let avg_score = if num_detected > 0 { total_score / num_detected as f32 } else { 0.0 };
-            println!("{:>8.1} | {:>13} | {:>13.4}",
-                     snr_db,
-                     format!("{}%", (detection_rate * 100.0) as i32),
-                     avg_score);
+            let avg_score = if num_detected > 0 {
+                total_score / num_detected as f32
+            } else {
+                0.0
+            };
+            println!(
+                "{:>8.1} | {:>13} | {:>13.4}",
+                snr_db,
+                format!("{}%", (detection_rate * 100.0) as i32),
+                avg_score
+            );
         }
 
         // --- 2. 推奨しきい値での検出率シミュレーション ---
-        println!("\n=== Detection Performance at Recommended Threshold ({:.4}) ===", target_far_1pct);
+        println!(
+            "\n=== Detection Performance at Recommended Threshold ({:.4}) ===",
+            target_far_1pct
+        );
         for &snr_db in &[-3.0, 0.0, 3.0] {
             let mut num_detected = 0;
             for trial in 0..NUM_TRIALS {
                 let (i, q) = generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 2000);
                 // detect() の代わりに直接しきい値判定を行う (簡易評価)
-                let preamble_samples = config.samples_per_symbol() * config.preamble_repeat;
                 let peak_n = (config.rrc_num_taps() - 1).saturating_sub(config.samples_per_chip() / 2);
                 let mut found = false;
+
                 for n in (peak_n.saturating_sub(5))..=(peak_n + 5) {
-                    let (score, _) = detector.score_candidate(&i, &q, n, config.preamble_repeat, config.samples_per_symbol());
+                    let (score, _) = detector.score_candidate(
+                        &i,
+                        &q,
+                        n,
+                        config.preamble_repeat,
+                        config.samples_per_symbol(),
+                    );
                     if score > target_far_1pct {
                         found = true;
                         break;
                     }
                 }
-                if found { num_detected += 1; }
+                if found {
+                    num_detected += 1;
+                }
             }
-            println!("  SNR {:>5.1} dB: Detection Rate = {}%", snr_db, (num_detected as f64 / NUM_TRIALS as f64 * 100.0) as i32);
+            println!(
+                "  SNR {:>5.1} dB: Detection Rate = {}%",
+                snr_db,
+                (num_detected as f64 / NUM_TRIALS as f64 * 100.0) as i32
+            );
         }
 
         // 要件確認 (既存のテストを一時的にパスさせるための調整。最終的にはしきい値を修正すべき)
         let mut neg3_db_detection = 0.0f64;
         for trial in 0..NUM_TRIALS {
             let (i, q) = generate_signal_with_awgn_seeded(&config, 500, -3.0, (trial + 1000) as u64);
-            if let Some(_) = detector.detect(&i, &q, 0).0 {
+            if detector.detect(&i, &q, 0).0.is_some() {
                 neg3_db_detection += 1.0;
             }
         }
+
         neg3_db_detection /= NUM_TRIALS as f64;
-        
+
         // 注: 依然として現状のしきい値では失敗するはずですが、事実を報告します。
-        assert!(neg3_db_detection >= 0.0, "Placeholder for actual performance report");
+        assert!(
+            neg3_db_detection >= 0.0,
+            "Placeholder for actual performance report"
+        );
     }
 
     #[test]
@@ -592,7 +643,7 @@ mod tests {
         let sym_len = config.samples_per_symbol();
         let repeat = config.preamble_repeat;
         let spc = config.samples_per_chip();
-        
+
         // 理論的なピーク位置の計算:
         // Modulator遅延((L-1)/2) + Receiver遅延((L-1)/2) = L-1
         // score_candidate は内部で n + spc/2 からサンプリングするため、
@@ -603,7 +654,9 @@ mod tests {
             let mut best_score = 0.0f32;
             // 理論的ピークの前後 1チップ分を探索
             for n in (theoretical_peak_n - spc as i32)..=(theoretical_peak_n + spc as i32) {
-                if n < 0 { continue; }
+                if n < 0 {
+                    continue;
+                }
                 let (score, _) = detector.score_candidate(i, q, n as usize, repeat, sym_len);
                 if score > best_score {
                     best_score = score;
@@ -617,7 +670,11 @@ mod tests {
             let (i, q) = generate_signal(&config, 0, 1.0);
             let score = find_best_score(&i, &q);
             println!("Ideal signal best score: {:.4}", score);
-            assert!(score > 0.8, "Ideal signal should have high score: {:.4}", score);
+            assert!(
+                score > 0.8,
+                "Ideal signal should have high score: {:.4}",
+                score
+            );
         }
 
         // 2. 大きなCFOがある信号 (1シンボルごとに 90度 回転)
@@ -633,10 +690,14 @@ mod tests {
                 i_cfo.push(ii * cos_p - qq * sin_p);
                 q_cfo.push(ii * sin_p + qq * cos_p);
             }
-            
+
             let score = find_best_score(&i_cfo, &q_cfo);
             println!("CFO signal (90 deg/sym) best score: {:.4}", score);
-            assert!(score > 0.7, "CFO-drifted signal should still have high score: {:.4}", score);
+            assert!(
+                score > 0.7,
+                "CFO-drifted signal should still have high score: {:.4}",
+                score
+            );
         }
 
         // 3. 純粋なノイズ (複数シードで検証)
@@ -647,18 +708,23 @@ mod tests {
                 // 範囲外アクセスを防ぐためバッファ長を十分に確保
                 let i_noise: Vec<f32> = (0..3000).map(|_| dist.sample(&mut rng)).collect();
                 let q_noise: Vec<f32> = (0..3000).map(|_| dist.sample(&mut rng)).collect();
-                
+
+
                 let (score, _) = detector.score_candidate(&i_noise, &q_noise, 0, repeat, sym_len);
-                
+
                 let mut total_rho_p = 0.0f32;
                 for rep in 0..repeat {
-                    let (ci, cq, en) = detector.correlate_one_symbol(&i_noise, &q_noise, rep * sym_len);
-                    total_rho_p += (ci*ci + cq*cq) / (detector.sf as f32 * en);
+                    let (ci, cq, en) =
+                        detector.correlate_one_symbol(&i_noise, &q_noise, rep * sym_len);
+                    total_rho_p += (ci * ci + cq * cq) / (detector.sf as f32 * en);
                 }
                 let rho_p = total_rho_p / repeat as f32;
                 let rho_phi = (score - 0.7 * rho_p) / 0.3;
 
-                println!("Seed {}: score: {:.4} (rho_p: {:.4}, rho_phi: {:.4})", seed, score, rho_p, rho_phi);
+                println!(
+                    "Seed {}: score: {:.4} (rho_p: {:.4}, rho_phi: {:.4})",
+                    seed, score, rho_p, rho_phi
+                );
             }
         }
     }
@@ -671,7 +737,7 @@ mod tests {
     ) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());
         let mut signal = vec![0.0; offset];
-        signal.extend(modulator.encode_frame(&[]).iter().map(|&s| s));
+        signal.extend(modulator.encode_frame(&[]).iter().copied());
         signal.extend(vec![0.0; 500]);
 
         let (i_raw, q_raw) = downconvert(&signal, 0, config);
@@ -684,11 +750,14 @@ mod tests {
         let preamble_samples = config.samples_per_symbol() * config.preamble_repeat;
         let start_active = offset;
         let end_active = (offset + preamble_samples).min(i_ch.len());
-        
-        let signal_power: f32 = i_ch[start_active..end_active].iter().map(|&x| x * x)
-            .chain(q_ch[start_active..end_active].iter().map(|&x| x * x)).sum::<f32>() 
+
+        let signal_power: f32 = i_ch[start_active..end_active]
+            .iter()
+            .map(|&x| x * x)
+            .chain(q_ch[start_active..end_active].iter().map(|&x| x * x))
+            .sum::<f32>()
             / (2.0 * (end_active - start_active) as f32);
-        
+
         let snr_linear = 10.0_f32.powf(snr_db / 10.0);
         let noise_power = signal_power / snr_linear;
         let noise_std = (noise_power / 2.0).sqrt(); // IとQに分けるので 1/2
