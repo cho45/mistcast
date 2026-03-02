@@ -10,7 +10,7 @@ use crate::common::msequence::MSequence;
 use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
-use crate::params::{INTERNAL_SPC, MODULATION, SYNC_WORD, SYNC_WORD_BITS};
+use crate::params::{INTERNAL_SPC, MODULATION, SYNC_WORD};
 use crate::{DifferentialModulation, DspConfig};
 
 #[inline]
@@ -258,7 +258,7 @@ impl Modulator {
         let sf = self.config.spread_factor();
         let preamble_repeat = self.config.preamble_repeat;
 
-        let sync_bits: Vec<u8> = (0..SYNC_WORD_BITS)
+        let sync_bits: Vec<u8> = (0..self.config.sync_word_bits)
             .rev()
             .map(|i| ((SYNC_WORD >> i) & 1) as u8)
             .collect();
@@ -593,7 +593,7 @@ mod tests {
             }
         }
 
-        let sync_bits: Vec<u8> = (0..SYNC_WORD_BITS)
+        let sync_bits: Vec<u8> = (0..config.sync_word_bits)
             .rev()
             .map(|i| ((SYNC_WORD >> i) & 1) as u8)
             .collect();

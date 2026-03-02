@@ -101,6 +101,8 @@ struct Cli {
     carrier_freq: f32,
     mseq_order: usize,
     rrc_alpha: f32,
+    sync_word_bits: usize,
+    preamble_repeat: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -423,6 +425,16 @@ fn parse_cli() -> Cli {
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(dsp::params::RRC_ALPHA);
 
+    let sync_word_bits = kv
+        .remove("sync-word-bits")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(dsp::params::SYNC_WORD_BITS);
+
+    let preamble_repeat = kv
+        .remove("preamble-repeat")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(dsp::params::PREAMBLE_REPEAT);
+
     Cli {
         mode,
         trials,
@@ -450,6 +462,8 @@ fn parse_cli() -> Cli {
         carrier_freq,
         mseq_order,
         rrc_alpha,
+        sync_word_bits,
+        preamble_repeat,
     }
 }
 
@@ -583,6 +597,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     tx_cfg.carrier_freq = cli.carrier_freq;
     tx_cfg.mseq_order = cli.mseq_order;
     tx_cfg.rrc_alpha = cli.rrc_alpha;
+    tx_cfg.sync_word_bits = cli.sync_word_bits;
+    tx_cfg.preamble_repeat = cli.preamble_repeat;
 
     let mut rx_cfg = tx_cfg.clone();
     rx_cfg.carrier_freq += imp.cfo_hz;

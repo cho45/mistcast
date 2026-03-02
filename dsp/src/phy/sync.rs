@@ -101,8 +101,8 @@ impl SyncDetector {
         }
 
         let word = crate::params::SYNC_WORD;
-        for i in 0..crate::params::SYNC_WORD_BITS {
-            let bit = (word >> (crate::params::SYNC_WORD_BITS - 1 - i)) & 1;
+        for i in 0..config.sync_word_bits {
+            let bit = (word >> (config.sync_word_bits - 1 - i)) & 1;
             sync_symbols.push(if bit == 0 { 1.0 } else { -1.0 });
         }
 

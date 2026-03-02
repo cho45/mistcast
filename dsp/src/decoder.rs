@@ -10,7 +10,7 @@ use crate::{
     common::resample::Resampler,
     common::rrc_filter::RrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
-    params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD_BITS},
+    params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
     phy::sync::{SyncDetector, SyncResult},
     DifferentialModulation, DspConfig,
 };
@@ -210,7 +210,7 @@ impl Decoder {
         self.sample_buffer_i.extend_from_slice(&i_filtered);
         self.sample_buffer_q.extend_from_slice(&q_filtered);
 
-        let sync_bits_len = SYNC_WORD_BITS;
+        let sync_bits_len = self.config.sync_word_bits;
         let sync_symbol_len = sync_bits_len;
         let bits_per_symbol_payload = MODULATION.bits_per_symbol();
         let fec_bits_len = self.interleaver.rows() * self.interleaver.cols();

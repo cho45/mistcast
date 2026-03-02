@@ -57,6 +57,7 @@ pub struct DspConfig {
     pub rrc_alpha: f32,
     pub rrc_taps_per_symbol: usize,
     pub preamble_repeat: usize,
+    pub sync_word_bits: usize,
 }
 
 impl DspConfig {
@@ -69,6 +70,7 @@ impl DspConfig {
             rrc_alpha: params::RRC_ALPHA,
             rrc_taps_per_symbol: 16,
             preamble_repeat: params::PREAMBLE_REPEAT,
+            sync_word_bits: params::SYNC_WORD_BITS,
         }
     }
 
@@ -91,6 +93,7 @@ impl DspConfig {
             rrc_alpha: base.rrc_alpha,
             rrc_taps_per_symbol: base.rrc_taps_per_symbol,
             preamble_repeat: base.preamble_repeat,
+            sync_word_bits: base.sync_word_bits,
         }
     }
     pub fn default_48k() -> Self {
