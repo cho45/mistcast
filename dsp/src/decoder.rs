@@ -735,6 +735,10 @@ impl Decoder {
     pub fn recovered_data(&self) -> Option<&[u8]> {
         self.recovered_data.as_deref()
     }
+
+    pub fn set_packets_per_sync_burst(&mut self, n: usize) {
+        self.packets_per_sync_burst = n;
+    }
 }
 
 #[inline]
@@ -1254,11 +1258,19 @@ mod tests {
     #[test]
     fn test_reproduce_vitest_regression() {
         let data = vec![0xAAu8; 160]; // k=10
-        let config = DspConfig::default_48k();
+        let mut config = DspConfig::default_48k();
+        // このテストは以前のデフォルト値での挙動を前提としているため、明示的に指定する
+        config.chip_rate = 12000.0;
+        config.sync_word_bits = 32;
+        config.preamble_repeat = 4;
+
         let mut enc_cfg = EncoderConfig::new(config.clone());
         enc_cfg.fountain_k = 10;
+        enc_cfg.packets_per_sync_burst = 2;
+
         let mut encoder = Encoder::new(enc_cfg);
         let mut decoder = Decoder::new(data.len(), 10, config);
+        decoder.set_packets_per_sync_burst(2);
 
         // ウォームアップ
         decoder.process_samples(&vec![0.0f32; 4096]);

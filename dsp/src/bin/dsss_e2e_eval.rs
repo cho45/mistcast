@@ -103,6 +103,7 @@ struct Cli {
     rrc_alpha: f32,
     sync_word_bits: usize,
     preamble_repeat: usize,
+    packets_per_burst: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -435,6 +436,11 @@ fn parse_cli() -> Cli {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(dsp::params::PREAMBLE_REPEAT);
 
+    let packets_per_burst = kv
+        .remove("packets-per-burst")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(dsp::params::PACKETS_PER_SYNC_BURST);
+
     Cli {
         mode,
         trials,
@@ -464,6 +470,7 @@ fn parse_cli() -> Cli {
         rrc_alpha,
         sync_word_bits,
         preamble_repeat,
+        packets_per_burst,
     }
 }
 
@@ -607,9 +614,11 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let k = payload.len().div_ceil(PAYLOAD_SIZE).max(1);
     let mut enc_cfg = EncoderConfig::new(tx_cfg.clone());
     enc_cfg.fountain_k = k;
+    enc_cfg.packets_per_sync_burst = cli.packets_per_burst;
     let mut encoder = Encoder::new(enc_cfg);
     let mut stream = encoder.encode_stream(&payload);
     let mut decoder = Decoder::new(payload.len(), k, rx_cfg);
+    decoder.set_packets_per_sync_burst(cli.packets_per_burst);
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;

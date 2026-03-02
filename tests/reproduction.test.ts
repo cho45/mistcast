@@ -93,7 +93,8 @@ describe('Reproduction: 10/10 Verification', () => {
         decoder.process_samples(tails);
 
         // バースト化で rank が複数ずつ進むことがあるため、完了までの反復数で評価する。
-        expect(seenRanks.length, "回復までの反復が長すぎる").toBeLessThanOrEqual(6);
+        // パケット数が PPB=1 に減少したため、完了までの反復数上限を 6 から 12 に調整する。
+        expect(seenRanks.length, "回復までの反復が長すぎる").toBeLessThanOrEqual(12);
         expect(
             seenRanks.every((r, i) => i === 0 || r >= seenRanks[i - 1]),
             "rank は単調非減少であるべき"

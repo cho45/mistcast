@@ -66,8 +66,9 @@ dsp/src/
 | セクション | 構成 | 役割 |
 | :--- | :--- | :--- |
 | **Preamble** | M系列(15ch) × 2回 `[M, -M]` | キャリア同期、タイミング抽出。 |
-| **Sync Word** | 16 bits (DBPSK) | フレーム同期。 |
-| **Packet n** | FEC済みビット列 (DQPSK) | 実データ。通常、1フレームに2パケットを格納。 |
+| Sync Word | 16 bits (DBPSK) | フレーム同期。 |
+| **Packet n** | FEC済みビット列 (DQPSK) | 実データ。通常、1フレームに1パケットを格納。 |
+
 
 ### 2. データリンク層 (Packet Format)
 消失訂正（Fountain Code）と誤り検出（CRC）を統合した、固定 **26バイト** (Payload 16B時) のパケットです。
