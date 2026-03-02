@@ -96,6 +96,7 @@ struct Cli {
     sweep_ppm: Vec<f32>,
     sweep_loss: Vec<f32>,
     sweep_fading: Vec<f32>,
+    sample_rate: f32,
     chip_rate: f32,
     carrier_freq: f32,
     mseq_order: usize,
@@ -114,6 +115,7 @@ struct TrialResult {
     dropped_attempts: usize,
     tx_signal_energy_sum: f64,
     tx_signal_samples: usize,
+    process_time_ns: u64,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -129,6 +131,7 @@ struct Metrics {
     dropped_attempts: usize,
     total_tx_signal_energy: f64,
     total_tx_signal_samples: usize,
+    total_process_time_ns: u64,
     completion_secs: Vec<f32>,
 }
 
@@ -142,6 +145,7 @@ impl Metrics {
         self.dropped_attempts += t.dropped_attempts;
         self.total_tx_signal_energy += t.tx_signal_energy_sum;
         self.total_tx_signal_samples += t.tx_signal_samples;
+        self.total_process_time_ns += t.process_time_ns;
 
         if t.first_attempt_success {
             self.first_attempt_successes += 1;
@@ -218,6 +222,14 @@ impl Metrics {
             None
         } else {
             Some((self.total_tx_signal_energy / self.total_tx_signal_samples as f64) as f32)
+        }
+    }
+
+    fn avg_process_time_per_sample_ns(&self) -> f32 {
+        if self.total_tx_signal_samples == 0 {
+            0.0
+        } else {
+            self.total_process_time_ns as f32 / self.total_tx_signal_samples as f32
         }
     }
 
@@ -390,6 +402,10 @@ fn parse_cli() -> Cli {
     let sweep_loss = parse_list(kv.remove("sweep-loss"), &[0.0, 0.05, 0.1, 0.2, 0.3, 0.4]);
     let sweep_fading = parse_list(kv.remove("sweep-fading"), &[0.0, 0.2, 0.4, 0.6, 0.8]);
 
+    let sample_rate = kv
+        .remove("sample-rate")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(dsp::params::DEFAULT_SAMPLE_RATE);
     let chip_rate = kv
         .remove("chip-rate")
         .and_then(|v| v.parse::<f32>().ok())
@@ -429,6 +445,7 @@ fn parse_cli() -> Cli {
         sweep_ppm,
         sweep_loss,
         sweep_fading,
+        sample_rate,
         chip_rate,
         carrier_freq,
         mseq_order,
@@ -561,7 +578,7 @@ fn signal_energy(samples: &[f32]) -> f64 {
 }
 
 fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
-    let mut tx_cfg = DspConfig::default_48k();
+    let mut tx_cfg = DspConfig::new(cli.sample_rate);
     tx_cfg.chip_rate = cli.chip_rate;
     tx_cfg.carrier_freq = cli.carrier_freq;
     tx_cfg.mseq_order = cli.mseq_order;
@@ -584,6 +601,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let mut dropped_attempts = 0usize;
     let mut tx_signal_energy_sum = 0.0f64;
     let mut tx_signal_samples = 0usize;
+    let mut total_process_ns = 0u64;
 
     let chunk = cli.chunk_samples.max(1);
     let gap = cli.gap_samples;
@@ -605,7 +623,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         let rx_frame = apply_channel(&frame, imp, &mut rng, drop_burst);
         elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
         for piece in rx_frame.chunks(chunk) {
+            let start_time = std::time::Instant::now();
             let progress = decoder.process_samples(piece);
+            total_process_ns += start_time.elapsed().as_nanos() as u64;
+
             if progress.complete {
                 let recovered = decoder.recovered_data();
                 let errs = count_bit_errors_bytes(&payload, recovered);
@@ -621,6 +642,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     dropped_attempts,
                     tx_signal_energy_sum,
                     tx_signal_samples,
+                    process_time_ns: total_process_ns,
                 };
             }
         }
@@ -633,7 +655,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
             }
             elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
             for piece in gap_sig.chunks(chunk) {
+                let start_time = std::time::Instant::now();
                 let progress = decoder.process_samples(piece);
+                total_process_ns += start_time.elapsed().as_nanos() as u64;
+
                 if progress.complete {
                     let recovered = decoder.recovered_data();
                     let errs = count_bit_errors_bytes(&payload, recovered);
@@ -649,6 +674,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         dropped_attempts,
                         tx_signal_energy_sum,
                         tx_signal_samples,
+                        process_time_ns: total_process_ns,
                     };
                 }
             }
@@ -668,12 +694,13 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         dropped_attempts,
         tx_signal_energy_sum,
         tx_signal_samples,
+        process_time_ns: total_process_ns,
     }
 }
 
 fn print_header() {
     println!(
-        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,multipath"
+        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,avg_proc_ns_sample,multipath"
     );
 }
 
@@ -689,7 +716,7 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         None
     };
     println!(
-        "{scenario},dsss-e2e,{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{},{}",
+        "{scenario},dsss-e2e,{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{},{:.2},{}",
         m.trials,
         m.successes,
         m.deadline_hits,
@@ -711,6 +738,7 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         fmt_opt(m.mean_completion_sec()),
         m.total_attempts,
         m.dropped_attempts,
+        m.avg_process_time_per_sample_ns(),
         imp.multipath.name,
     );
 }
