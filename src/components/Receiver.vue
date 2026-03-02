@@ -47,6 +47,27 @@ const rxNoChangeTicks = ref(0);
 const rxLogCopied = ref(false);
 let rxLogCopiedTimer: number | null = null;
 
+// 重複確率を計算: 1/256^(k-r) * 100
+const stallProbability = computed(() => {
+  const k = totalNeededPackets.value;
+  const r = rankPackets.value;
+  if (k === 0) return '0.0000';
+  if (k <= r) return '100.00';
+  const prob = (1 / Math.pow(256, k - r)) * 100;
+  // 0.0001% 以上なら固定小数点、未満なら指数表示
+  if (prob >= 0.0001) {
+    return prob.toFixed(4);
+  }
+  const exp = prob.toExponential(2);
+  const match = exp.match(/(\d)\d*\.\d*e([+-]\d+)$/);
+  if (match) {
+    const n = match[1];
+    const exponent = parseInt(match[2], 10);
+    return `${n}e${exponent}`;
+  }
+  return exp;
+});
+
 const receiverStatus = ref('Idle');
 
 const inputMode = ref<InputMode>('loopback');
@@ -512,9 +533,9 @@ onBeforeUnmount(() => {
 
     <div class="metric-grid">
       <div class="metric" data-tooltip="正常に受信してシステムに受け入れられたパケットの総数"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
-      <div class="metric" data-tooltip="受信したが、既存のパケットと線形従属の関係にあるため行列のランク上昇に寄与していないパケット数"><span>Stall</span><strong>{{ stalledPackets }}</strong></div>
+      <div class="metric" data-tooltip="受信したが、既存のパケットと線形従属の関係にあるため行列のランク上昇に寄与していないパケット数。GF(256) で必要なパケット数が k のとき、現在のランクが r だと次のパケットが従属になる確率は約 1/256^(k-r)"><span>Stall</span><strong>{{ stalledPackets }}</strong><small>(現在重複確率: {{ stallProbability }}%)</small></div>
       <div class="metric" data-tooltip="他のパケットと線形従属の関係にあり、行列のランクを上げるためにまだ他のパケットの受信を待っているパケット数"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
-      <div class="metric" data-tooltip="以前に受信したパケットと同じシーケンス番号を持つ重複パケット数"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
+      <div class="metric" data-tooltip="以前に受信したパケットと同じシーケンス番号を持つ重複パケット数。シーケンス番号は16bit（0-65535）で、65536パケット送信すると一周して重複が発生する可能性あり"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
       <div class="metric" data-tooltip="CRCチェックに失敗したパケット数（ノイズや伝送エラーでデータが破損）"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
       <div class="metric" data-tooltip="パケットの解析に失敗したパケット数（フォーマット不正や構造エラー）"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
       <div class="metric" data-tooltip="近隣パケット間の整合性チェックに失敗したパケット数"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>

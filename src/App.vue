@@ -437,6 +437,14 @@ code {
   font-size: 0.95rem;
 }
 
+.metric small {
+  display: block;
+  font-size: 0.65em;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  font-weight: 400;
+}
+
 .proc-stats {
   margin-top: 0.8rem;
   border: 1px solid var(--line);
@@ -473,6 +481,14 @@ code {
   font-family: var(--mono);
   font-size: 0.78rem;
   overflow-wrap: anywhere;
+}
+
+.proc-grid small {
+  display: block;
+  font-size: 0.65em;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  font-weight: 400;
 }
 
 .rx-log {
