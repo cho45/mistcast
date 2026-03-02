@@ -1,0 +1,179 @@
+import { describe, it, expect } from 'vitest';
+import { extractImagePayload } from './image-detector';
+
+describe('extractImagePayload', () => {
+  describe('PNG detection', () => {
+    it('should detect PNG image', () => {
+      // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+      const pngData = new Uint8Array([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+        0x00, 0x00, 0x00, 0x0d, // IHDR chunk length
+        0x49, 0x48, 0x44, 0x52, // IHDR chunk type
+        // ... rest of PNG data
+      ]);
+
+      const result = extractImagePayload(pngData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/png');
+      expect(result?.bytes).toStrictEqual(pngData);
+    });
+
+    it('should not detect non-PNG data', () => {
+      const notPng = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+      const result = extractImagePayload(notPng);
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('JPEG detection', () => {
+    it('should detect JPEG image', () => {
+      // JPEG signature: FF D8 FF
+      const jpegData = new Uint8Array([
+        0xff, 0xd8, 0xff, // JPEG signature
+        0xe0, // APP0 marker
+        // ... rest of JPEG data
+      ]);
+
+      const result = extractImagePayload(jpegData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/jpeg');
+      expect(result?.bytes).toStrictEqual(jpegData);
+    });
+  });
+
+  describe('GIF detection', () => {
+    it('should detect GIF87a', () => {
+      // GIF87a signature: 47 49 46 38 37 61
+      const gifData = new Uint8Array([
+        0x47, 0x49, 0x46, 0x38, 0x37, 0x61, // GIF87a signature
+        // ... rest of GIF data
+      ]);
+
+      const result = extractImagePayload(gifData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/gif');
+      expect(result?.bytes).toStrictEqual(gifData);
+    });
+
+    it('should detect GIF89a', () => {
+      // GIF89a signature: 47 49 46 38 39 61
+      const gifData = new Uint8Array([
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, // GIF89a signature
+        // ... rest of GIF data
+      ]);
+
+      const result = extractImagePayload(gifData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/gif');
+      expect(result?.bytes).toStrictEqual(gifData);
+    });
+
+    it('should not detect invalid GIF', () => {
+      // GIF signature with invalid version byte
+      const gifData = new Uint8Array([
+        0x47, 0x49, 0x46, 0x38, 0x30, 0x61, // GIF version with '0' instead of '7' or '9'
+        // ... rest of GIF data
+      ]);
+
+      const result = extractImagePayload(gifData);
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('WebP detection', () => {
+    it('should detect WebP image at offset 0', () => {
+      // WebP signature: RIFF....WEBP
+      const webpData = new Uint8Array([
+        0x52, 0x49, 0x46, 0x46, // "RIFF"
+        0x00, 0x00, 0x00, 0x00, // file size (placeholder)
+        0x57, 0x45, 0x42, 0x50, // "WEBP"
+        0x56, 0x50, 0x38, 0x20, // "VP8 "
+        // ... rest of WebP data
+      ]);
+
+      const result = extractImagePayload(webpData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/webp');
+      expect(result?.bytes).toStrictEqual(webpData);
+    });
+
+    it('should detect WebP image with offset', () => {
+      // WebP with some padding before the signature
+      const webpData = new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, // padding
+        0x52, 0x49, 0x46, 0x46, // "RIFF"
+        0x00, 0x00, 0x00, 0x00, // file size (placeholder)
+        0x57, 0x45, 0x42, 0x50, // "WEBP"
+        0x56, 0x50, 0x38, 0x20, // "VP8 "
+      ]);
+
+      const result = extractImagePayload(webpData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/webp');
+      expect(result?.bytes).toEqual(new Uint8Array(webpData.slice(4)));
+    });
+
+    it('should not detect RIFF without WEBP', () => {
+      // RIFF without WEBP signature (e.g., WAV file)
+      const riffData = new Uint8Array([
+        0x52, 0x49, 0x46, 0x46, // "RIFF"
+        0x00, 0x00, 0x00, 0x00, // file size
+        0x57, 0x41, 0x56, 0x45, // "WAVE" instead of "WEBP"
+      ]);
+
+      const result = extractImagePayload(riffData);
+      expect(result).toBeNull();
+    });
+
+    it('should handle WebP file with trailing zeros', () => {
+      // Actual WebP file structure (like the sample file)
+      const webpData = new Uint8Array([
+        0x52, 0x49, 0x46, 0x46, // "RIFF"
+        0x1a, 0x0f, 0x00, 0x00, // file size: 3874 bytes
+        0x57, 0x45, 0x42, 0x50, // "WEBP"
+        0x56, 0x50, 0x38, 0x20, // "VP8 "
+        0x0e, 0x00, 0x00, 0x00, // VP8 chunk length
+        // ... rest of data
+        0xde, 0x4f, 0x49, 0x64, // last bytes of actual data
+        0x00, 0x00, // trailing zeros (should not be trimmed by extractImagePayload)
+      ]);
+
+      const result = extractImagePayload(webpData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/webp');
+      // extractImagePayload should NOT trim trailing zeros
+      expect(result?.bytes.length).toBe(webpData.length);
+    });
+  });
+
+  describe('Edge cases', () => {
+    it('should return null for empty data', () => {
+      const result = extractImagePayload(new Uint8Array([]));
+      expect(result).toBeNull();
+    });
+
+    it('should return null for data smaller than 4 bytes', () => {
+      const result = extractImagePayload(new Uint8Array([0x00, 0x01, 0x02]));
+      expect(result).toBeNull();
+    });
+
+    it('should return null for unknown binary data', () => {
+      const unknownData = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+      const result = extractImagePayload(unknownData);
+      expect(result).toBeNull();
+    });
+
+    it('should detect GIF with offset within search range', () => {
+      // GIF at offset 8 (within the 16-byte search range)
+      const gifData = new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 8 bytes padding
+        0x47, 0x49, 0x46, 0x38, 0x37, 0x61, // GIF87a signature
+      ]);
+
+      const result = extractImagePayload(gifData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/gif');
+      expect(result?.bytes).toEqual(new Uint8Array(gifData.slice(8)));
+    });
+  });
+});

@@ -1,12 +1,29 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue';
+import { onBeforeUnmount, ref, useAttrs, watch } from 'vue';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
 import sampleFileUrl from '../assets/sample-files/test.png';
 import { useDemoRuntime } from '../demo-runtime';
 
+// Disable automatic attribute inheritance since we have multiple root nodes
+defineOptions({
+  inheritAttrs: false,
+});
+
 const runtime = useDemoRuntime();
+const attrs = useAttrs();
+
+const MAX_FILE_SIZE = 255 * 16; // 4080 bytes
+const TOAST_DURATION_MS = 5000;
+
+type ToastType = 'error' | 'warning' | 'success';
+
+interface Toast {
+  id: number;
+  message: string;
+  type: ToastType;
+}
 
 const inputText = ref('Hello Acoustic World!');
 const fftCanvas = ref<HTMLCanvasElement | null>(null);
@@ -14,6 +31,8 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const isTransmitting = ref(false);
 const senderStatus = ref('Idle');
 const isDragging = ref(false);
+const toasts = ref<Toast[]>([]);
+let toastIdCounter = 0;
 
 let senderWorker: Worker | null = null;
 let senderBackend: Comlink.Remote<MistcastBackend> | null = null;
@@ -23,6 +42,18 @@ let fftData: Float32Array<ArrayBuffer> | null = null;
 let fftRafId: number | null = null;
 
 let opQueue: Promise<void> = Promise.resolve();
+
+function validateFileSize(size: number): boolean {
+  return size <= MAX_FILE_SIZE;
+}
+
+function showToast(message: string, type: ToastType = 'error') {
+  const id = toastIdCounter++;
+  toasts.value.push({ id, message, type });
+  setTimeout(() => {
+    toasts.value = toasts.value.filter(t => t.id !== id);
+  }, TOAST_DURATION_MS);
+}
 
 function triggerFileSelect() {
   fileInput.value?.click();
@@ -38,6 +69,11 @@ async function handleFileSelect(event: Event) {
   const target = event.target as HTMLInputElement;
   const file = target.files?.[0];
   if (file) {
+    if (!validateFileSize(file.size)) {
+      showToast(`ファイルサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
+      target.value = '';
+      return;
+    }
     await startSendingFile(file);
   }
   // input要素の値をリセットして同じファイルを再度選択可能にする
@@ -63,6 +99,10 @@ async function handleDrop(event: DragEvent) {
   isDragging.value = false;
   const file = event.dataTransfer?.files?.[0];
   if (file) {
+    if (!validateFileSize(file.size)) {
+      showToast(`ファイルサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
+      return;
+    }
     await startSendingFile(file);
   }
 }
@@ -263,6 +303,10 @@ async function startSendingData(data: Uint8Array) {
 
 async function startSendingText() {
   const data = new TextEncoder().encode(inputText.value);
+  if (!validateFileSize(data.length)) {
+    showToast(`テキストサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
+    return;
+  }
   await startSendingData(data);
 }
 
@@ -294,12 +338,17 @@ watch(
 onBeforeUnmount(() => {
   void teardownSenderGraph();
 });
+
+defineExpose({
+  toasts,
+});
 </script>
 
 <template>
   <section
     class="panel sender-panel"
     :class="{ 'is-dragging': isDragging }"
+    v-bind="attrs"
     @dragenter="handleDragEnter"
     @dragleave="handleDragLeave"
     @dragover="handleDragOver"
@@ -315,7 +364,7 @@ onBeforeUnmount(() => {
       <template v-if="!isTransmitting">
         <button @click="startSendingText" class="btn btn-primary" :disabled="!runtime.coreReady.value">Send</button>
         <button @click="startSendingSampleImage" class="btn" :disabled="!runtime.coreReady.value">Send Sample Image</button>
-        <button @click="triggerFileSelect" class="btn" :disabled="!runtime.coreReady.value">Send File</button>
+        <button @click="triggerFileSelect" class="btn" :disabled="!runtime.coreReady.value">Send File (max 4KB)</button>
         <input type="file" ref="fileInput" style="display: none" @change="handleFileSelect" />
       </template>
       <button v-else @click="stopSending" class="btn btn-danger" :disabled="!runtime.coreReady.value">Stop</button>
@@ -325,4 +374,81 @@ onBeforeUnmount(() => {
       <canvas ref="fftCanvas" class="spectrum-canvas"></canvas>
     </div>
   </section>
+
+  <Teleport to="body">
+    <div class="toast-container">
+      <TransitionGroup name="toast">
+        <div v-for="toast in toasts" :key="toast.id" class="toast" :class="`toast-${toast.type}`">
+          {{ toast.message }}
+        </div>
+      </TransitionGroup>
+    </div>
+  </Teleport>
 </template>
+
+<style scoped>
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  pointer-events: auto;
+  max-width: 350px;
+  word-wrap: break-word;
+}
+
+.toast-error {
+  background-color: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.toast-warning {
+  background-color: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.toast-success {
+  background-color: #d1fae5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(100%);
+}
+
+.sender-panel {
+  transition: all 0.2s ease;
+}
+
+.sender-panel.is-dragging {
+  background-color: #f0f9ff;
+  border: 2px dashed #0f6bd7;
+  transform: scale(1.01);
+}
+</style>
