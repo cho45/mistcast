@@ -100,14 +100,6 @@ function safeDisconnect<T extends AudioNode>(node: T | null, destination?: Audio
   }
 }
 
-function trimTrailingZeros(data: Uint8Array): Uint8Array {
-  let end = data.length;
-  while (end > 0 && data[end - 1] === 0) {
-    end--;
-  }
-  return data.slice(0, end);
-}
-
 function downloadBinary() {
   if (!outputBinaryData.value) return;
   const blob = new Blob([outputBinaryData.value], { type: 'application/octet-stream' });
@@ -124,7 +116,7 @@ function setDecodedOutput(recovered: Uint8Array) {
 
   if (recovered.length === 0) return;
 
-  // 画像を先にチェック（trimTrailingZeros を適用せずに）
+  // 画像を先にチェック
   const image = extractImagePayload(recovered);
   if (image) {
     outputImageMime.value = image.mime;
@@ -134,13 +126,10 @@ function setDecodedOutput(recovered: Uint8Array) {
     return;
   }
 
-  // 画像でない場合のみ、末尾のゼロを削除してテキストとして処理
-  const trimmed = trimTrailingZeros(recovered);
-  if (trimmed.length === 0) return;
-
+  // テキストとして処理
   try {
     const decoder = new TextDecoder('utf-8', { fatal: true });
-    const text = decoder.decode(trimmed);
+    const text = decoder.decode(recovered);
     // null文字が含まれておらず、制御文字が少なければテキストとみなす
     if (!text.includes('\0')) {
       outputText.value = text;
@@ -150,8 +139,8 @@ function setDecodedOutput(recovered: Uint8Array) {
     // UTF-8として不正な場合はバイナリ扱い
   }
 
-  outputBinaryData.value = trimmed;
-  outputBinarySize.value = trimmed.length;
+  outputBinaryData.value = recovered;
+  outputBinarySize.value = recovered.length;
 }
 
 function pushRxLog(line: string) {

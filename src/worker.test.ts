@@ -43,7 +43,8 @@ vi.mock('../pkg/dsp', () => {
       last_rank_up_seq: 0,
       progress: 0.1
     }));
-    recovered_data = vi.fn(() => new Uint8Array([1, 2, 3]));
+    // サイズプレフィックスを含むデータを返す: [size: 2bytes][actual_data]
+    recovered_data = vi.fn(() => new Uint8Array([0, 3, 1, 2, 3]));
     reset = vi.fn();
   }
   return {
@@ -82,7 +83,8 @@ vi.mock('../pkg-simd/dsp', () => {
       last_rank_up_seq: 0,
       progress: 0.1
     }));
-    recovered_data = vi.fn(() => new Uint8Array([1, 2, 3]));
+    // サイズプレフィックスを含むデータを返す: [size: 2bytes][actual_data]
+    recovered_data = vi.fn(() => new Uint8Array([0, 3, 1, 2, 3]));
     reset = vi.fn();
   }
   return {
@@ -121,7 +123,7 @@ describe('MistcastBackend', () => {
     expect(mockPort.postMessage).toHaveBeenCalled();
   });
 
-  it('decodes samples and calls onPacket callback', async () => {
+  it('decodes samples and extracts actual data from size prefix', async () => {
     const { MistcastBackend } = await import('./worker');
     const backend = new MistcastBackend();
     const onPacket = vi.fn();
@@ -132,7 +134,18 @@ describe('MistcastBackend', () => {
 
     expect(hoisted.WasmDecoder).toHaveBeenCalledWith(48000);
     expect(result?.complete).toBe(true);
-    expect(onPacket).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
+
+    // recovered_data は [size: 2bytes][actual_data] の形式を返す
+    // モックでは [1, 2, 3] を返しているので、サイズプレフィックスを考慮すると:
+    // - 先頭2バイト: 0x00, 0x03 (size=3, big endian)
+    // - 実データ: [1, 2, 3]
+    // テストでは簡易的に [0, 3, 1, 2, 3] を返すようにモックを修正
+    const expectedSizePrefix = new Uint8Array([0, 3]); // size=3
+    const expectedData = new Uint8Array([1, 2, 3]);
+    const expectedWithPrefix = new Uint8Array([...expectedSizePrefix, ...expectedData]);
+
+    // onPacket にはサイズプレフィックスを除いた実際のデータが渡される
+    expect(onPacket).toHaveBeenCalledWith(expectedData);
     expect(onProgress).toHaveBeenCalled();
   });
 });

@@ -144,4 +144,157 @@ describe('Reproduction: 10/10 Verification', () => {
         expect(complete, "k=2 で systematic 全欠落でも完了すべき").toBe(true);
         expect(Math.max(...seenRanks), "rank=2 まで到達するはず").toBe(2);
     });
+
+    describe('Size prefix encoding/decoding', () => {
+        it('should encode and decode data with size prefix correctly', async () => {
+            const originalData = new Uint8Array([65, 66, 67, 68, 69]); // "ABCDE"
+            const sampleRate = 48000;
+
+            // エンコーダ側: サイズプレフィックスを追加
+            const sizeBuffer = new ArrayBuffer(2);
+            const sizeView = new DataView(sizeBuffer);
+            sizeView.setUint16(0, originalData.length, false); // ビッグエンディアン
+            const sizePrefix = new Uint8Array(sizeBuffer);
+
+            const dataWithSize = new Uint8Array(2 + originalData.length);
+            dataWithSize.set(sizePrefix, 0);
+            dataWithSize.set(originalData, 2);
+
+            // WASMエンコーダ/デコーダで処理
+            const encoder = new WasmEncoder(sampleRate);
+            encoder.set_data(dataWithSize);
+            const decoder = new WasmDecoder(sampleRate);
+            decoder.process_samples(new Float32Array(4096));
+
+            // パケットを処理
+            for (let i = 0; i < 20; i++) {
+                const frame = encoder.pull_frame();
+                if (!frame) break;
+                const signal = new Float32Array(frame.length + 4800);
+                signal.set(frame);
+                const progress = decoder.process_samples(signal);
+                if (progress.complete) break;
+            }
+
+            const recovered = decoder.recovered_data();
+            expect(recovered).toBeDefined();
+
+            // デコーダ側: サイズプレフィックスから元のサイズを読み取り
+            const recoveredSizeView = new DataView(recovered!.buffer, recovered!.byteOffset, 2);
+            const originalSize = recoveredSizeView.getUint16(0, false); // ビッグエンディアン
+
+            // サイズプレフィックスを除いた実際のデータを切り出し
+            const actualData = recovered!.slice(2, 2 + originalSize);
+
+            expect(originalSize).toBe(originalData.length);
+            expect(actualData).toEqual(originalData);
+        });
+
+        it('should correctly recover data with trailing zeros (WEBP-like)', async () => {
+            // WEBPファイルのような、末尾が 00 00 のデータ
+            const webpLikeData = new Uint8Array([
+                0x52, 0x49, 0x46, 0x46, // "RIFF"
+                0x1A, 0x0F, 0x00, 0x00, // filesize (little endian)
+                0x57, 0x45, 0x42, 0x50, // "WEBP"
+                0x00, 0x00, // 末尾のゼロ（重要）
+            ]);
+
+            const sampleRate = 48000;
+
+            // エンコーダ側: サイズプレフィックスを追加
+            const sizeBuffer = new ArrayBuffer(2);
+            const sizeView = new DataView(sizeBuffer);
+            sizeView.setUint16(0, webpLikeData.length, false);
+            const sizePrefix = new Uint8Array(sizeBuffer);
+
+            const dataWithSize = new Uint8Array(2 + webpLikeData.length);
+            dataWithSize.set(sizePrefix, 0);
+            dataWithSize.set(webpLikeData, 2);
+
+            // WASMエンコーダ/デコーダで処理
+            const encoder = new WasmEncoder(sampleRate);
+            encoder.set_data(dataWithSize);
+            const decoder = new WasmDecoder(sampleRate);
+            decoder.process_samples(new Float32Array(4096));
+
+            // パケットを処理
+            for (let i = 0; i < 20; i++) {
+                const frame = encoder.pull_frame();
+                if (!frame) break;
+                const signal = new Float32Array(frame.length + 4800);
+                signal.set(frame);
+                const progress = decoder.process_samples(signal);
+                if (progress.complete) break;
+            }
+
+            const recovered = decoder.recovered_data();
+            expect(recovered).toBeDefined();
+
+            // デコーダ側: サイズプレフィックスから元のサイズを読み取り
+            const recoveredSizeView = new DataView(recovered!.buffer, recovered!.byteOffset, 2);
+            const originalSize = recoveredSizeView.getUint16(0, false);
+
+            // サイズプレフィックスを除いた実際のデータを切り出し
+            const actualData = recovered!.slice(2, 2 + originalSize);
+
+            // 末尾の 00 00 が保持されていることを確認
+            expect(actualData.length).toBe(webpLikeData.length);
+            expect(actualData[actualData.length - 2]).toBe(0x00);
+            expect(actualData[actualData.length - 1]).toBe(0x00);
+            expect(actualData).toEqual(webpLikeData);
+        });
+
+        it('should handle various data sizes with size prefix', async () => {
+            const testCases = [
+                new Uint8Array([]), // 空データ
+                new Uint8Array([42]), // 1バイト
+                new Uint8Array([1, 2, 3, 4, 5]), // 5バイト
+                new Uint8Array(Array.from({ length: 100 }, (_, i) => i & 0xff)), // 100バイト
+                new Uint8Array(Array.from({ length: 255 }, (_, i) => i & 0xff)), // 255バイト（u16最大）
+            ];
+
+            for (const originalData of testCases) {
+                const sampleRate = 48000;
+
+                // エンコーダ側: サイズプレフィックスを追加
+                const sizeBuffer = new ArrayBuffer(2);
+                const sizeView = new DataView(sizeBuffer);
+                sizeView.setUint16(0, originalData.length, false);
+                const sizePrefix = new Uint8Array(sizeBuffer);
+
+                const dataWithSize = new Uint8Array(2 + originalData.length);
+                dataWithSize.set(sizePrefix, 0);
+                dataWithSize.set(originalData, 2);
+
+                // WASMエンコーダ/デコーダで処理
+                const encoder = new WasmEncoder(sampleRate);
+                encoder.set_data(dataWithSize);
+                const decoder = new WasmDecoder(sampleRate);
+                decoder.process_samples(new Float32Array(4096));
+
+                // パケットを処理
+                for (let i = 0; i < 50; i++) {
+                    const frame = encoder.pull_frame();
+                    if (!frame) break;
+                    const signal = new Float32Array(frame.length + 4800);
+                    signal.set(frame);
+                    const progress = decoder.process_samples(signal);
+                    if (progress.complete) break;
+                }
+
+                const recovered = decoder.recovered_data();
+                expect(recovered).toBeDefined();
+
+                // デコーダ側: サイズプレフィックスから元のサイズを読み取り
+                const recoveredSizeView = new DataView(recovered!.buffer, recovered!.byteOffset, 2);
+                const originalSize = recoveredSizeView.getUint16(0, false);
+
+                // サイズプレフィックスを除いた実際のデータを切り出し
+                const actualData = recovered!.slice(2, 2 + originalSize);
+
+                expect(originalSize).toBe(originalData.length);
+                expect(actualData).toEqual(originalData);
+            }
+        });
+    });
 });

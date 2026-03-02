@@ -82,11 +82,19 @@ async function handleFileSelect(event: Event) {
 
 function handleDragEnter(event: DragEvent) {
   event.preventDefault();
+  // 子要素からの dragenter を無視
+  if (event.target !== event.currentTarget) return;
   isDragging.value = true;
 }
 
 function handleDragLeave(event: DragEvent) {
   event.preventDefault();
+  // 子要素に入っただけなら無視（本当に要素から出たかチェック）
+  const target = event.currentTarget as HTMLElement;
+  if (!target) return;
+  const relatedTarget = event.relatedTarget as HTMLElement | null;
+  // relatedTarget が null（ウィンドウ外に出た）または、現在の要素の子孫でない場合のみ true
+  if (relatedTarget && target.contains(relatedTarget)) return;
   isDragging.value = false;
 }
 
@@ -446,7 +454,7 @@ defineExpose({
   transition: all 0.2s ease;
 }
 
-.sender-panel.is-dragging {
+section.sender-panel.is-dragging {
   background-color: #f0f9ff;
   border: 2px dashed #0f6bd7;
   transform: scale(1.01);

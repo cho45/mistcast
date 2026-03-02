@@ -201,7 +201,7 @@ export class MistcastBackend {
   async startEncoder(data: Uint8Array, sampleRate: number) {
     await this.init();
     const bindings = this.requireBindings();
-    
+
     // 前回の送信状態をリセット
     this.isEncoding = false;
     this.audioOutPort?.postMessage({ type: "reset" });
@@ -209,8 +209,20 @@ export class MistcastBackend {
     if (!this.encoder) {
         this.encoder = new bindings.WasmEncoder(sampleRate);
     }
-    this.encoder.set_data(data);
-    console.log(`[Worker] Encoder started (size=${data.length}, rate=${sampleRate})`);
+
+    // 元のデータの先頭にサイズ情報（2バイト、ビッグエンディアン）を埋め込む
+    const sizeBuffer = new ArrayBuffer(2);
+    const sizeView = new DataView(sizeBuffer);
+    sizeView.setUint16(0, data.length, false); // ビッグエンディアン
+    const sizePrefix = new Uint8Array(sizeBuffer);
+
+    // サイズ + 元のデータを結合
+    const dataWithSize = new Uint8Array(2 + data.length);
+    dataWithSize.set(sizePrefix, 0);
+    dataWithSize.set(data, 2);
+
+    this.encoder.set_data(dataWithSize);
+    console.log(`[Worker] Encoder started (size=${data.length}, withPrefix=${dataWithSize.length}, rate=${sampleRate})`);
 
     const dummyFrame = this.encoder.pull_frame();
     if (!dummyFrame) return;
@@ -294,9 +306,20 @@ export class MistcastBackend {
 
     if (progress.complete) {
       console.log("[Worker] Decode complete!");
-      const data = this.decoder.recovered_data();
-      if (data && this.onPacket) {
-        this.onPacket(data);
+      const recovered = this.decoder.recovered_data();
+      if (recovered && this.onPacket) {
+        // 先頭2バイトから元のサイズを読み取る
+        if (recovered.length < 2) {
+          console.error("[Worker] Recovered data too small to contain size prefix");
+          return;
+        }
+        const sizeView = new DataView(recovered.buffer, recovered.byteOffset, 2);
+        const originalSize = sizeView.getUint16(0, false); // ビッグエンディアン
+
+        // サイズプレフィックスを除いた実際のデータを切り出す
+        const actualData = recovered.slice(2, 2 + originalSize);
+        console.log(`[Worker] Extracted actual data: size=${originalSize}, recovered=${recovered.length}`);
+        this.onPacket(actualData);
       }
       this.decoder = null;
     }
