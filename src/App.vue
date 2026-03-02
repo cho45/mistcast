@@ -521,6 +521,7 @@ code {
   border: 1px solid #cfdae6;
   border-radius: 8px;
   background: #fff;
+  image-rendering: pixelated;
 }
 
 .image-meta {

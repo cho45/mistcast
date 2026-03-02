@@ -3,7 +3,7 @@ import { onBeforeUnmount, ref, watch } from 'vue';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
-import sampleWebpUrl from '../assets/sample-files/webp.webp';
+import sampleFileUrl from '../assets/sample-files/test.png';
 import { useDemoRuntime } from '../demo-runtime';
 
 const runtime = useDemoRuntime();
@@ -140,8 +140,8 @@ function startSenderSpectrum(audioContext: AudioContext) {
   fftRafId = window.requestAnimationFrame(() => drawSenderSpectrumFrame(audioContext));
 }
 
-async function loadSampleWebp(): Promise<Uint8Array> {
-  const res = await fetch(sampleWebpUrl);
+async function loadSampleFile(): Promise<Uint8Array> {
+  const res = await fetch(sampleFileUrl);
   const buf = await res.arrayBuffer();
   return new Uint8Array(buf);
 }
@@ -222,7 +222,7 @@ async function startSendingText() {
 }
 
 async function startSendingSampleImage() {
-  const data = await loadSampleWebp();
+  const data = await loadSampleFile();
   await startSendingData(data);
 }
 
