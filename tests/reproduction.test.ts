@@ -68,10 +68,16 @@ describe('Reproduction: 10/10 Verification', () => {
             if (!frame) break;
 
             // systematic seq 5..9 に相当するフレームを意図的にドロップ。
-            if (i >= 5 && i <= 9) continue;
+            if (i >= 5 && i <= 9) {
+                const silence = encoder.modulate_silence(4800);
+                decoder.process_samples(silence);
+                continue;
+            }
 
-            const signal = new Float32Array(frame.length + 4800);
+            const silence = encoder.modulate_silence(4800);
+            const signal = new Float32Array(frame.length + silence.length);
             signal.set(frame);
+            signal.set(silence, frame.length);
             const progress = decoder.process_samples(signal);
             seenRanks.push(progress.rank_packets);
             console.log(
@@ -82,6 +88,9 @@ describe('Reproduction: 10/10 Verification', () => {
                 break;
             }
         }
+
+        const tails = encoder.flush();
+        decoder.process_samples(tails);
 
         // バースト化で rank が複数ずつ進むことがあるため、完了までの反復数で評価する。
         expect(seenRanks.length, "回復までの反復が長すぎる").toBeLessThanOrEqual(6);

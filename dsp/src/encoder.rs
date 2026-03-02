@@ -87,6 +87,18 @@ impl Encoder {
         self.modulator.encode_frame(&burst_bits)
     }
 
+    pub fn flush(&mut self) -> Vec<f32> {
+        self.modulator.flush()
+    }
+
+    pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        self.modulator.modulate_silence(samples)
+    }
+
+    pub fn reset(&mut self) {
+        self.modulator.reset();
+    }
+
     pub fn encode_stream<'a>(&'a mut self, data: &'a [u8]) -> EncoderStream<'a> {
         let params = FountainParams::new(self.config.fountain_k, PAYLOAD_SIZE);
         let fountain_encoder = FountainEncoder::new(data, params);

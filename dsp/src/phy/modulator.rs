@@ -7,6 +7,7 @@
 //! 4. 帯域シフト: キャリアfcで実信号へアップコンバート
 
 use crate::common::msequence::MSequence;
+use crate::common::nco::Nco;
 use crate::common::rrc_filter::RrcFilter;
 use crate::params::{MODULATION, SYNC_WORD, SYNC_WORD_BITS};
 use crate::{DifferentialModulation, DspConfig};
@@ -49,8 +50,8 @@ pub struct Modulator {
     rrc_q: RrcFilter,
     /// 差動符号化の累積位相 (0,1,2,3) = (0,90,180,270度)
     prev_phase: u8,
-    /// 現在のサンプルインデックス (キャリア位相計算用)
-    sample_idx: usize,
+    /// キャリア波生成用NCO
+    nco: Nco,
 }
 
 impl Modulator {
@@ -58,13 +59,14 @@ impl Modulator {
     pub fn new(config: DspConfig) -> Self {
         let rrc_i = RrcFilter::from_config(&config);
         let rrc_q = RrcFilter::from_config(&config);
+        let nco = Nco::new(config.carrier_freq, config.sample_rate);
         Modulator {
             mseq: MSequence::new(config.mseq_order),
             rrc_i,
             rrc_q,
             config,
             prev_phase: 0,
-            sample_idx: 0,
+            nco,
         }
     }
 
@@ -162,9 +164,6 @@ impl Modulator {
     fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<f32> {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         let spc = self.config.samples_per_chip();
-        let two_pi = 2.0 * std::f32::consts::PI;
-        let fs = self.config.sample_rate;
-        let fc = self.config.carrier_freq;
         let mut out = Vec::with_capacity(chips_i.len() * spc);
 
         for (&ci, &cq) in chips_i.iter().zip(chips_q.iter()) {
@@ -173,21 +172,30 @@ impl Modulator {
                 let q_imp = if k == 0 { cq } else { 0.0 };
                 let i_f = self.rrc_i.process(i_imp);
                 let q_f = self.rrc_q.process(q_imp);
-                let t = self.sample_idx as f32 / fs;
-                let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
-                out.push(i_f * cos_v - q_f * sin_v);
-                self.sample_idx += 1;
+                let lo = self.nco.step();
+                out.push(i_f * lo.re - q_f * lo.im);
             }
         }
 
-        let delay = self.rrc_i.delay().max(self.rrc_q.delay());
-        for _ in 0..delay {
+        out
+    }
+
+    /// RRCフィルタに残っている遅延分のサンプルをゼロで押し出して出力する
+    pub fn flush(&mut self) -> Vec<f32> {
+        self.modulate_silence(self.rrc_i.delay().max(self.rrc_q.delay()))
+    }
+
+    /// 指定されたサンプル数分だけ無音 (0.0) を入力して Modulator を進める
+    ///
+    /// これにより、無音期間中も NCO が回転し、RRC フィルタのテールが自然に出力される。
+    pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(samples);
+
+        for _ in 0..samples {
             let i_f = self.rrc_i.process(0.0);
             let q_f = self.rrc_q.process(0.0);
-            let t = self.sample_idx as f32 / fs;
-            let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
-            out.push(i_f * cos_v - q_f * sin_v);
-            self.sample_idx += 1;
+            let lo = self.nco.step();
+            out.push(i_f * lo.re - q_f * lo.im);
         }
 
         out
@@ -195,7 +203,7 @@ impl Modulator {
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
-        self.reset();
+        self.prev_phase = 0;
         let sf = self.config.spread_factor();
         let preamble_repeat = self.config.preamble_repeat;
 
@@ -246,7 +254,7 @@ impl Modulator {
     /// 変調器の状態をリセット
     pub fn reset(&mut self) {
         self.prev_phase = 0;
-        self.sample_idx = 0;
+        self.nco.reset();
         self.mseq.reset();
         self.rrc_i.reset();
         self.rrc_q.reset();
@@ -303,8 +311,7 @@ mod tests {
         let preamble = mod_.generate_preamble();
         let config = DspConfig::default_48k();
         let expected_samples =
-            config.spread_factor() * config.preamble_repeat * config.samples_per_chip()
-                + mod_.rrc_i.delay();
+            config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
         assert_eq!(preamble.len(), expected_samples);
     }
 
@@ -317,6 +324,36 @@ mod tests {
         assert!(samples.iter().all(|&s| s.is_finite()));
     }
 
+    #[test]
+    fn test_carrier_phase_precision_loss() {
+        let mut mod_ = make_modulator();
+        let bits = vec![0xAA; 10]; // Short payload
+
+        // Generate normal frame
+        let frame1 = mod_.encode_frame(&bits);
+
+        // Fast forward NCO to simulate 10 minutes of audio running
+        // 48000 samples/sec * 600 sec = 28,800,000 samples
+        for _ in 0..28_800_000 {
+            mod_.nco.step();
+        }
+
+        // Generate frame after a long time
+        let frame2 = mod_.encode_frame(&bits);
+        
+        // We expect the amplitude envelope to be essentially the same 
+        // (no high frequency distortion/attenuation from f32 precision loss)
+        
+        let rms1 = (frame1.iter().map(|&x| x*x).sum::<f32>() / frame1.len() as f32).sqrt();
+        let rms2 = (frame2.iter().map(|&x| x*x).sum::<f32>() / frame2.len() as f32).sqrt();
+        
+        // RMS should not change more than 1%
+        assert!(
+            (rms1 - rms2).abs() < rms1 * 0.01,
+            "Carrier phase precision loss detected! rms1: {}, rms2: {}", rms1, rms2
+        );
+    }
+
     /// 変調出力の長さ確認
     #[test]
     fn test_modulate_length() {
@@ -325,8 +362,7 @@ mod tests {
         let bits = vec![0u8; 8];
         let samples = mod_.modulate(&bits);
         let expected =
-            symbols_for_bits(bits.len()) * config.spread_factor() * config.samples_per_chip()
-                + mod_.rrc_i.delay();
+            symbols_for_bits(bits.len()) * config.spread_factor() * config.samples_per_chip();
         assert_eq!(samples.len(), expected);
     }
 
@@ -359,6 +395,32 @@ mod tests {
         let samples = mod_.modulate(&bits);
         assert!(!samples.is_empty());
         assert!(samples.iter().all(|&s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_gapless_continuity() {
+        let mut mod_ = make_modulator();
+        let bits = vec![0x55; 4];
+        
+        // 1回で2フレーム分のビットをまとめて変調
+        let mut bits2 = bits.clone();
+        bits2.extend_from_slice(&bits);
+        let samples_all = mod_.modulate(&bits2);
+        
+        mod_.reset();
+        
+        // 分割して変調
+        let samples_part1 = mod_.modulate(&bits);
+        let samples_part2 = mod_.modulate(&bits);
+        
+        let mut samples_combined = samples_part1;
+        samples_combined.extend_from_slice(&samples_part2);
+        
+        assert_eq!(samples_all.len(), samples_combined.len());
+        // 浮動小数点の誤差を考慮して比較
+        for (&a, &b) in samples_all.iter().zip(samples_combined.iter()) {
+            assert!((a - b).abs() < 1e-6f32, "a: {}, b: {}", a, b);
+        }
     }
 
     /// 差動変調とDSSS拡散の数学的正しさを検証する
@@ -414,7 +476,9 @@ mod tests {
         let mut mod_ = make_modulator();
         let bits = vec![1u8, 0, 1, 1, 0, 1, 0, 0, 1];
         let config = mod_.config().clone();
-        let frame = mod_.encode_frame(&bits);
+        let mut frame = mod_.encode_frame(&bits);
+        // RRCフィルタの遅延を吸収するためのパディングを追加
+        frame.extend(mod_.flush());
 
         let fs = config.sample_rate;
         let fc = config.carrier_freq;

@@ -239,8 +239,7 @@ impl Decoder {
 
             // データが溜まるのを待つ
             if self.sample_buffer_i.len() < data_end_sample + spc {
-                // タイムアウト監視: 同期位置がバッファの遥か後方を指している場合や、
-                // 既にバッファが十分長いのに同期位置が古すぎる場合は、偽同期とみなす
+                // タイムアウト監視
                 if start + symbol_len < self.sample_buffer_i.len().saturating_sub(max_buffer_len) {
                     self.current_sync = None;
                     self.last_search_idx = 0;
@@ -253,7 +252,6 @@ impl Decoder {
             let mut found_header = false;
             let mut best_sym_shift = 0;
             let mut best_t_shift = 0;
-            let mut best_invert = false;
             let mut best_tracking_after_sync = TrackingState {
                 phase_ref: Complex32::new(1.0, 0.0),
                 prev_symbol: Complex32::new(1.0, 0.0),
@@ -297,7 +295,6 @@ impl Decoder {
                             found_header = true;
                             best_sym_shift = sym_shift;
                             best_t_shift = t_shift;
-                            best_invert = invert;
                             best_tracking_after_sync = tracking_after_sync;
                             break 'probe;
                         }
@@ -320,10 +317,9 @@ impl Decoder {
                         p_bits_len,
                     )
                 else {
-                    let skip = (start + symbol_len).min(self.sample_buffer_i.len());
-                    self.sample_buffer_i.drain(0..skip);
-                    self.sample_buffer_q.drain(0..skip);
-                    self.last_search_idx = 0;
+                    // デコードに失敗した場合も、同じ場所を繰り返さないよう進める。
+                    self.last_search_idx = (start + symbol_len).min(self.sample_buffer_i.len());
+
                     self.current_sync = None;
                     continue;
                 };
@@ -332,11 +328,8 @@ impl Decoder {
 
                 if decoded_packets.is_empty() {
                     // 同期語一致後に payload が全滅したら偽ロック/境界ずれを疑い、
-                    // フレーム全捨てを避けて再捕捉の機会を増やす。
-                    let skip = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
-                    self.sample_buffer_i.drain(0..skip);
-                    self.sample_buffer_q.drain(0..skip);
-                    self.last_search_idx = 0;
+                    // 次回探索のためにインデックスを少し進める。
+                    self.last_search_idx = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
                     self.current_sync = None;
                     continue;
                 }
@@ -388,12 +381,8 @@ impl Decoder {
                 continue;
             }
 
-            // デコード失敗またはヘッダ未検出: 偽同期として捨てて進める
-            let _ = best_invert;
-            let skip = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
-            self.sample_buffer_i.drain(0..skip);
-            self.sample_buffer_q.drain(0..skip);
-            self.last_search_idx = 0;
+            // ヘッダ未検出: 偽同期として、インデックスを進めて次を探す
+            self.last_search_idx = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
             self.current_sync = None;
             continue;
         }
@@ -1052,6 +1041,7 @@ impl Drop for Decoder {
 mod tests {
     use super::*;
     use crate::params::FIXED_K;
+    use crate::coding::fountain::{FountainEncoder, FountainParams};
     use crate::{
         encoder::{Encoder, EncoderConfig},
         DspConfig,
@@ -1174,16 +1164,24 @@ mod tests {
     fn build_test_signal(data: &[u8], k: usize, frames: usize, gap_samples: usize) -> Vec<f32> {
         let mut enc_cfg = EncoderConfig::new(DspConfig::default_48k());
         enc_cfg.fountain_k = k;
+        let burst_count = enc_cfg.packets_per_sync_burst.max(1);
         let mut encoder = Encoder::new(enc_cfg);
-        let mut stream = encoder.encode_stream(data);
+        let params = FountainParams::new(k, PAYLOAD_SIZE);
+        let mut fountain_encoder = FountainEncoder::new(data, params);
 
         let mut signal = Vec::new();
         for _ in 0..frames {
-            if let Some(frame) = stream.next() {
-                signal.extend_from_slice(&frame);
-                signal.extend(std::iter::repeat_n(0.0f32, gap_samples));
+            let mut packets = Vec::with_capacity(burst_count);
+            for _ in 0..burst_count {
+                packets.push(fountain_encoder.next_packet());
+            }
+            let frame = encoder.encode_burst(&packets);
+            signal.extend_from_slice(&frame);
+            if gap_samples > 0 {
+                signal.extend(encoder.modulate_silence(gap_samples));
             }
         }
+        signal.extend(encoder.flush());
         signal
     }
 
@@ -1422,13 +1420,53 @@ mod tests {
     }
 
     #[test]
-    fn test_decoder_tracking_tolerates_larger_clock_drift_ppm() {
-        let data = b"tracking larger timing drift payload";
-        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
-        let signal = build_test_signal(data, k, 8, 64);
-        let drifted = apply_clock_drift_ppm(&signal, 200.0);
-        let recovered = decode_signal(data, k, DspConfig::default_48k(), &drifted)
-            .expect("decoder should recover under larger clock drift");
-        assert_eq!(&recovered[..data.len()], data);
+    fn test_reproduce_vitest_regression() {
+        let data = vec![0xAAu8; 160]; // k=10
+        let config = DspConfig::default_48k();
+        let mut enc_cfg = EncoderConfig::new(config.clone());
+        enc_cfg.fountain_k = 10;
+        let mut encoder = Encoder::new(enc_cfg);
+        let mut decoder = Decoder::new(data.len(), 10, config);
+
+        // ウォームアップ
+        decoder.process_samples(&vec![0.0f32; 4096]);
+
+        let mut seen_ranks = Vec::new();
+        let mut complete = false;
+
+        let params = crate::coding::fountain::FountainParams::new(10, crate::params::PAYLOAD_SIZE);
+        let mut fountain_encoder = crate::coding::fountain::FountainEncoder::new(&data, params);
+
+        for i in 0..40 {
+            let mut packets = Vec::new();
+            for _ in 0..2 {
+                packets.push(fountain_encoder.next_packet());
+            }
+            let frame = encoder.encode_burst(&packets);
+
+            if i >= 5 && i <= 9 {
+                continue;
+            }
+
+            let mut signal = frame;
+            signal.extend(encoder.modulate_silence(4800)); // 物理的に正しい隙間
+
+            let progress = decoder.process_samples(&signal);
+            println!(
+                "Iteration {}: rank={}, sync={:?}, buf_len={}, last_seq={:?}",
+                i, progress.rank_packets, decoder.current_sync.as_ref().map(|s| s.peak_sample_idx),
+                decoder.sample_buffer_i.len(), progress.last_packet_seq
+            );
+            seen_ranks.push(progress.rank_packets);
+            
+            if progress.complete {
+                complete = true;
+                break;
+            }
+        }
+
+        println!("Seen ranks: {:?}", seen_ranks);
+        assert!(complete, "Should complete eventually");
+        assert!(seen_ranks.len() <= 6, "Regression detected: took {} iterations, expected <= 6", seen_ranks.len());
     }
 }

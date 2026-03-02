@@ -188,4 +188,14 @@ impl WasmEncoder {
         }
         Some(self.inner.encode_burst(&packets))
     }
+    pub fn flush(&mut self) -> Vec<f32> {
+        self.inner.flush()
+    }
+    pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        self.inner.modulate_silence(samples)
+    }
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.fountain_encoder = None;
+    }
 }
