@@ -584,7 +584,9 @@ mod tests {
 
         let mut best_phase = 0usize;
         let mut best_mag = -1.0f32;
-        for phase in 0..spc {
+        // リサンプラの遅延等により位相が数チップ分ずれる可能性があるため、
+        // 1シンボル分まるごと探索してピーク位置（シンボルの境界）を特定する。
+        for phase in 0..sym_len {
             let (ci, cq) = correlate_symbol(0, phase, &i_ch, &q_ch);
             let mag = ci * ci + cq * cq;
             if mag > best_mag {

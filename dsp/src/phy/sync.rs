@@ -415,12 +415,13 @@ mod tests {
         let find_ground_truth = |i: &[f32], q: &[f32]| {
             let mut best_score = -1.0f32;
             let mut best_idx = 0;
-            let required_len = sym_len * (repeat + 1);
+            let unified_len = detector.sync_symbols.len();
+            let required_len = sym_len * unified_len;
             if i.len() < required_len {
                 return (0.0, 0);
             }
             for n in 0..=(i.len() - required_len) {
-                let (score, _) = detector.score_candidate(i, q, n, repeat, sym_len);
+                let (score, _) = detector.score_candidate(i, q, n, unified_len, sym_len);
                 if score > best_score {
                     best_score = score;
                     best_idx = n;
@@ -439,7 +440,8 @@ mod tests {
             let sync = res.expect("Should find strong peak");
             assert!(sync.score > detector.threshold_fine);
             let detected_idx = sync.peak_sample_idx - (sym_len * repeat);
-            assert!((detected_idx as i32 - gt_idx as i32).abs() <= 2);
+            // Rc=8000 (spc=6) ではピークが平坦になりやすいため、spc/2 程度の誤差を許容する
+            assert!((detected_idx as i32 - gt_idx as i32).abs() <= (detector.spc / 2) as i32);
         }
 
         // シナリオ2: ランダムノイズのみの場合
@@ -484,7 +486,7 @@ mod tests {
             let detected_idx = sync.peak_sample_idx - (sym_len * repeat);
 
             // First Peak Match は後方の強ピークを待たず、前方の弱ピークを返すのが正しい。
-            assert!((detected_idx as i32 - weak_gt_idx as i32).abs() <= 2);
+            assert!((detected_idx as i32 - weak_gt_idx as i32).abs() <= (detector.spc / 2) as i32);
         }
     }
 

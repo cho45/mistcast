@@ -29,13 +29,13 @@ pub mod params {
     use super::DifferentialModulation;
 
     pub const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
-    pub const CARRIER_FREQ: f32 = 12000.0;
+    pub const CARRIER_FREQ: f32 = 15000.0;
     pub const MSEQ_ORDER: usize = 4;
     pub const SPREAD_FACTOR: usize = 15;
     pub const RRC_ALPHA: f32 = 0.30;
-    pub const CHIP_RATE: f32 = 12000.0;
-    pub const PREAMBLE_REPEAT: usize = 4;
-    pub const SYNC_WORD_BITS: usize = 32;
+    pub const CHIP_RATE: f32 = 8000.0;
+    pub const PREAMBLE_REPEAT: usize = 2;
+    pub const SYNC_WORD_BITS: usize = 16;
     pub const SYNC_WORD: u32 = 0xDEAD_BEEF;
     pub const PACKETS_PER_SYNC_BURST: usize = 2;
     pub const PAYLOAD_SIZE: usize = 16;
