@@ -42,6 +42,10 @@ pub mod params {
     pub const FIXED_K: usize = 10;
     pub const FOUNTAIN_OVERHEAD: f32 = 0.1;
     pub const MODULATION: DifferentialModulation = DifferentialModulation::Dqpsk;
+
+    /// 内部処理で使用するチップあたりのサンプル数 (Samples Per Chip)
+    /// 奇数にすることでチップ中央のサンプルを正確に取得可能にする。
+    pub const INTERNAL_SPC: usize = 3;
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +66,22 @@ impl DspConfig {
             carrier_freq: params::CARRIER_FREQ,
             mseq_order: params::MSEQ_ORDER,
             chip_rate: params::CHIP_RATE,
+            rrc_alpha: params::RRC_ALPHA,
+            rrc_taps_per_symbol: 16,
+            preamble_repeat: params::PREAMBLE_REPEAT,
+        }
+    }
+
+    /// 内部処理用の設定を生成する。
+    /// サンプルレートは chip_rate * INTERNAL_SPC に固定され、
+    /// ベースバンド処理を前提とするため carrier_freq は 0 となる。
+    pub fn new_for_processing(chip_rate: f32) -> Self {
+        let sample_rate = chip_rate * (params::INTERNAL_SPC as f32);
+        DspConfig {
+            sample_rate,
+            carrier_freq: 0.0, // ベースバンド
+            mseq_order: params::MSEQ_ORDER,
+            chip_rate,
             rrc_alpha: params::RRC_ALPHA,
             rrc_taps_per_symbol: 16,
             preamble_repeat: params::PREAMBLE_REPEAT,

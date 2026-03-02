@@ -172,14 +172,13 @@ impl SyncDetector {
                                 // 登り坂: 暫定ベストを更新
                                 provisional_best = Some((
                                     SyncResult {
-                                        // 内部のサンプリングオフセット (spc/2) を加えて、
-                                        // 物理的なピーク位置（チップ中央）を指すように調整
                                         peak_sample_idx: fine_best_idx + preamble_len + (spc / 2),
                                         peak_iq: last_sym_iq,
                                         score: fine_best_score,
                                     },
                                     fine_best_idx,
                                 ));
+
                             } else {
                                 // 下り坂: 最初の山の頂上を確定して早期リターン (First Peak Match)
                                 let (res, idx) = provisional_best.unwrap();
@@ -187,8 +186,8 @@ impl SyncDetector {
                             }
                         } else {
                             // 最初の THRESHOLD_FINE 超え
-                            provisional_best = Some((
-                                SyncResult {
+                        provisional_best = Some((
+                                        SyncResult {
                                     peak_sample_idx: fine_best_idx + preamble_len + (spc / 2),
                                     peak_iq: last_sym_iq,
                                     score: fine_best_score,

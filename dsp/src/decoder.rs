@@ -7,7 +7,8 @@ use crate::{
     coding::fountain::{FountainDecoder, FountainPacket, FountainParams, ReceiveOutcome},
     coding::interleaver::BlockInterleaver,
     common::nco::Nco,
-    common::rrc_filter::DecimatingRrcFilter,
+    common::resample::Resampler,
+    common::rrc_filter::RrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
     params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE, SYNC_WORD_BITS},
     phy::sync::{SyncDetector, SyncResult},
@@ -60,8 +61,10 @@ pub struct DecodeProgress {
 pub struct Decoder {
     config: DspConfig,
     proc_config: DspConfig,
-    rrc_decim_i: DecimatingRrcFilter,
-    rrc_decim_q: DecimatingRrcFilter,
+    resampler_i: Resampler,
+    resampler_q: Resampler,
+    rrc_filter_i: RrcFilter,
+    rrc_filter_q: RrcFilter,
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
     sync_detector: SyncDetector,
@@ -70,7 +73,6 @@ pub struct Decoder {
     recovered_data: Option<Vec<u8>>,
     pub agc_peak_fast: f32,
     pub agc_peak_slow: f32,
-    decimation_factor: usize,
     packets_per_sync_burst: usize,
     lo_nco: Nco,
 
@@ -115,8 +117,7 @@ struct SymbolSoftDecision {
 
 impl Decoder {
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
-        let decimation_factor = choose_decimation_factor(&dsp_config);
-        let proc_config = build_proc_config(&dsp_config, decimation_factor);
+        let proc_config = DspConfig::new_for_processing(dsp_config.chip_rate);
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         let raw_bits = PACKET_BYTES * 8 + 6;
         let fec_bits = raw_bits * 2;
@@ -124,9 +125,25 @@ impl Decoder {
         let il_cols = fec_bits.div_ceil(16);
         let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
 
+        // リサンプラのカットオフ設定:
+        // RRCのロールオフを含めた帯域 Rc*(1+alpha)/2 を保護しつつ、
+        // エイリアシングを防ぐために proc_config.sample_rate / 2 以下に設定する。
+        let rrc_bw = dsp_config.chip_rate * (1.0 + dsp_config.rrc_alpha) * 0.5;
+        let cutoff = Some(rrc_bw);
+
         Decoder {
-            rrc_decim_i: DecimatingRrcFilter::from_config(&dsp_config, decimation_factor),
-            rrc_decim_q: DecimatingRrcFilter::from_config(&dsp_config, decimation_factor),
+            resampler_i: Resampler::new_with_cutoff(
+                dsp_config.sample_rate as u32,
+                proc_config.sample_rate as u32,
+                cutoff,
+            ),
+            resampler_q: Resampler::new_with_cutoff(
+                dsp_config.sample_rate as u32,
+                proc_config.sample_rate as u32,
+                cutoff,
+            ),
+            rrc_filter_i: RrcFilter::from_config(&proc_config),
+            rrc_filter_q: RrcFilter::from_config(&proc_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
             sync_detector: SyncDetector::new(proc_config.clone()),
@@ -137,7 +154,6 @@ impl Decoder {
             proc_config,
             agc_peak_fast: 0.5,
             agc_peak_slow: 0.5,
-            decimation_factor,
             packets_per_sync_burst: PACKETS_PER_SYNC_BURST,
             lo_nco,
             last_search_idx: 0,
@@ -163,19 +179,28 @@ impl Decoder {
 
         let spc = self.proc_config.samples_per_chip();
         let sf = self.config.spread_factor();
-        let max_buffer_len = (100_000 / self.decimation_factor.max(1)).max(1);
-        let drain_len = (50_000 / self.decimation_factor.max(1)).max(1);
+        // 処理レート基準でバッファ制限を計算
+        let max_buffer_len = 100_000;
+        let drain_len = 50_000;
 
+        // 1. 高レート混合 (at fs_in)
         let mut i_mixed = Vec::with_capacity(samples.len());
         let mut q_mixed = Vec::with_capacity(samples.len());
         self.mix_real_to_iq(samples, &mut i_mixed, &mut q_mixed);
 
-        let mut i_decimated = Vec::new();
-        let mut q_decimated = Vec::new();
-        self.rrc_decim_i.process_block(&i_mixed, &mut i_decimated);
-        self.rrc_decim_q.process_block(&q_mixed, &mut q_decimated);
-        self.sample_buffer_i.extend_from_slice(&i_decimated);
-        self.sample_buffer_q.extend_from_slice(&q_decimated);
+        // 2. ベースバンド・リサンプリング (fs_in -> fs_proc)
+        let mut i_resampled = Vec::new();
+        let mut q_resampled = Vec::new();
+        self.resampler_i.process(&i_mixed, &mut i_resampled);
+        self.resampler_q.process(&q_mixed, &mut q_resampled);
+
+        // 3. マッチドフィルタリング (at fs_proc)
+        let i_filtered = self.rrc_filter_i.process_block(&i_resampled);
+        let q_filtered = self.rrc_filter_q.process_block(&q_resampled);
+
+        // 4. 処理用バッファへ追加
+        self.sample_buffer_i.extend_from_slice(&i_filtered);
+        self.sample_buffer_q.extend_from_slice(&q_filtered);
 
         let sync_bits_len = SYNC_WORD_BITS;
         let sync_symbol_len = sync_bits_len;
@@ -361,8 +386,13 @@ impl Decoder {
                 + (chip_idx * spc + (spc / 2)) as f32
                 + timing_offset
                 + sample_shift;
-            let si = sample_at_fractional(&self.sample_buffer_i, p)?;
-            let sq = sample_at_fractional(&self.sample_buffer_q, p)?;
+            
+            let i_idx = p.round() as i32;
+            if i_idx < 0 || i_idx >= self.sample_buffer_i.len() as i32 {
+                return None;
+            }
+            let si = self.sample_buffer_i[i_idx as usize];
+            let sq = self.sample_buffer_q[i_idx as usize];
             sum_i += si * pn_val;
             sum_q += sq * pn_val;
         }
@@ -666,8 +696,18 @@ impl Decoder {
 
     pub fn reset(&mut self) {
         self.interleaver.reset();
-        self.rrc_decim_i.reset();
-        self.rrc_decim_q.reset();
+        self.resampler_i.reconfigure(
+            self.config.sample_rate as u32,
+            self.proc_config.sample_rate as u32,
+            Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
+        );
+        self.resampler_q.reconfigure(
+            self.config.sample_rate as u32,
+            self.proc_config.sample_rate as u32,
+            Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
+        );
+        self.rrc_filter_i.reset();
+        self.rrc_filter_q.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
         self.lo_nco.reset();
@@ -692,29 +732,6 @@ impl Decoder {
 #[inline]
 fn timing_error_from_early_late(early_mag: f32, late_mag: f32) -> f32 {
     (late_mag - early_mag) / (late_mag + early_mag + 1e-6)
-}
-
-#[inline]
-fn sample_at_fractional(buf: &[f32], pos: f32) -> Option<f32> {
-    if pos < 0.0 {
-        return None;
-    }
-    let i0 = pos.floor() as usize;
-    let frac = (pos - i0 as f32).clamp(0.0, 1.0);
-
-    if i0 >= buf.len() {
-        return None;
-    }
-    if i0 + 1 >= buf.len() {
-        if frac <= 1e-6 {
-            return Some(buf[i0]);
-        }
-        return None;
-    }
-
-    let a = buf[i0];
-    let b = buf[i0 + 1];
-    Some(a + (b - a) * frac)
 }
 
 #[inline]
@@ -847,26 +864,6 @@ fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
         .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
 }
 
-pub fn choose_decimation_factor(config: &DspConfig) -> usize {
-    let fs = config.sample_rate;
-    let rc = config.chip_rate;
-    // チップ境界がサンプル位置と整数倍で一致し、かつ spc が 2 以上になる最大の factor を探す。
-    // spc >= 2 を確保することで、エイリアシングを防ぎ RRC フィルタが機能するようにする。
-    for factor in (1..=8).rev() {
-        let divisor = rc * factor as f32;
-        if (fs / divisor).fract().abs() < 1e-6 && (fs / divisor) >= 2.0 {
-            return factor;
-        }
-    }
-    1
-}
-
-fn build_proc_config(config: &DspConfig, decimation_factor: usize) -> DspConfig {
-    let mut proc_config = config.clone();
-    proc_config.sample_rate = config.sample_rate / decimation_factor as f32;
-    proc_config
-}
-
 impl Drop for Decoder {
     fn drop(&mut self) {
         let enable_stats = std::env::var("MISTCAST_DECODER_STATS")
@@ -898,22 +895,6 @@ mod tests {
         encoder::{Encoder, EncoderConfig},
         DspConfig,
     };
-
-    #[test]
-    fn test_choose_decimation_factor() {
-        assert_eq!(choose_decimation_factor(&DspConfig::default_48k()), 2);
-        assert_eq!(choose_decimation_factor(&DspConfig::default_44k()), 1);
-        assert_eq!(choose_decimation_factor(&DspConfig::new(16000.0)), 1);
-    }
-
-    #[test]
-    fn test_build_proc_config() {
-        let dsp_config = DspConfig::default_48k();
-        let proc = build_proc_config(&dsp_config, 2);
-        assert_eq!(proc.sample_rate, 24_000.0);
-        assert_eq!(proc.carrier_freq, dsp_config.carrier_freq);
-        assert_eq!(proc.chip_rate, dsp_config.chip_rate);
-    }
 
     #[test]
     fn test_decoder_silence_input_does_not_complete() {
@@ -1152,17 +1133,6 @@ mod tests {
         assert!(p_step > 0.0);
         assert!(n_step < 0.0);
         assert!(c.abs() <= TRACKING_PHASE_STEP_CLAMP + 1e-6);
-    }
-
-    #[test]
-    fn test_sample_at_fractional_linear_interp() {
-        let buf = [0.0f32, 10.0, 20.0];
-        assert_eq!(sample_at_fractional(&buf, -0.1), None);
-        assert_eq!(sample_at_fractional(&buf, 0.0), Some(0.0));
-        assert_eq!(sample_at_fractional(&buf, 2.0), Some(20.0));
-        assert_eq!(sample_at_fractional(&buf, 2.1), None);
-        assert_eq!(sample_at_fractional(&buf, 0.5), Some(5.0));
-        assert_eq!(sample_at_fractional(&buf, 1.25), Some(12.5));
     }
 
     #[test]

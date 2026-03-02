@@ -8,8 +8,9 @@
 
 use crate::common::msequence::MSequence;
 use crate::common::nco::Nco;
+use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
-use crate::params::{MODULATION, SYNC_WORD, SYNC_WORD_BITS};
+use crate::params::{INTERNAL_SPC, MODULATION, SYNC_WORD, SYNC_WORD_BITS};
 use crate::{DifferentialModulation, DspConfig};
 
 #[inline]
@@ -45,7 +46,10 @@ fn dqpsk_delta(b0: u8, b1: u8) -> u8 {
 /// 変調器
 pub struct Modulator {
     config: DspConfig,
+    proc_config: DspConfig,
     mseq: MSequence,
+    resampler_i: Resampler,
+    resampler_q: Resampler,
     rrc_i: RrcFilter,
     rrc_q: RrcFilter,
     /// 差動符号化の累積位相 (0,1,2,3) = (0,90,180,270度)
@@ -57,14 +61,31 @@ pub struct Modulator {
 impl Modulator {
     /// `DspConfig` を指定して変調器を作成する
     pub fn new(config: DspConfig) -> Self {
-        let rrc_i = RrcFilter::from_config(&config);
-        let rrc_q = RrcFilter::from_config(&config);
+        let proc_config = DspConfig::new_for_processing(config.chip_rate);
+        let rrc_i = RrcFilter::from_config(&proc_config);
+        let rrc_q = RrcFilter::from_config(&proc_config);
         let nco = Nco::new(config.carrier_freq, config.sample_rate);
+
+        // リサンプラのカットオフ設定: 送信側RRCの全帯域を通過させる
+        let rrc_bw = proc_config.chip_rate * (1.0 + proc_config.rrc_alpha) * 0.5;
+        let cutoff = Some(rrc_bw);
+
         Modulator {
+            resampler_i: Resampler::new_with_cutoff(
+                proc_config.sample_rate as u32,
+                config.sample_rate as u32,
+                cutoff,
+            ),
+            resampler_q: Resampler::new_with_cutoff(
+                proc_config.sample_rate as u32,
+                config.sample_rate as u32,
+                cutoff,
+            ),
             mseq: MSequence::new(config.mseq_order),
             rrc_i,
             rrc_q,
             config,
+            proc_config,
             prev_phase: 0,
             nco,
         }
@@ -163,18 +184,31 @@ impl Modulator {
     /// チップ列をRRC整形 + キャリア変調してサンプル列に変換
     fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<f32> {
         debug_assert_eq!(chips_i.len(), chips_q.len());
-        let spc = self.config.samples_per_chip();
-        let mut out = Vec::with_capacity(chips_i.len() * spc);
+        let spc = INTERNAL_SPC;
 
+        // 1. 内部レート (fs_proc) でのベースバンド信号生成
+        let mut bb_i = Vec::with_capacity(chips_i.len() * spc);
+        let mut bb_q = Vec::with_capacity(chips_i.len() * spc);
         for (&ci, &cq) in chips_i.iter().zip(chips_q.iter()) {
             for k in 0..spc {
                 let i_imp = if k == 0 { ci } else { 0.0 };
                 let q_imp = if k == 0 { cq } else { 0.0 };
-                let i_f = self.rrc_i.process(i_imp);
-                let q_f = self.rrc_q.process(q_imp);
-                let lo = self.nco.step();
-                out.push(i_f * lo.re - q_f * lo.im);
+                bb_i.push(self.rrc_i.process(i_imp));
+                bb_q.push(self.rrc_q.process(q_imp));
             }
+        }
+
+        // 2. 出力レート (fs_out) へのリサンプリング
+        let mut resampled_i = Vec::new();
+        let mut resampled_q = Vec::new();
+        self.resampler_i.process(&bb_i, &mut resampled_i);
+        self.resampler_q.process(&bb_q, &mut resampled_q);
+
+        // 3. 出力レートでのキャリア混合 (Mix)
+        let mut out = Vec::with_capacity(resampled_i.len());
+        for (&i_f, &q_f) in resampled_i.iter().zip(resampled_q.iter()) {
+            let lo = self.nco.step();
+            out.push(i_f * lo.re - q_f * lo.im);
         }
 
         out
@@ -191,13 +225,30 @@ impl Modulator {
     pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
         let mut out = Vec::with_capacity(samples);
 
-        for _ in 0..samples {
+        // 出力サンプル数が samples に達するまで内部レートで無音を生成し、
+        // リサンプルとミキシングを行う。
+        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let needed_bb = (samples as f32 / ratio).ceil() as usize + 1;
+
+        for _ in 0..needed_bb {
             let i_f = self.rrc_i.process(0.0);
             let q_f = self.rrc_q.process(0.0);
-            let lo = self.nco.step();
-            out.push(i_f * lo.re - q_f * lo.im);
+
+            let mut res_i = Vec::new();
+            let mut res_q = Vec::new();
+            self.resampler_i.process(&[i_f], &mut res_i);
+            self.resampler_q.process(&[q_f], &mut res_q);
+
+            for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
+                let lo = self.nco.step();
+                out.push(si * lo.re - sq * lo.im);
+            }
+            if out.len() >= samples {
+                break;
+            }
         }
 
+        out.truncate(samples);
         out
     }
 
@@ -258,6 +309,17 @@ impl Modulator {
         self.mseq.reset();
         self.rrc_i.reset();
         self.rrc_q.reset();
+        let rrc_bw = self.proc_config.chip_rate * (1.0 + self.proc_config.rrc_alpha) * 0.5;
+        self.resampler_i.reconfigure(
+            self.proc_config.sample_rate as u32,
+            self.config.sample_rate as u32,
+            Some(rrc_bw),
+        );
+        self.resampler_q.reconfigure(
+            self.proc_config.sample_rate as u32,
+            self.config.sample_rate as u32,
+            Some(rrc_bw),
+        );
     }
 
     pub fn config(&self) -> &DspConfig {
@@ -312,7 +374,9 @@ mod tests {
         let config = DspConfig::default_48k();
         let expected_samples =
             config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
-        assert_eq!(preamble.len(), expected_samples);
+        // リサンプラの群遅延により、数サンプルの不足が発生することを許容
+        let diff = (preamble.len() as i32 - expected_samples as i32).abs();
+        assert!(diff <= 16, "len={}, expected={}, diff={}", preamble.len(), expected_samples, diff);
     }
 
     /// サンプル値が有限値であること
@@ -365,7 +429,9 @@ mod tests {
         let samples = mod_.modulate(&bits);
         let expected =
             symbols_for_bits(bits.len()) * config.spread_factor() * config.samples_per_chip();
-        assert_eq!(samples.len(), expected);
+        // リサンプラの群遅延により、数サンプルの不足が発生することを許容
+        let diff = (samples.len() as i32 - expected as i32).abs();
+        assert!(diff <= 16, "len={}, expected={}, diff={}", samples.len(), expected, diff);
     }
 
     /// 変調出力の振幅が概ね±2以内であること
