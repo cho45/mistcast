@@ -70,6 +70,7 @@ pub struct SyncResult {
 pub struct SyncDetector {
     config: DspConfig,
     pn: Vec<f32>,
+    sync_symbols: Vec<f32>, // プリアンブル構造 + SYNC_WORD
     sf: usize,
     spc: usize,
     sym_len: usize,
@@ -77,21 +78,36 @@ pub struct SyncDetector {
 
 impl SyncDetector {
     /// 粗探索しきい値: ノイズの最大スコア付近に設定し、無用な精密探索を抑制
-    const THRESHOLD_COARSE: f32 = 0.20;
+    const THRESHOLD_COARSE: f32 = 0.15;
     /// 精密探索しきい値: 誤検知率を極小化しつつ信号を確実に捕捉
-    const THRESHOLD_FINE: f32 = 0.25;
+    const THRESHOLD_FINE: f32 = 0.21;
 
     pub fn new(config: DspConfig) -> Self {
-
         let mut mseq = MSequence::new(config.mseq_order);
         let sf = config.spread_factor();
         let spc = config.samples_per_chip().max(1);
         let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|x| x as f32).collect();
         let sym_len = sf * spc;
 
+        // 36シンボルの期待される符号系列 (BPSK) を構築
+        // Preamble: [1, 1, 1, -1] (repeat=4の場合)
+        // SYNC_WORD: 32 bits
+        let mut sync_symbols = Vec::with_capacity(config.preamble_repeat + 32);
+        for rep in 0..config.preamble_repeat {
+            let sign = if rep == config.preamble_repeat - 1 { -1.0 } else { 1.0 };
+            sync_symbols.push(sign);
+        }
+        
+        let word = crate::params::SYNC_WORD;
+        for i in 0..crate::params::SYNC_WORD_BITS {
+            let bit = (word >> (crate::params::SYNC_WORD_BITS - 1 - i)) & 1;
+            sync_symbols.push(if bit == 0 { 1.0 } else { -1.0 });
+        }
+
         SyncDetector {
             config,
             pn,
+            sync_symbols,
             sf,
             spc,
             sym_len,
@@ -110,12 +126,13 @@ impl SyncDetector {
     ) -> (Option<SyncResult>, usize) {
         let sym_len = self.sym_len;
         let repeat = self.config.preamble_repeat;
+        let unified_len = self.sync_symbols.len();
         let preamble_len = sym_len * repeat;
-        let required_len = preamble_len + sym_len;
+        let required_len = unified_len * sym_len;
         let spc = self.spc;
         let coarse_step = spc.max(1);
 
-        // プリアンブル直後の1シンボル分まで見えてから同期確定する。
+        // プリアンブル + SYNC_WORD 分まで見えてから同期確定する。
         if i_ch.len() < start_offset + required_len {
             (None, start_offset)
         } else {
@@ -128,6 +145,7 @@ impl SyncDetector {
 
                 if score > Self::THRESHOLD_COARSE || provisional_best.is_some() {
                     // --- 2. 精密同期 (ピーク周辺を1サンプル刻みで) ---
+                    // 精密同期では、プリアンブル + SYNC_WORD の全36シンボルでロックを確認する
                     let f_start = n.saturating_sub(coarse_step);
                     let f_end = (n + coarse_step).min(search_range_end);
 
@@ -136,7 +154,7 @@ impl SyncDetector {
                     let mut last_sym_iq = (0.0, 0.0);
                     for fn_idx in f_start..=f_end {
                         let (f_score, f_iq) =
-                            self.score_candidate(i_ch, q_ch, fn_idx, repeat, sym_len);
+                            self.score_candidate(i_ch, q_ch, fn_idx, unified_len, sym_len);
                         if f_score >= fine_best_score {
                             fine_best_score = f_score;
                             fine_best_idx = fn_idx;
@@ -214,21 +232,26 @@ impl SyncDetector {
         i_ch: &[f32],
         q_ch: &[f32],
         n: usize,
-        repeat: usize,
+        num_symbols: usize,
         sym_len: usize,
     ) -> (f32, (f32, f32)) {
         let mut total_rho_p = 0.0f32;
         let mut min_power = f32::INFINITY;
         let mut max_power = 0.0f32;
-        let mut corrs = Vec::with_capacity(repeat);
+        
+        let mut sum_re = 0.0f32;
+        let mut sum_im = 0.0f32;
+        let mut sum_mag = 0.0f32;
 
-        for rep in 0..repeat {
+        let mut last_ci = 0.0f32;
+        let mut last_cq = 0.0f32;
+        let mut last_mag = 0.0f32;
+
+        for rep in 0..num_symbols {
             let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, n + rep * sym_len);
             let mag2 = ci * ci + cq * cq;
+            let mag = mag2.sqrt();
 
-            // 電力相似度: 相関出力電力 / (期待される相関電力)
-            // 信号の場合: mag2 ≈ sf * en、だから rho_p ≈ SNR/(SNR+1) ≈ 0.5-1.0
-            // ノイズの場合: mag2 ≈ en、だから rho_p ≈ 1/sf ≈ 0.016
             let rho_p_sym = if en > 1e-9 {
                 mag2 / (self.sf as f32 * en)
             } else {
@@ -239,53 +262,40 @@ impl SyncDetector {
             min_power = min_power.min(mag2);
             max_power = max_power.max(mag2);
 
-            corrs.push((ci, cq, mag2.sqrt()));
-        }
+            if rep > 0 {
+                if last_mag > 1e-9 && mag > 1e-9 {
+                    let re = last_ci * ci + last_cq * cq;
+                    let im = last_ci * cq - last_cq * ci;
+                    let pair_mag = last_mag * mag;
 
-        let rho_p = total_rho_p / repeat as f32;
-
-        // 位相一貫性スコア: 振幅加重複素相関による評価
-        let mut sum_re = 0.0f32;
-        let mut sum_im = 0.0f32;
-        let mut sum_mag = 0.0f32;
-
-        for rep in 1..repeat {
-            let (p_i, p_q, p_mag) = corrs[rep - 1];
-            let (c_i, c_q, c_mag) = corrs[rep];
-
-            if p_mag > 1e-9 && c_mag > 1e-9 {
-                // 複素共役積による位相差ベクトルの抽出 (正規化せず加算)
-                let re = p_i * c_i + p_q * c_q;
-                let im = p_i * c_q - p_q * c_i;
-                let pair_mag = p_mag * c_mag;
-
-                // 最終シンボルの反転を補正
-                let expected = if rep == repeat - 1 { -1.0 } else { 1.0 };
-                sum_re += expected * re;
-                sum_im += expected * im;
-                sum_mag += pair_mag;
+                    let expected = self.sync_symbols[rep - 1] * self.sync_symbols[rep];
+                    sum_re += expected * re;
+                    sum_im += expected * im;
+                    sum_mag += pair_mag;
+                }
             }
+
+            last_ci = ci;
+            last_cq = cq;
+            last_mag = mag;
         }
+
+        let rho_p = total_rho_p / num_symbols as f32;
 
         let rho_phi = if sum_mag > 1e-9 {
-            // ベクトル和のノルムを振幅の総和で正規化
             (sum_re * sum_re + sum_im * sum_im).sqrt() / sum_mag
         } else {
             0.0
         };
 
-        // 総合スコア: 電力相似度と位相一貫性の積
-        // 独立事象の同時生起を評価することで、偽陽性を強力に抑制する。
         let mut score = rho_p * rho_phi;
 
-        // 電力の一様性チェック: 信号は各シンボルの電力が安定しているはず
-        // 部分一致（1シンボルだけ高いなど）を抑制
         let avg_power = (min_power + max_power) / 2.0;
         if min_power < avg_power * 0.25 {
             score *= 0.1;
         }
 
-        (score.max(0.0), (corrs[repeat - 1].0, corrs[repeat - 1].1))
+        (score.max(0.0), (last_ci, last_cq))
     }
 }
 
@@ -319,7 +329,7 @@ mod tests {
     fn generate_signal(config: &DspConfig, offset: usize, amplitude: f32) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());
         let mut signal = vec![0.0; offset];
-        signal.extend(modulator.generate_preamble().iter().map(|&s| s * amplitude));
+        signal.extend(modulator.encode_frame(&[]).iter().map(|&s| s * amplitude));
         // マージンを追加: SyncDetector はピークの後に 1シンボル分以上のサンプルを要求するため
         signal.extend(vec![0.0; 500]);
 
@@ -661,7 +671,7 @@ mod tests {
     ) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());
         let mut signal = vec![0.0; offset];
-        signal.extend(modulator.generate_preamble().iter().map(|&s| s));
+        signal.extend(modulator.encode_frame(&[]).iter().map(|&s| s));
         signal.extend(vec![0.0; 500]);
 
         let (i_raw, q_raw) = downconvert(&signal, 0, config);
