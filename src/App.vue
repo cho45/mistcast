@@ -74,7 +74,7 @@ onBeforeUnmount(() => {
     <header class="hero">
       <div class="hero-top">
         <div>
-          <h1>Mistcast Demo v2.3</h1>
+          <h1>Mistcast Demo</h1>
           <p>Acoustic DSSS + RLNC playground</p>
         </div>
         <div class="mode-selector" :class="{ 'is-disabled': runtime.isBusy.value }">
