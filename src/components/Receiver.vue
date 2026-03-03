@@ -4,10 +4,12 @@ import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
 import { useDemoRuntime } from '../demo-runtime';
+import { injectSettings } from '../composables/useSettings';
 import { extractImagePayload, type ImagePayload } from '../utils/image-detector';
 import SpectrumCanvas from './SpectrumCanvas.vue';
 
 const runtime = useDemoRuntime();
+const { settings } = injectSettings();
 
 type InputMode = 'loopback' | 'mic';
 
@@ -588,7 +590,7 @@ onBeforeUnmount(() => {
       <div class="metric" data-tooltip="最後に行列のランクが上昇した際のパケットシーケンス番号（復号の進捗指標）"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
     </div>
 
-    <div class="proc-stats">
+    <div class="proc-stats" v-if="settings.debugMode">
       <p class="proc-title">DecoderProcessor Timing</p>
       <div class="proc-grid">
         <div data-tooltip="1ブロックあたりの平均処理時間（全ブロックの平均値）"><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
@@ -601,7 +603,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="rx-log" v-if="rxLogs.length > 0">
+    <div class="rx-log" v-if="settings.debugMode && rxLogs.length > 0">
       <div class="rx-log-header">
         <span>Rx Log</span>
         <button @click="copyRxLogs" class="btn btn-xs">{{ rxLogCopied ? 'Copied' : 'Copy' }}</button>

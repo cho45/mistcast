@@ -2,9 +2,11 @@
 import { onBeforeUnmount, ref } from 'vue';
 import Sender from './components/Sender.vue';
 import Receiver from './components/Receiver.vue';
+import Settings from './components/Settings.vue';
 // @ts-ignore
 import processorsUrl from './audio-processors?worker&url';
 import { createDemoRuntime, provideDemoRuntime, type AudioCore } from './demo-runtime';
+import { provideSettings } from './composables/useSettings';
 
 let audioContext: AudioContext | null = null;
 let demoAirGapNode: GainNode | null = null;
@@ -40,7 +42,34 @@ async function ensureAudioCore(): Promise<AudioCore> {
 const runtime = createDemoRuntime(ensureAudioCore);
 provideDemoRuntime(runtime);
 
+const settings = provideSettings();
+
 const activeTab = ref<'sender' | 'receiver'>('receiver');
+const settingsDialog = ref<HTMLDialogElement | null>(null);
+
+function openSettings() {
+  settingsDialog.value?.showModal();
+}
+
+function closeSettings() {
+  settingsDialog.value?.close();
+}
+
+function handleDialogClick(event: MouseEvent) {
+  const rect = settingsDialog.value?.getBoundingClientRect();
+  if (!rect) return;
+
+  // dialog外をクリックした場合は閉じる
+  const clickedInDialog =
+    event.clientX >= rect.left &&
+    event.clientX <= rect.right &&
+    event.clientY >= rect.top &&
+    event.clientY <= rect.bottom;
+
+  if (!clickedInDialog) {
+    closeSettings();
+  }
+}
 
 async function initialize() {
   if (runtime.coreReady.value || isInitializing.value) return;
@@ -71,31 +100,23 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
-    <header class="hero">
-      <div class="hero-top">
-        <div>
-          <h1>Mistcast Demo</h1>
-          <p>Acoustic DSSS + RLNC playground</p>
+    <header class="app-header">
+      <div class="app-header-content">
+        <div class="app-brand">
+          <h1>Mistcast</h1>
         </div>
-        <div class="mode-selector" :class="{ 'is-disabled': runtime.isBusy.value }">
-          <label class="mode-label">Modem Mode:</label>
-          <div class="mode-buttons">
-            <button
-              class="mode-btn"
-              :class="{ active: runtime.modemMode.value === 'dsss' }"
-              :disabled="runtime.isBusy.value"
-              @click="runtime.modemMode.value = 'dsss'"
-            >DSSS (Slow)</button>
-            <button
-              class="mode-btn"
-              :class="{ active: runtime.modemMode.value === 'mary' }"
-              :disabled="runtime.isBusy.value"
-              @click="runtime.modemMode.value = 'mary'"
-            >M-ARY (Fast)</button>
-          </div>
-        </div>
+        <button class="settings-trigger" @click="openSettings" aria-label="Open Settings">
+          <img src="./assets/settings.svg" alt="Settings" class="settings-icon" />
+        </button>
       </div>
     </header>
+
+    <dialog ref="settingsDialog" class="settings-dialog" @click="handleDialogClick">
+      <button class="dialog-close" @click="closeSettings" aria-label="Close Settings">×</button>
+      <div class="dialog-content">
+        <Settings />
+      </div>
+    </dialog>
 
     <main class="content">
       <section v-if="!runtime.coreReady.value" class="panel init-panel">
@@ -147,91 +168,154 @@ onBeforeUnmount(() => {
 .app-shell {
   min-height: 100vh;
   margin: 0 auto;
-  padding: 1rem;
+  padding: 0;
   color: var(--ink);
   overflow-x: hidden;
-  background:
-    radial-gradient(120% 120% at 0% 0%, #fff6da 0%, transparent 45%),
-    radial-gradient(130% 120% at 100% 0%, #d9efff 0%, transparent 45%),
-    linear-gradient(165deg, var(--bg-a), var(--bg-b));
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
   font-family: var(--sans);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
 }
 
-.hero-top {
+.app-header {
+  background: linear-gradient(to bottom, #f8fafc, #f1f5f9);
+  border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.app-header-content {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0.6rem 1rem;
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 1rem;
+  align-items: center;
 }
 
-.mode-selector {
-  background: rgba(255, 255, 255, 0.5);
-  padding: 0.5rem;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-}
-
-.mode-selector.is-disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.mode-label {
-  display: block;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: var(--muted);
-  margin-bottom: 0.3rem;
-  margin-left: 0.2rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.mode-buttons {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.mode-btn {
-  padding: 0.4rem 0.8rem;
-  font-size: 0.82rem;
+.app-brand h1 {
+  margin: 0;
+  font-size: 1.25rem;
   font-weight: 600;
-  border: 1px solid var(--line);
-  background: #fff;
-  color: var(--muted);
-  border-radius: 8px;
+  color: #1e293b;
+  letter-spacing: -0.01em;
+}
+
+.settings-trigger {
+  width: 2.25rem;
+  height: 2.25rem;
+  border: none;
+  background: transparent;
   cursor: pointer;
   transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
 }
 
-.mode-btn:hover {
-  background: #f1f5f9;
+.settings-trigger:hover {
+  background: rgba(0, 0, 0, 0.05);
 }
 
-.mode-btn.active {
-  background: var(--primary);
-  color: #fff;
-  border-color: var(--primary-strong);
-  box-shadow: 0 2px 4px rgba(15, 107, 215, 0.2);
+.settings-trigger:active {
+  background: rgba(0, 0, 0, 0.08);
 }
 
-.hero {
-  max-width: 1100px;
-  margin: 0 auto 1rem;
-  padding: 0.25rem 0.1rem;
+.settings-icon {
+  width: 18px;
+  height: 18px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
 }
 
-.hero h1 {
-  margin: 0;
-  font-size: clamp(1.35rem, 2.3vw, 2rem);
-  letter-spacing: 0.01em;
+.settings-trigger:hover .settings-icon {
+  opacity: 0.9;
 }
 
-.hero p {
-  margin: 0.25rem 0 0.8rem;
+.settings-trigger:hover .settings-icon {
+  opacity: 1;
+}
+
+.settings-dialog {
+  border: none;
+  border-radius: 20px;
+  padding: 0;
+  max-width: 640px;
+  width: 90vw;
+  max-height: 85vh;
+  box-shadow: 0 25px 80px rgba(0, 0, 0, 0.35);
+  animation: dialogFadeIn 0.3s ease-out;
+}
+
+@keyframes dialogFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.settings-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  animation: backdropFadeIn 0.3s ease-out;
+}
+
+@keyframes backdropFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.dialog-content {
+  max-height: 85vh;
+  overflow-y: auto;
+  background: #fff;
+  border-radius: 20px;
+}
+
+.dialog-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: none;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  font-size: 1.5rem;
+  cursor: pointer;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
   color: var(--muted);
-  font-size: 0.92rem;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.dialog-close:hover {
+  background: #fff;
+  color: var(--ink);
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.dialog-close:active {
+  transform: scale(0.95);
 }
 
 .status-chip {
@@ -264,12 +348,16 @@ onBeforeUnmount(() => {
 }
 
 .content {
-  max-width: 1100px;
   margin: 0 auto;
+  padding: 1.5rem 1rem;
+  flex: 1;
+  width: 100%;
+  max-width: 1100px;
 }
 
 .app-tabs {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
   margin-bottom: 1rem;
   border-bottom: 1px solid var(--line);
@@ -277,7 +365,7 @@ onBeforeUnmount(() => {
 }
 
 .tab-btn {
-  padding: 0.6rem 1.2rem;
+  padding: 0.8rem 1rem;
   border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
@@ -675,18 +763,28 @@ code {
 }
 
 .footnote {
-  max-width: 1100px;
-  margin: 1rem auto 0;
+  margin: 0 auto 1rem;
+  padding: 0 1rem 1rem;
   color: var(--muted);
   font-size: 0.84rem;
-  padding: 0.35rem 0.1rem 0.9rem;
+  text-align: center;
+  width: 100%;
+  max-width: 1100px;
+}
+
+.footnote a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: all 0.2s;
+}
+
+.footnote a:hover {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
 }
 
 @media (min-width: 780px) {
-  .app-shell {
-    padding: 1.6rem;
-  }
-
   .app-tabs {
     display: none;
   }
@@ -731,6 +829,10 @@ code {
 
   .proc-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .settings-dialog {
+    max-width: 700px;
   }
 }
 

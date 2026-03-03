@@ -1,5 +1,6 @@
 import { h, ref } from 'vue';
 import { provideDemoRuntime, type ModemMode } from '../demo-runtime';
+import { provideSettings } from '../composables/useSettings';
 
 export function createMockRuntime() {
   return {
@@ -38,6 +39,7 @@ export function mountWithRuntime(component: any) {
   const TestWrapper = {
     setup() {
       provideDemoRuntime(createMockRuntime());
+      provideSettings();
       return () => h(component);
     },
   };

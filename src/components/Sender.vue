@@ -269,12 +269,6 @@ defineExpose({
     <div class="status-chip" :class="senderStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
       {{ senderStatus }}
     </div>
-    <div class="sender-options">
-      <label class="checkbox-label">
-        <input type="checkbox" v-model="runtime.randomizeSeq.value" :disabled="isTransmitting">
-        Randomized Seq
-      </label>
-    </div>
     <textarea v-model="inputText" rows="4" placeholder="Enter text to broadcast..." />
     <div class="button-row">
       <template v-if="!isTransmitting">
@@ -362,38 +356,6 @@ defineExpose({
 
 .sender-panel {
   transition: all 0.2s ease;
-}
-
-.sender-options {
-  margin: 0.8rem 0;
-  display: flex;
-  align-items: center;
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.88rem;
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
-}
-
-.checkbox-label input {
-  width: 1rem;
-  height: 1rem;
-  cursor: pointer;
-}
-
-.checkbox-label:hover {
-  color: var(--ink);
-}
-
-.checkbox-label input:disabled + span,
-.checkbox-label:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.6;
 }
 
 section.sender-panel.is-dragging {

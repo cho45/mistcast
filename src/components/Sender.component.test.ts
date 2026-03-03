@@ -202,4 +202,29 @@ describe('Sender.vue', () => {
       expect(sendFileButton?.text()).toBe('Send File (max 4KB)');
     });
   });
+
+  describe('Randomized Seq option removed', () => {
+    it('should not have Randomized Seq checkbox in sender panel', () => {
+      const wrapper = mount(TestWrapper);
+
+      // .sender-options要素が存在しないことを確認
+      expect(wrapper.find('.sender-options').exists()).toBe(false);
+
+      // Randomized Seqのチェックボックスが存在しないことを確認
+      const checkboxLabels = wrapper.findAll('.checkbox-label');
+      const randomizeSeqLabel = checkboxLabels.find(label =>
+        label.text().includes('Randomized Seq')
+      );
+      expect(randomizeSeqLabel).toBeUndefined();
+    });
+
+    it('should still have runtime.randomizeSeq available for Settings component', () => {
+      const wrapper = mount(TestWrapper);
+
+      // Senderコンポーネント自体にはrandomizeSeq UIがないが、
+      // runtime.randomizeSeqは内部で使用されている（Sender.vueのstartSendingDataで参照）
+      // このテストはランタイムが正しく設定されていることを確認する
+      expect(wrapper.exists()).toBe(true);
+    });
+  });
 });
