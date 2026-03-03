@@ -4,6 +4,7 @@ pub mod coding;
 pub mod common;
 pub mod frame;
 pub mod phy;
+pub mod mary;
 
 pub mod decoder;
 pub mod encoder;

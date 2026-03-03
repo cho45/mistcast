@@ -19,7 +19,9 @@
       "Bash(python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name reverted-to-baseline \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn,sweep-ppm,sweep-loss,sweep-fading,sweep-multipath \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
       "Bash(cd /Users/cho45/sketch/mistcast && python3 scripts/phy_eval/dsss_e2e_bench.py \\\\\n  --name reverted-to-baseline \\\\\n  --out-dir dsp/eval/dsss_e2e/runs \\\\\n  --modes sweep-awgn,sweep-ppm,sweep-loss,sweep-fading,sweep-multipath \\\\\n  --trials 40 --min-trials 80 --min-effect 0.20 \\\\\n  --payload-bytes 64 --deadline-sec 0.8 --max-sec 2.0 2>&1)",
       "Bash(cargo run --bin eval_awgn -- 2>&1 | tail -100)",
-      "Bash(cargo run --bin dsss_e2e_eval -- --help 2>&1)"
+      "Bash(cargo run --bin dsss_e2e_eval -- --help 2>&1)",
+      "Bash(cd /Users/cho45/sketch/mistcast/dsp && cargo test --lib walsh 2>&1 | head -100)",
+      "Bash(cargo test *)"
     ]
   }
 }
