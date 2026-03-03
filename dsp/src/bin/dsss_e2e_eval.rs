@@ -1,6 +1,8 @@
-use dsp::dsss::encoder::{Encoder, EncoderConfig};
+use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
+use dsp::mary::decoder::Decoder as MaryDecoder;
+use dsp::mary::encoder::Encoder as MaryEncoder;
 use dsp::params::PAYLOAD_SIZE;
-use dsp::{dsss::decoder::Decoder, DspConfig};
+use dsp::{dsss::decoder::Decoder as DsssDecoder, DspConfig};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
@@ -82,6 +84,7 @@ struct ChannelImpairment {
 
 #[derive(Clone, Debug)]
 struct Cli {
+    phy: String,
     mode: String,
     trials: usize,
     payload_bytes: usize,
@@ -318,6 +321,10 @@ fn parse_cli() -> Cli {
         }
     }
 
+    let phy = kv
+        .remove("phy")
+        .unwrap_or_else(|| "dsss".to_string())
+        .to_lowercase();
     let mode = kv
         .remove("mode")
         .unwrap_or_else(|| "point".to_string())
@@ -442,6 +449,7 @@ fn parse_cli() -> Cli {
         .unwrap_or(dsp::params::PACKETS_PER_SYNC_BURST);
 
     Cli {
+        phy,
         mode,
         trials,
         payload_bytes,
@@ -606,18 +614,19 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     tx_cfg.rrc_alpha = cli.rrc_alpha;
     tx_cfg.sync_word_bits = cli.sync_word_bits;
     tx_cfg.preamble_repeat = cli.preamble_repeat;
+    tx_cfg.packets_per_burst = cli.packets_per_burst;
 
     let mut rx_cfg = tx_cfg.clone();
     rx_cfg.carrier_freq += imp.cfo_hz;
 
     let payload = make_bytes(cli.payload_bytes, seed ^ 0x1234_5678);
     let k = payload.len().div_ceil(PAYLOAD_SIZE).max(1);
-    let mut enc_cfg = EncoderConfig::new(tx_cfg.clone());
+    let mut enc_cfg = DsssEncoderConfig::new(tx_cfg.clone());
     enc_cfg.fountain_k = k;
     enc_cfg.packets_per_sync_burst = cli.packets_per_burst;
-    let mut encoder = Encoder::new(enc_cfg);
+    let mut encoder = DsssEncoder::new(enc_cfg);
     let mut stream = encoder.encode_stream(&payload);
-    let mut decoder = Decoder::new(payload.len(), k, rx_cfg);
+    let mut decoder = DsssDecoder::new(payload.len(), k, rx_cfg);
     decoder.set_packets_per_sync_burst(cli.packets_per_burst);
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
@@ -723,6 +732,143 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     }
 }
 
+fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
+    let mut tx_cfg = DspConfig::new(cli.sample_rate);
+    tx_cfg.chip_rate = cli.chip_rate;
+    tx_cfg.carrier_freq = cli.carrier_freq;
+    tx_cfg.mseq_order = cli.mseq_order;
+    tx_cfg.rrc_alpha = cli.rrc_alpha;
+    tx_cfg.sync_word_bits = cli.sync_word_bits;
+    tx_cfg.preamble_repeat = cli.preamble_repeat;
+    tx_cfg.packets_per_burst = cli.packets_per_burst;
+
+    let mut rx_cfg = tx_cfg.clone();
+    rx_cfg.carrier_freq += imp.cfo_hz;
+
+    let payload = make_bytes(cli.payload_bytes, seed ^ 0x1234_5678);
+    let k = payload.len().div_ceil(PAYLOAD_SIZE).max(1);
+
+    let mut encoder = MaryEncoder::new(tx_cfg.clone());
+    encoder.set_data(&payload);
+
+    let mut decoder = MaryDecoder::new(payload.len(), k, rx_cfg);
+    decoder.packets_per_sync_burst = cli.packets_per_burst;
+
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
+    let mut elapsed_sec = 0.0f32;
+    let mut attempts = 0usize;
+    let mut dropped_attempts = 0usize;
+    let mut tx_signal_energy_sum = 0.0f64;
+    let mut tx_signal_samples = 0usize;
+    let mut total_process_ns = 0u64;
+
+    let chunk = cli.chunk_samples.max(1);
+    let gap = cli.gap_samples;
+
+    // Mary Encoder doesn't have an iterator yet, so we recreate the logic
+    let fountain_params = dsp::coding::fountain::FountainParams::new(k, PAYLOAD_SIZE);
+    let mut fountain_encoder =
+        dsp::coding::fountain::FountainEncoder::new(&payload, fountain_params);
+
+    loop {
+        if elapsed_sec >= cli.max_sec {
+            break;
+        }
+
+        let burst_count = cli.packets_per_burst.max(1);
+        let mut packets = Vec::with_capacity(burst_count);
+        for _ in 0..burst_count {
+            packets.push(fountain_encoder.next_packet());
+        }
+        let frame = encoder.encode_burst(&packets);
+
+        attempts += 1;
+        tx_signal_energy_sum += signal_energy(&frame);
+        tx_signal_samples += frame.len();
+
+        let drop_burst = rng.gen::<f32>() < imp.burst_loss;
+        if drop_burst {
+            dropped_attempts += 1;
+        }
+        let rx_frame = apply_channel(&frame, imp, &mut rng, drop_burst);
+        elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+
+        for piece in rx_frame.chunks(chunk) {
+            let start_time = std::time::Instant::now();
+            let progress = decoder.process_samples(piece);
+            total_process_ns += start_time.elapsed().as_nanos() as u64;
+
+            if progress.complete {
+                let recovered = decoder.recovered_data();
+                let errs = count_bit_errors_bytes(&payload, recovered);
+                let bits_compared = payload.len() * 8;
+                return TrialResult {
+                    success: errs == 0,
+                    completion_sec: Some(elapsed_sec),
+                    elapsed_sec,
+                    attempts,
+                    first_attempt_success: attempts == 1 && errs == 0,
+                    bit_errors: errs,
+                    bits_compared,
+                    dropped_attempts,
+                    tx_signal_energy_sum,
+                    tx_signal_samples,
+                    process_time_ns: total_process_ns,
+                };
+            }
+        }
+
+        if gap > 0 {
+            let mut gap_sig = vec![0.0f32; gap];
+            add_awgn_with_rng(&mut gap_sig, imp.sigma, &mut rng);
+            if imp.ppm.abs() >= 1.0 {
+                gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
+            }
+            elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
+            for piece in gap_sig.chunks(chunk) {
+                let start_time = std::time::Instant::now();
+                let progress = decoder.process_samples(piece);
+                total_process_ns += start_time.elapsed().as_nanos() as u64;
+
+                if progress.complete {
+                    let recovered = decoder.recovered_data();
+                    let errs = count_bit_errors_bytes(&payload, recovered);
+                    let bits_compared = payload.len() * 8;
+                    return TrialResult {
+                        success: errs == 0,
+                        completion_sec: Some(elapsed_sec),
+                        elapsed_sec,
+                        attempts,
+                        first_attempt_success: attempts == 1 && errs == 0,
+                        bit_errors: errs,
+                        bits_compared,
+                        dropped_attempts,
+                        tx_signal_energy_sum,
+                        tx_signal_samples,
+                        process_time_ns: total_process_ns,
+                    };
+                }
+            }
+        }
+    }
+
+    let bits_compared = payload.len() * 8;
+    let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
+    TrialResult {
+        success: false,
+        completion_sec: None,
+        elapsed_sec,
+        attempts,
+        first_attempt_success: false,
+        bit_errors,
+        bits_compared,
+        dropped_attempts,
+        tx_signal_energy_sum,
+        tx_signal_samples,
+        process_time_ns: total_process_ns,
+    }
+}
+
 fn print_header() {
     println!(
         "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,avg_proc_ns_sample,multipath"
@@ -741,7 +887,8 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         None
     };
     println!(
-        "{scenario},dsss-e2e,{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{},{:.2},{}",
+        "{scenario},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{:.2},{}",
+        cli.phy,
         m.trials,
         m.successes,
         m.deadline_hits,
@@ -774,7 +921,11 @@ fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
         let trial_seed = cli
             .seed
             .wrapping_add((trial_idx as u64).wrapping_mul(0x9E37_79B9));
-        let tr = run_trial_dsss_e2e(imp, cli, trial_seed);
+        let tr = if cli.phy == "mary" {
+            run_trial_mary_e2e(imp, cli, trial_seed)
+        } else {
+            run_trial_dsss_e2e(imp, cli, trial_seed)
+        };
         metrics.push(tr, cli.deadline_sec);
     }
     print_row(scenario, cli, imp, &metrics);
@@ -797,7 +948,7 @@ fn run_point(cli: &Cli) {
 
 fn run_sweep_awgn(cli: &Cli) {
     print_header();
-    let mut dsss_limit = None;
+    let mut phy_limit = None;
     for &sigma in &cli.sweep_awgn {
         let mut imp = cli.base.clone();
         imp.sigma = sigma;
@@ -807,14 +958,15 @@ fn run_sweep_awgn(cli: &Cli) {
         );
         let d = evaluate(cli, &imp, &scenario);
         if d.p_complete_deadline() >= cli.target_p_complete {
-            dsss_limit = Some(sigma);
+            phy_limit = Some(sigma);
         }
     }
     println!(
-        "# awgn_limit(target_p_complete_deadline>={:.2}, deadline_s={:.2}) dsss={}",
+        "# awgn_limit(target_p_complete_deadline>={:.2}, deadline_s={:.2}, phy={}) result={}",
         cli.target_p_complete,
         cli.deadline_sec,
-        dsss_limit
+        cli.phy,
+        phy_limit
             .map(|v| format!("{v:.3}"))
             .unwrap_or_else(|| "none".to_string()),
     );
@@ -875,15 +1027,16 @@ fn run_sweep_fading(cli: &Cli) {
 fn print_help() {
     println!(
         "usage: cargo run --release --bin dsss_e2e_eval -- [options]\n\
-         modes:\n\
-         - --mode point             単点評価 (default)\n\
-         - --mode sweep-awgn        AWGN sweep + awgn_limit推定\n\
-         - --mode sweep-ppm         ppm sweep\n\
-         - --mode sweep-loss        バースト欠落率 sweep\n\
-         - --mode sweep-fading      振幅フェージング深さ sweep\n\
-         - --mode sweep-multipath   マルチパス profile sweep\n\
-         - --mode sweep-all         全sweep\n\n\
          common options:\n\
+         --phy [dsss|mary]          物理層方式の選択 (default: dsss)\n\
+         --mode point               単点評価 (default)\n\
+         --mode sweep-awgn        AWGN sweep + awgn_limit推定\n\
+         --mode sweep-ppm         ppm sweep\n\
+         --mode sweep-loss        バースト欠落率 sweep\n\
+         --mode sweep-fading      振幅フェージング深さ sweep\n\
+         --mode sweep-multipath   マルチパス profile sweep\n\
+         --mode sweep-all         全sweep\n\n\
+         evaluation options:\n\
          --trials N\n\
          --payload-bytes N          送信バイト長 (default: 64)\n\
          --deadline-sec F\n\
@@ -934,5 +1087,183 @@ fn main() {
             print_help();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_multipath_profile_parsing() {
+        // Preset
+        let p = MultipathProfile::preset("mild").unwrap();
+        assert_eq!(p.name, "mild");
+        assert_eq!(p.taps.len(), 3);
+
+        // Custom
+        let p = MultipathProfile::parse_custom("0:1.0, 10:0.5, 20:0.25").unwrap();
+        assert_eq!(p.name, "custom");
+        assert_eq!(p.taps.len(), 3);
+        assert_eq!(p.taps[1], (10, 0.5));
+        assert_eq!(p.max_delay(), 20);
+
+        // Invalid
+        assert!(MultipathProfile::parse_custom("invalid").is_none());
+        assert!(MultipathProfile::parse_custom("0:1.0:2.0").is_none());
+    }
+
+    #[test]
+    fn test_metrics_calculations() {
+        let mut m = Metrics::default();
+        let deadline = 1.0;
+
+        // 試行1: 成功 (0.5秒)
+        m.push(
+            TrialResult {
+                success: true,
+                completion_sec: Some(0.5),
+                elapsed_sec: 0.5,
+                attempts: 1,
+                first_attempt_success: true,
+                bit_errors: 0,
+                bits_compared: 128,
+                ..Default::default()
+            },
+            deadline,
+        );
+
+        // 試行2: 失敗 (1.2秒)
+        m.push(
+            TrialResult {
+                success: false,
+                completion_sec: None,
+                elapsed_sec: 1.2,
+                attempts: 3,
+                first_attempt_success: false,
+                bit_errors: 10,
+                bits_compared: 128,
+                ..Default::default()
+            },
+            deadline,
+        );
+
+        assert_eq!(m.trials, 2);
+        assert_eq!(m.successes, 1);
+        assert_eq!(m.deadline_hits, 1);
+        assert_eq!(m.p_complete(), 0.5);
+        assert_eq!(m.ber(), 10.0 / 256.0);
+        assert_eq!(m.total_attempts, 4);
+
+        // Goodput (128 bits success / 1.7 sec total)
+        let expected_bps = 128.0 / 1.7;
+        assert!((m.goodput_effective_bps(128) - expected_bps).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_apply_clock_drift_ppm() {
+        let input = vec![1.0f32; 1000];
+
+        // +100000 PPM (10% 増加) -> 1000 * 1.1 = 1100 サンプル
+        // 実装は簡略化された period 方式なので、1,000,000 / 100,000 = 10 サンプルごとに1つ挿入
+        let out_plus = apply_clock_drift_ppm(&input, 100_000.0);
+        assert_eq!(out_plus.len(), 1100);
+        assert!(out_plus.iter().all(|&v| v == 1.0));
+
+        // -100000 PPM (10% 減少) -> 1000 * 0.9 = 900 サンプル
+        let out_minus = apply_clock_drift_ppm(&input, -100_000.0);
+        assert_eq!(out_minus.len(), 900);
+    }
+
+    #[test]
+    fn test_apply_fading() {
+        let mut sig = vec![1.0f32; 100];
+        let mut rng = StdRng::seed_from_u64(42);
+        apply_fading(&mut sig, 0.5, &mut rng);
+
+        // フェージングにより 1.0 未満になっているはず
+        assert!(sig.iter().all(|&v| v <= 1.0));
+        // 全く変化がないということはないはず
+        assert!(sig.iter().any(|&v| v < 1.0));
+    }
+
+    #[test]
+    fn test_e2e_dsss_smoke() {
+        let cli = Cli {
+            phy: "dsss".to_string(),
+            mode: "point".to_string(),
+            trials: 1,
+            payload_bytes: 16,
+            deadline_sec: 2.0,
+            max_sec: 5.0,
+            chunk_samples: 1024,
+            gap_samples: 0,
+            seed: 123,
+            target_p_complete: 0.95,
+            base: ChannelImpairment {
+                sigma: 0.0,
+                cfo_hz: 0.0,
+                ppm: 0.0,
+                burst_loss: 0.0,
+                fading_depth: 0.0,
+                multipath: MultipathProfile::none(),
+            },
+            sweep_awgn: vec![],
+            sweep_ppm: vec![],
+            sweep_loss: vec![],
+            sweep_fading: vec![],
+            sample_rate: 48000.0,
+            chip_rate: 8000.0,
+            carrier_freq: 15000.0,
+            mseq_order: 4,
+            rrc_alpha: 0.3,
+            sync_word_bits: 16,
+            preamble_repeat: 2,
+            packets_per_burst: 1,
+        };
+
+        let res = run_trial_dsss_e2e(&cli.base, &cli, cli.seed);
+        assert!(res.success, "DSSS should succeed in ideal environment");
+        assert_eq!(res.bit_errors, 0);
+    }
+
+    #[test]
+    fn test_e2e_mary_smoke() {
+        let cli = Cli {
+            phy: "mary".to_string(),
+            mode: "point".to_string(),
+            trials: 1,
+            payload_bytes: 16,
+            deadline_sec: 2.0,
+            max_sec: 5.0,
+            chunk_samples: 1024,
+            gap_samples: 0,
+            seed: 456,
+            target_p_complete: 0.95,
+            base: ChannelImpairment {
+                sigma: 0.0,
+                cfo_hz: 0.0,
+                ppm: 0.0,
+                burst_loss: 0.0,
+                fading_depth: 0.0,
+                multipath: MultipathProfile::none(),
+            },
+            sweep_awgn: vec![],
+            sweep_ppm: vec![],
+            sweep_loss: vec![],
+            sweep_fading: vec![],
+            sample_rate: 48000.0,
+            chip_rate: 8000.0,
+            carrier_freq: 15000.0,
+            mseq_order: 4,
+            rrc_alpha: 0.3,
+            sync_word_bits: 16,
+            preamble_repeat: 2,
+            packets_per_burst: 1,
+        };
+
+        let res = run_trial_mary_e2e(&cli.base, &cli, cli.seed);
+        assert!(res.success, "M-ARY should succeed in ideal environment");
+        assert_eq!(res.bit_errors, 0);
     }
 }

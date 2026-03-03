@@ -121,7 +121,7 @@ describe('MistcastBackend', () => {
     // startEncoder does not return anything in the latest implementation
     await backend.startEncoder(new Uint8Array([65, 66]), 48000);
 
-    expect(hoisted.WasmEncoder).toHaveBeenCalledWith(48000);
+    expect(hoisted.WasmEncoder).toHaveBeenCalledWith(48000, 1);
     expect(mockPort.postMessage).toHaveBeenCalled();
   });
 
@@ -134,7 +134,7 @@ describe('MistcastBackend', () => {
     await backend.startDecoder(48000, onPacket, onProgress);
     const result = await backend.processSamples(new Float32Array(128));
 
-    expect(hoisted.WasmDecoder).toHaveBeenCalledWith(48000);
+    expect(hoisted.WasmDecoder).toHaveBeenCalledWith(48000, 1);
     expect(result?.complete).toBe(true);
 
     // recovered_data は [size: 2bytes][actual_data] の形式を返す

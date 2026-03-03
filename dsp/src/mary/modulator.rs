@@ -331,10 +331,10 @@ impl Modulator {
     pub fn delay(&self) -> usize {
         // 1. RRCフィルタの群遅延 (ベースバンドレート)
         let rrc_delay_bb = self.rrc_i.delay(); // (num_taps - 1) / 2
-        // 2. リサンプラの群遅延 (ベースバンドレート)
-        let resampler_delay_bb = self.resampler_i.delay() as f64 
+                                               // 2. リサンプラの群遅延 (ベースバンドレート)
+        let resampler_delay_bb = self.resampler_i.delay() as f64
             / (self.config.sample_rate as f64 / self.proc_config.sample_rate as f64);
-        
+
         // 合計遅延をターゲットレートへ換算
         let ratio = self.config.sample_rate as f64 / self.proc_config.sample_rate as f64;
         ((rrc_delay_bb as f64 + resampler_delay_bb) * ratio).round() as usize
@@ -369,11 +369,11 @@ mod tests {
 
         let config = DspConfig::default_48k();
         let expected_base = 15 * config.preamble_repeat * config.samples_per_chip();
-        
+
         // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
         // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
-        let expected_total = expected_base + 130; 
-        
+        let expected_total = expected_base + 130;
+
         let diff = (preamble.len() as i32 - expected_total as i32).abs();
         assert!(
             diff <= 2,
@@ -426,14 +426,22 @@ mod tests {
         samples.extend(mod_.flush());
 
         // ピーク位置を特定
-        let (peak_idx, &peak_val) = samples.iter().enumerate()
+        let (peak_idx, &peak_val) = samples
+            .iter()
+            .enumerate()
             .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
             .unwrap();
 
-        println!("Mary Modulator Latency: peak_idx={}, delay()={}, peak_val={:.4}", peak_idx, expected_delay, peak_val);
+        println!(
+            "Mary Modulator Latency: peak_idx={}, delay()={}, peak_val={:.4}",
+            peak_idx, expected_delay, peak_val
+        );
 
         // delay() の戻り値が物理現象（インパルス応答のピーク）と完全に一致することを保証
-        assert_eq!(peak_idx, expected_delay, "Mary Modulator::delay() mismatch with physical peak position");
+        assert_eq!(
+            peak_idx, expected_delay,
+            "Mary Modulator::delay() mismatch with physical peak position"
+        );
         assert!(peak_val > 0.5, "Peak is too weak");
     }
 
@@ -653,7 +661,7 @@ mod tests {
         // 3. ペイロード: sf=16, symbols=1, spc=6 -> 96
         // 4. マージン: sf=16, symbols=1, spc=6 -> 96
         let preamble_len = 15 * 2 * 6;
-        let sync_len = 15 * 16 * 6; 
+        let sync_len = 15 * 16 * 6;
         let payload_len = 16 * 1 * 6;
         let margin_len = 16 * 1 * 6;
         let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1812
@@ -661,7 +669,7 @@ mod tests {
         // 物理的テール (32サンプル) を加算
         // encode_frame() 内部ですでに flush() が呼ばれており、RRCのテールは押し出されている。
         // リサンプラによる物理的な伸び（立ち上がり16 + 立ち下がり16）の 32 サンプルを加算する。
-        let expected_total = expected_base + 32; 
+        let expected_total = expected_base + 32;
 
         assert!(
             (frame.len() as i32 - expected_total as i32).abs() <= 5,
@@ -671,7 +679,6 @@ mod tests {
             expected_base,
             (frame.len() as i32 - expected_total as i32).abs()
         );
-
     }
 
     /// プリアンブル構造を検証する
@@ -687,7 +694,7 @@ mod tests {
         let expected_base = sf * repeat * mod_.config.samples_per_chip(); // 180
 
         // 物理的テール (130サンプル) を加算
-        let expected_total = expected_base + 130; 
+        let expected_total = expected_base + 130;
 
         let diff = (preamble.len() as i32 - expected_total as i32).abs();
         assert!(
@@ -915,7 +922,7 @@ mod tests {
         // 2. 信号エネルギーの大部分は中央（ピーク付近）に集中する（RRCの特性）
         let total_energy: f32 = samples.iter().map(|&s| s * s).sum();
         let peak_pos = mod_.delay();
-        let window_half = 64; 
+        let window_half = 64;
         let start = peak_pos.saturating_sub(window_half);
         let end = (peak_pos + window_half).min(samples.len());
 
@@ -1209,13 +1216,15 @@ mod tests {
             // Modulator::delay() は最初の入力 $x[0]$ がピークに達する時間である。
             // ベースバンドRRCフィルタの遅延 (24) は出力レートで 48 サンプルに相当する。
             // シンボルのエネルギー中心を正確に捉えるため、このオフセットを加味する。
-            let rrc_offset = 48; 
+            let rrc_offset = 48;
             let center = delay + sym_idx * symbol_len + rrc_offset;
             let start = center.saturating_sub(symbol_len / 2);
             let end = center + symbol_len / 2;
-            
-            if end > preamble.len() { break; }
-            
+
+            if end > preamble.len() {
+                break;
+            }
+
             let energy: f32 = preamble[start..end].iter().map(|&s| s * s).sum();
             symbol_energies.push(energy);
         }
@@ -1225,12 +1234,17 @@ mod tests {
         // 最後のシンボルのエネルギーは他のシンボルと同等であるはず
         if symbol_energies.len() >= 2 {
             let last_energy = *symbol_energies.last().unwrap();
-            for (i, &energy) in symbol_energies.iter().enumerate().take(symbol_energies.len() - 1) {
+            for (i, &energy) in symbol_energies
+                .iter()
+                .enumerate()
+                .take(symbol_energies.len() - 1)
+            {
                 let ratio = last_energy / energy;
                 assert!(
                     ratio > 0.8 && ratio < 1.2,
                     "Energy mismatch between symbol {} and last: ratio={:.4}",
-                    i, ratio
+                    i,
+                    ratio
                 );
             }
         }

@@ -102,7 +102,7 @@ impl Resampler {
 
         // 常に history[base .. base + taps_per_phase] の窓で演算する。
         let limit = (self.history.len() as isize - self.taps_per_phase as isize + 1).max(0) as f64;
-        
+
         while self.phase < limit {
             let base = self.phase.floor() as usize;
             let frac = self.phase - base as f64;
@@ -113,7 +113,7 @@ impl Resampler {
             }
 
             let coeffs = &self.coeffs[phase_idx];
-            
+
             let mut sum = 0.0f32;
             for (tap, &h) in coeffs.iter().enumerate() {
                 // history の中から現在の位相に対応する窓を畳み込む
@@ -130,7 +130,7 @@ impl Resampler {
             self.history.drain(0..consumed);
             self.phase -= consumed as f64;
         }
-        
+
         if self.phase < 0.0 {
             self.phase = 0.0;
         }
@@ -156,7 +156,7 @@ impl Resampler {
         let padding_len = self.taps_per_phase - 1;
         let padding = vec![0.0f32; padding_len];
         self.process(&padding, output);
-        
+
         // 状態リセット
         self.history = vec![0.0; self.taps_per_phase - 1];
         self.phase = 0.0;
@@ -464,7 +464,7 @@ mod tests {
     fn test_negative_phase_drift_repro() {
         let mut rs = Resampler::new_with_cutoff(24000, 48000, None);
         println!("\nInitial phase: {}", rs.phase);
-        
+
         let mut total_output = 0;
         // 1サンプルずつの入力を20回繰り返す
         for i in 0..20 {
@@ -473,36 +473,47 @@ mod tests {
             total_output += out.len();
             println!("Iter {}: phase={}, output_len={}", i, rs.phase, out.len());
         }
-        
+
         // 期待される挙動: 24k->48k (比率2.0) なので、20個入れたら約40個出るべき
         // バグがある場合、phase が負に沈み続け、出力が全く出ないか、あるいは負のインデックスでクラッシュする
         println!("Total output samples: {}", total_output);
-        assert!(total_output > 0, "Resampler produced NO output due to negative phase drift!");
+        assert!(
+            total_output > 0,
+            "Resampler produced NO output due to negative phase drift!"
+        );
     }
 
     #[test]
     fn test_resampler_latency_and_timing_accuracy() {
         // 24kHz -> 48kHz (ratio 2.0)
         let mut rs = Resampler::new_with_cutoff(24000, 48000, None);
-        let expected_delay_out = rs.delay(); 
+        let expected_delay_out = rs.delay();
 
         // 0番目にインパルスを入力
         let mut input = vec![0.0f32; 64];
-        input[0] = 1.0; 
-        
+        input[0] = 1.0;
+
         let mut output = Vec::new();
         rs.process(&input, &mut output);
         rs.flush(&mut output);
 
         // 出力の中で最大の振幅（ピーク）を持つ位置を探す
-        let (peak_idx, &peak_val) = output.iter().enumerate()
+        let (peak_idx, &peak_val) = output
+            .iter()
+            .enumerate()
             .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
             .unwrap();
 
-        println!("Resampler Delay Verification: Peak at idx={}, value={:.4}, delay()={}", peak_idx, peak_val, expected_delay_out);
+        println!(
+            "Resampler Delay Verification: Peak at idx={}, value={:.4}, delay()={}",
+            peak_idx, peak_val, expected_delay_out
+        );
 
         // 物理的整合性の検証: 0番目の入力がピークに達するまでの時間は delay() と一致しなければならない
-        assert_eq!(peak_idx, expected_delay_out, "Resampler peak position mismatch with delay()");
+        assert_eq!(
+            peak_idx, expected_delay_out,
+            "Resampler peak position mismatch with delay()"
+        );
         assert!(peak_val > 0.5, "Impulse response peak is too weak");
     }
 }

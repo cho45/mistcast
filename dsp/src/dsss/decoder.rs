@@ -11,7 +11,7 @@ use crate::{
     common::rrc_filter::RrcFilter,
     dsss::sync::{SyncDetector, SyncResult},
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
-    params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
+    params::{MODULATION, PAYLOAD_SIZE},
     DifferentialModulation, DspConfig,
 };
 use num_complex::Complex32;
@@ -158,11 +158,11 @@ impl Decoder {
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
-            config: dsp_config,
+            config: dsp_config.clone(),
             proc_config,
             agc_peak_fast: 0.5,
             agc_peak_slow: 0.5,
-            packets_per_sync_burst: PACKETS_PER_SYNC_BURST,
+            packets_per_sync_burst: dsp_config.packets_per_burst,
             lo_nco,
             last_search_idx: 0,
             current_sync: None,

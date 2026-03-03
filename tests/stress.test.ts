@@ -18,11 +18,10 @@ describe('WASM Reality Stress Test (Fixed Protocol)', () => {
         const data = new TextEncoder().encode("Hello Acoustic World!");
         const sampleRate = 48000;
 
-        const encoder = new WasmDsssEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate, 1);
         encoder.set_data(data);
 
-        const decoder = new WasmDsssDecoder(sampleRate);
-
+        const decoder = new WasmDsssDecoder(sampleRate, 1);
         let complete = false;
         let seed = 0x12345678;
         const nextChunkSize = () => {

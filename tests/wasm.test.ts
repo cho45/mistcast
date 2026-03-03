@@ -18,10 +18,10 @@ describe('WASM E2E Integration (DSSS Protocol)', () => {
         const data = new TextEncoder().encode("Hello DSSS World!");
         const sampleRate = 48000;
         
-        const encoder = new WasmDsssEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate, 1);
         encoder.set_data(data);
         
-        const decoder = new WasmDsssDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate, 1);
         let complete = false;
         
         for (let i = 0; i < 30; i++) {
@@ -57,10 +57,10 @@ describe('WASM E2E Integration (Mary Protocol)', () => {
         const data = new TextEncoder().encode("Hello Mary World!");
         const sampleRate = 48000;
         
-        const encoder = new WasmMaryEncoder(sampleRate);
+        const encoder = new WasmMaryEncoder(sampleRate, 3);
         encoder.set_data(data);
         
-        const decoder = new WasmMaryDecoder(sampleRate);
+        const decoder = new WasmMaryDecoder(sampleRate, 3);
         let complete = false;
         
         for (let i = 0; i < 30; i++) {
@@ -96,7 +96,7 @@ describe('Performance Benchmark', () => {
     it('should measure real-time processing margin for DSSS at 48kHz', () => {
         const sampleRate = 48000;
         const data = new TextEncoder().encode("Performance Test Data for DSSS protocol.");
-        const encoder = new WasmDsssEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate, 1);
         encoder.set_data(data);
 
         let allSamples = new Float32Array(0);
@@ -110,7 +110,7 @@ describe('Performance Benchmark', () => {
             }
         }
         
-        const decoder = new WasmDsssDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate, 1);
         const startTime = performance.now();
         decoder.process_samples(allSamples);
         const endTime = performance.now();
@@ -130,7 +130,7 @@ describe('Performance Benchmark', () => {
     it('should measure real-time processing margin for Mary at 48kHz', () => {
         const sampleRate = 48000;
         const data = new TextEncoder().encode("Performance Test Data for Mary protocol.");
-        const encoder = new WasmMaryEncoder(sampleRate);
+        const encoder = new WasmMaryEncoder(sampleRate, 3);
         encoder.set_data(data);
 
         let allSamples = new Float32Array(0);
@@ -144,7 +144,7 @@ describe('Performance Benchmark', () => {
             }
         }
         
-        const decoder = new WasmMaryDecoder(sampleRate);
+        const decoder = new WasmMaryDecoder(sampleRate, 3);
         const startTime = performance.now();
         decoder.process_samples(allSamples);
         const endTime = performance.now();

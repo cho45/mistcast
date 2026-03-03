@@ -56,6 +56,7 @@ pub struct DspConfig {
     pub rrc_taps_per_symbol: usize,
     pub preamble_repeat: usize,
     pub sync_word_bits: usize,
+    pub packets_per_burst: usize,
 }
 
 impl DspConfig {
@@ -69,6 +70,7 @@ impl DspConfig {
             rrc_taps_per_symbol: 16,
             preamble_repeat: params::PREAMBLE_REPEAT,
             sync_word_bits: params::SYNC_WORD_BITS,
+            packets_per_burst: params::PACKETS_PER_SYNC_BURST,
         }
     }
 
@@ -92,6 +94,7 @@ impl DspConfig {
             rrc_taps_per_symbol: base.rrc_taps_per_symbol,
             preamble_repeat: base.preamble_repeat,
             sync_word_bits: base.sync_word_bits,
+            packets_per_burst: base.packets_per_burst,
         }
     }
     pub fn default_48k() -> Self {
@@ -151,9 +154,10 @@ pub struct WasmDsssDecoder {
 #[wasm_bindgen]
 impl WasmDsssDecoder {
     #[wasm_bindgen(constructor)]
-    pub fn new(sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
         console_error_panic_hook::set_once();
-        let config = DspConfig::new(sample_rate);
+        let mut config = DspConfig::new(sample_rate);
+        config.packets_per_burst = packets_per_burst;
         WasmDsssDecoder {
             inner: dsss::decoder::Decoder::new(
                 params::FIXED_K * params::PAYLOAD_SIZE,
@@ -198,8 +202,9 @@ pub struct WasmDsssEncoder {
 #[wasm_bindgen]
 impl WasmDsssEncoder {
     #[wasm_bindgen(constructor)]
-    pub fn new(sample_rate: f32) -> Self {
-        let config = DspConfig::new(sample_rate);
+    pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
+        let mut config = DspConfig::new(sample_rate);
+        config.packets_per_burst = packets_per_burst;
         let enc_config = dsss::encoder::EncoderConfig::new(config);
         WasmDsssEncoder {
             inner: dsss::encoder::Encoder::new(enc_config),
@@ -220,10 +225,9 @@ impl WasmDsssEncoder {
         self.fountain_encoder = Some(coding::fountain::FountainEncoder::new(data, params));
     }
     pub fn pull_frame(&mut self) -> Option<Vec<f32>> {
-        let burst_count = params::PACKETS_PER_SYNC_BURST.max(1);
-        let mut packets = Vec::with_capacity(burst_count);
         let encoder = self.fountain_encoder.as_mut()?;
-        for _ in 0..burst_count {
+        let mut packets = Vec::with_capacity(self.inner.config().packets_per_sync_burst);
+        for _ in 0..self.inner.config().packets_per_sync_burst {
             packets.push(encoder.next_packet());
         }
         Some(self.inner.encode_burst(&packets))
@@ -282,9 +286,10 @@ pub struct WasmMaryDecoder {
 #[wasm_bindgen]
 impl WasmMaryDecoder {
     #[wasm_bindgen(constructor)]
-    pub fn new(sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
         console_error_panic_hook::set_once();
-        let config = DspConfig::new(sample_rate);
+        let mut config = DspConfig::new(sample_rate);
+        config.packets_per_burst = packets_per_burst;
         WasmMaryDecoder {
             inner: mary::decoder::Decoder::new(
                 params::FIXED_K * params::PAYLOAD_SIZE,
@@ -328,8 +333,9 @@ pub struct WasmMaryEncoder {
 #[wasm_bindgen]
 impl WasmMaryEncoder {
     #[wasm_bindgen(constructor)]
-    pub fn new(sample_rate: f32) -> Self {
-        let config = DspConfig::new(sample_rate);
+    pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
+        let mut config = DspConfig::new(sample_rate);
+        config.packets_per_burst = packets_per_burst;
         WasmMaryEncoder {
             inner: mary::encoder::Encoder::new(config),
         }

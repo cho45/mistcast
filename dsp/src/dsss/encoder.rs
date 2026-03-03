@@ -6,7 +6,7 @@ use crate::{
     coding::interleaver::BlockInterleaver,
     dsss::modulator::Modulator,
     frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX},
-    params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
+    params::PAYLOAD_SIZE,
     DspConfig,
 };
 
@@ -29,7 +29,7 @@ impl EncoderConfig {
         let cols = fec_bits.div_ceil(rows);
         EncoderConfig {
             fountain_k: 10,
-            packets_per_sync_burst: PACKETS_PER_SYNC_BURST,
+            packets_per_sync_burst: dsp.packets_per_burst,
             il_rows: rows,
             il_cols: cols,
             dsp,
@@ -114,6 +114,10 @@ impl Encoder {
             "fountain_k must be in 1..={LT_K_MAX}"
         );
         self.config.fountain_k = fountain_k;
+    }
+
+    pub fn config(&self) -> &EncoderConfig {
+        &self.config
     }
 }
 

@@ -13,6 +13,9 @@ import initSimd, {
 } from "../pkg-simd/dsp";
 import { RecycleTransferSender } from "./recycle-transfer-bridge";
 
+const DSSS_PACKETS_PER_BURST = 1;
+const MARY_PACKETS_PER_BURST = 3;
+
 type WasmEncoderLike = {
   set_data(data: Uint8Array): void;
   pull_frame(): Float32Array | null | undefined;
@@ -41,8 +44,8 @@ type WasmDecoderLike = {
   reset(): void;
 };
 
-type WasmEncoderCtor = new (sampleRate: number) => WasmEncoderLike;
-type WasmDecoderCtor = new (sampleRate: number) => WasmDecoderLike;
+type WasmEncoderCtor = new (sampleRate: number, packetsPerBurst: number) => WasmEncoderLike;
+type WasmDecoderCtor = new (sampleRate: number, packetsPerBurst: number) => WasmDecoderLike;
 type WasmInitFn = () => Promise<unknown>;
 type WasmBindings = {
   init: WasmInitFn;
@@ -234,9 +237,9 @@ export class MistcastBackend {
     }
     
     if (mode === "mary") {
-      this.encoder = new bindings.WasmMaryEncoder(sampleRate);
+      this.encoder = new bindings.WasmMaryEncoder(sampleRate, MARY_PACKETS_PER_BURST);
     } else {
-      this.encoder = new bindings.WasmDsssEncoder(sampleRate);
+      this.encoder = new bindings.WasmDsssEncoder(sampleRate, DSSS_PACKETS_PER_BURST);
     }
 
     // 元のデータの先頭にサイズ情報（2バイト、ビッグエンディアン）を埋め込む
@@ -308,9 +311,9 @@ export class MistcastBackend {
     }
 
     if (mode === "mary") {
-        this.decoder = new bindings.WasmMaryDecoder(sampleRate);
+        this.decoder = new bindings.WasmMaryDecoder(sampleRate, MARY_PACKETS_PER_BURST);
     } else {
-        this.decoder = new bindings.WasmDsssDecoder(sampleRate);
+        this.decoder = new bindings.WasmDsssDecoder(sampleRate, DSSS_PACKETS_PER_BURST);
     }
     this.decoderProcessorStats = {
       blocks: 0,

@@ -12,20 +12,57 @@ use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 
 /// MaryDQPSKエンコーダ
+/// エンコーダ設定
+#[derive(Clone)]
+pub struct EncoderConfig {
+    pub fountain_k: usize,
+    pub packets_per_sync_burst: usize,
+    pub il_rows: usize,
+    pub il_cols: usize,
+    pub dsp: DspConfig,
+}
+
+impl EncoderConfig {
+    pub fn new(dsp: DspConfig) -> Self {
+        use crate::frame::packet::PACKET_BYTES;
+        let raw_bits = PACKET_BYTES * 8 + 6; // テールビット(6)含む
+        let fec_bits = raw_bits * 2;
+        let rows = 16;
+        let cols = fec_bits.div_ceil(rows);
+        EncoderConfig {
+            fountain_k: 10,
+            packets_per_sync_burst: dsp.packets_per_burst,
+            il_rows: rows,
+            il_cols: cols,
+            dsp,
+        }
+    }
+}
+
 pub struct Encoder {
+    config: EncoderConfig,
     modulator: Modulator,
     fountain_encoder: Option<FountainEncoder>,
-    fountain_k: usize,
 }
 
 impl Encoder {
     /// 新しいエンコーダを作成する
-    pub fn new(config: DspConfig) -> Self {
-        let modulator = Modulator::new(config);
+    pub fn new(dsp_config: DspConfig) -> Self {
+        let config = EncoderConfig::new(dsp_config);
+        let modulator = Modulator::new(config.dsp.clone());
         Encoder {
+            config,
             modulator,
             fountain_encoder: None,
-            fountain_k: 10,
+        }
+    }
+
+    pub fn with_config(config: EncoderConfig) -> Self {
+        let modulator = Modulator::new(config.dsp.clone());
+        Encoder {
+            config,
+            modulator,
+            fountain_encoder: None,
         }
     }
 
@@ -39,7 +76,7 @@ impl Encoder {
             needed_k,
             max_k
         );
-        self.fountain_k = needed_k;
+        self.config.fountain_k = needed_k;
         let params = crate::coding::fountain::FountainParams::new(needed_k, PAYLOAD_SIZE);
         self.fountain_encoder = Some(FountainEncoder::new(data, params));
     }
@@ -47,8 +84,12 @@ impl Encoder {
     /// フレームをエンコードする
     pub fn encode_frame(&mut self) -> Option<Vec<f32>> {
         let encoder = self.fountain_encoder.as_mut()?;
-        let packet = encoder.next_packet();
-        Some(self.encode_packet(&packet))
+        let burst_count = self.config.packets_per_sync_burst.max(1);
+        let mut packets = Vec::with_capacity(burst_count);
+        for _ in 0..burst_count {
+            packets.push(encoder.next_packet());
+        }
+        Some(self.encode_burst(&packets))
     }
 
     /// バーストをエンコードする
@@ -70,7 +111,7 @@ impl Encoder {
     /// パケットをビット列にエンコードする（テスト用）
     pub fn encode_packet_bits(&mut self, packet: &FountainPacket) -> Vec<u8> {
         let seq = (packet.seq % (u32::from(u16::MAX) + 1)) as u16;
-        let pkt = Packet::new(seq, self.fountain_k(), &packet.data);
+        let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
         let pkt_bytes = pkt.serialize();
         let bits = fec::bytes_to_bits(&pkt_bytes);
         let coded = fec::encode(&bits);
@@ -101,7 +142,7 @@ impl Encoder {
 
     /// Fountain Kを取得する
     fn fountain_k(&self) -> usize {
-        self.fountain_k
+        self.config.fountain_k
     }
 
     /// フラッシュ
