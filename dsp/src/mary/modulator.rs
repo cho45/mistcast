@@ -139,26 +139,33 @@ impl Modulator {
     /// ビット列をチップ列に変換（テスト用）
     pub fn bits_to_chips(&mut self, bits: &[u8]) -> (Vec<f32>, Vec<f32>) {
         let sf = 16; // Payloadはsf=16
-        let num_symbols = bits.len() / 6;
+        let num_symbols = bits.len().div_ceil(6);
         let mut chips_i = Vec::with_capacity(num_symbols * sf);
         let mut chips_q = Vec::with_capacity(num_symbols * sf);
 
-        let mut idx = 0usize;
-        while idx + 6 <= bits.len() {
+        for sym_idx in 0..num_symbols {
+            let start_bit = sym_idx * 6;
+            let end_bit = (start_bit + 6).min(bits.len());
+            let mut sym_bits = [0u8; 6];
+            for (i, bit_idx) in (start_bit..end_bit).enumerate() {
+                sym_bits[i] = bits[bit_idx];
+            }
+
             // 上位4ビット: Walsh index (0-15)
-            let w_idx =
-                ((bits[idx] << 3) | (bits[idx + 1] << 2) | (bits[idx + 2] << 1) | bits[idx + 3])
-                    & 0x0F;
+            let w_idx = ((sym_bits[0] << 3)
+                | (sym_bits[1] << 2)
+                | (sym_bits[2] << 1)
+                | sym_bits[3])
+                & 0x0F;
 
             // 下位2ビット: DQPSK phase
-            let b0 = bits[idx + 4];
-            let b1 = bits[idx + 5];
+            let b0 = sym_bits[4];
+            let b1 = sym_bits[5];
             let delta = dqpsk_delta(b0, b1);
             self.prev_phase = (self.prev_phase + delta) & 0x03;
             let (si, sq) = phase_to_iq(self.prev_phase);
 
             self.append_mary_symbol_chips(w_idx, si, sq, &mut chips_i, &mut chips_q);
-            idx += 6;
         }
 
         (chips_i, chips_q)

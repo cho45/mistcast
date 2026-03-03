@@ -42,11 +42,15 @@ pub struct Decoder {
     pub recovered_data: Option<Vec<u8>>,
     lo_nco: Nco,
     sync_detector: MarySyncDetector,
+    pub packets_per_sync_burst: usize,
 
     // 同期状態
     last_search_idx: usize,
     current_sync: Option<SyncResult>,
     last_packet_seq: Option<u32>,
+
+    /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
+    pub llr_callback: Option<Box<dyn FnMut(&[f32]) + Send>>,
 
     // 統計
     pub stats_total_samples: usize,
@@ -76,9 +80,11 @@ impl Decoder {
             sync_detector: MarySyncDetector::new(proc_config.clone(), tc, tf),
             proc_config,
             lo_nco,
+            packets_per_sync_burst: 1,
             last_search_idx: 0,
             current_sync: None,
             last_packet_seq: None,
+            llr_callback: None,
             stats_total_samples: 0,
         }
     }
@@ -145,7 +151,7 @@ impl Decoder {
         let rows = 16;
         let cols = fec_bits.div_ceil(rows);
         let interleaved_bits = rows * cols;
-        let expected_symbols = interleaved_bits.div_ceil(6);
+        let expected_symbols_per_packet = interleaved_bits.div_ceil(6);
 
         let max_buffer_len = 100_000;
         let drain_len = 50_000;
@@ -187,7 +193,8 @@ impl Decoder {
             let sync_word_bits = self.config.sync_word_bits;
             let payload_start = start + sync_word_bits * sf_preamble * spc;
 
-            let required_samples = expected_symbols * sf_payload * spc;
+            let total_payload_symbols = expected_symbols_per_packet * self.packets_per_sync_burst;
+            let required_samples = total_payload_symbols * sf_payload * spc;
 
             if self.sample_buffer_i.len() < payload_start + required_samples {
                 // タイムアウト監視
@@ -195,15 +202,15 @@ impl Decoder {
                     < self.sample_buffer_i.len().saturating_sub(max_buffer_len)
                 {
                     self.current_sync = None;
-                    self.last_search_idx = 0;
+                    self.last_search_idx = start + 1;
                     continue;
                 }
                 break;
             }
 
-            let mut all_llrs = Vec::new();
+            let mut all_llrs = Vec::with_capacity(expected_symbols_per_packet * 6 * self.packets_per_sync_burst);
 
-            for sym_idx in 0..expected_symbols {
+            for sym_idx in 0..total_payload_symbols {
                 let symbol_start = payload_start + sym_idx * sf_payload * spc;
 
                 let mut symbol_samples = Vec::with_capacity(sf_payload);
@@ -223,9 +230,8 @@ impl Decoder {
                 self.decode_llrs(&all_llrs);
             }
 
-            let consumed = payload_start + expected_symbols * sf_payload * spc;
-            self.sample_buffer_i.drain(0..consumed);
-            self.sample_buffer_q.drain(0..consumed);
+            self.sample_buffer_i.drain(0..payload_start + required_samples);
+            self.sample_buffer_q.drain(0..payload_start + required_samples);
             self.last_search_idx = 0;
             self.current_sync = None;
         }
@@ -254,6 +260,11 @@ impl Decoder {
                 if scrambler.next_bit() == 1 {
                     *llr = -*llr;
                 }
+            }
+
+            // [観測] コールバックの呼び出し
+            if let Some(ref mut callback) = self.llr_callback {
+                callback(&deinterleaved_llr);
             }
 
             // FECデコード（LLR -> ビット）
@@ -1009,11 +1020,193 @@ mod tests {
 
         // 検証：データが正しく復元されたこと
         let recovered = decoder.recovered_data().expect("Should recover data");
-        assert_eq!(
-            &recovered[..data.len()],
-            &data[..],
-            "Recovered data mismatch after {} frames",
-            total_frames
-        );
+        assert_eq!(&recovered[..data.len()], &data[..], "Recovered data mismatch after {} frames", total_frames);
     }
-}
+
+    fn apply_clock_drift_ppm(input: &[f32], ppm: f32) -> Vec<f32> {
+        if input.is_empty() || ppm.abs() < 1.0 {
+            return input.to_vec();
+        }
+
+        let out_len = input.len();
+        let mut out = Vec::with_capacity(out_len);
+
+        let mut time = 0.0f32;
+        let time_step = 1.0 + ppm / 1_000_000.0;
+
+        for _ in 0..out_len {
+            let i0 = time.floor() as usize;
+            let frac = (time - i0 as f32).clamp(0.0, 1.0);
+
+            if i0 + 1 < input.len() {
+                let a = input[i0];
+                let b = input[i0 + 1];
+                out.push(a + (b - a) * frac);
+            } else if i0 < input.len() {
+                out.push(input[i0]);
+            } else {
+                out.push(input[input.len() - 1]);
+            }
+
+            time += time_step;
+        }
+
+        out
+    }
+
+    #[test]
+    fn test_decoder_tracking_tolerates_clock_drift_ppm() {
+        use crate::mary::encoder::Encoder;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let config = DspConfig::default_48k();
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(640, 40, config);
+        decoder.packets_per_sync_burst = 40;
+
+        // 640バイト (40パケット分) のデータ
+        let data = vec![0x55u8; 640];
+        encoder.set_data(&data);
+
+        let mut signal = Vec::new();
+        let mut expected_fec_bits_list = Vec::new();
+
+        // 1回の同期で40パケット分をバースト送信
+        let mut packets = Vec::new();
+        for _ in 0..40 {
+            let p = encoder.fountain_encoder_mut().unwrap().next_packet();
+            let seq = (p.seq % (u32::from(u16::MAX) + 1)) as u16;
+            let pkt = Packet::new(seq, 40, &p.data);
+            let bits = crate::coding::fec::bytes_to_bits(&pkt.serialize());
+            let fec_bits = crate::coding::fec::encode(&bits);
+            expected_fec_bits_list.push(fec_bits);
+            packets.push(p);
+        }
+        signal.extend(encoder.encode_burst(&packets));
+        signal.extend(encoder.flush());
+        signal.extend(vec![0.0; 1000]);
+
+        // 物理時間の計算 (fs=48000)
+        let physical_duration_sec = signal.len() as f32 / 48000.0;
+
+        // コールバックでLLRを回収
+        let received_llrs = Arc::new(Mutex::new(Vec::new()));
+        let received_llrs_clone = Arc::clone(&received_llrs);
+        decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
+            received_llrs_clone.lock().unwrap().push(llrs.to_vec());
+        }));
+
+        // 200ppm のクロックずれを付加。
+        let drifted = apply_clock_drift_ppm(&signal, 200.0);
+        
+        let start_time = Instant::now();
+        for chunk in drifted.chunks(2048) {
+            decoder.process_samples(chunk);
+            if decoder.recovered_data().is_some() { break; }
+        }
+        let processing_duration = start_time.elapsed();
+        let realtime_ratio = processing_duration.as_secs_f32() / physical_duration_sec;
+
+        println!("--- Performance & BER Trend (Clock Drift 200ppm) ---");
+        println!("Processing Time: {:?}, Physical Time: {:.3}s, Ratio: {:.3}", 
+                 processing_duration, physical_duration_sec, realtime_ratio);
+
+        let llrs = received_llrs.lock().unwrap();
+        for (i, p_llrs) in llrs.iter().enumerate() {
+            let expected = &expected_fec_bits_list[i];
+            let mut errors = 0;
+            for (j, &bit) in expected.iter().enumerate() {
+                let llr = p_llrs[j];
+                if (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0) {
+                    errors += 1;
+                }
+            }
+            if i % 10 == 0 || i == llrs.len() - 1 {
+                println!("Packet {}: {} errors / {} bits", i, errors, expected.len());
+            }
+        }
+
+        assert!(realtime_ratio < 1.0, "Processing too slow: ratio={}", realtime_ratio);
+        let recovered = decoder.recovered_data()
+            .expect("Decoder should recover data under clock drift (needs tracking)");
+        assert_eq!(&recovered[..data.len()], &data[..]);
+    }
+
+    #[test]
+    fn test_decoder_tracking_tolerates_carrier_offset() {
+        use crate::mary::encoder::Encoder;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let config = DspConfig::default_48k();
+        let mut encoder = Encoder::new(config.clone());
+        
+        let mut rx_config = config.clone();
+        rx_config.carrier_freq += 20.0;
+        let mut decoder = Decoder::new(640, 40, rx_config);
+        decoder.packets_per_sync_burst = 40;
+
+        let data = vec![0xAAu8; 640];
+        encoder.set_data(&data);
+
+        let mut signal = Vec::new();
+        let mut expected_fec_bits_list = Vec::new();
+        let mut packets = Vec::new();
+        for _ in 0..40 {
+            let p = encoder.fountain_encoder_mut().unwrap().next_packet();
+            let seq = (p.seq % (u32::from(u16::MAX) + 1)) as u16;
+            let pkt = Packet::new(seq, 40, &p.data);
+            let bits = crate::coding::fec::bytes_to_bits(&pkt.serialize());
+            let fec_bits = crate::coding::fec::encode(&bits);
+            expected_fec_bits_list.push(fec_bits);
+            packets.push(p);
+        }
+        signal.extend(encoder.encode_burst(&packets));
+        signal.extend(encoder.flush());
+        signal.extend(vec![0.0; 1000]);
+
+        let physical_duration_sec = signal.len() as f32 / 48000.0;
+
+        let received_llrs = Arc::new(Mutex::new(Vec::new()));
+        let received_llrs_clone = Arc::clone(&received_llrs);
+        decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
+            received_llrs_clone.lock().unwrap().push(llrs.to_vec());
+        }));
+
+        let start_time = Instant::now();
+        for chunk in signal.chunks(2048) {
+            decoder.process_samples(chunk);
+            if decoder.recovered_data().is_some() { break; }
+        }
+        let processing_duration = start_time.elapsed();
+        let realtime_ratio = processing_duration.as_secs_f32() / physical_duration_sec;
+
+        println!("--- Performance & BER Trend (Carrier Offset 20Hz) ---");
+        println!("Processing Time: {:?}, Physical Time: {:.3}s, Ratio: {:.3}", 
+                 processing_duration, physical_duration_sec, realtime_ratio);
+
+        let llrs = received_llrs.lock().unwrap();
+        for (i, p_llrs) in llrs.iter().enumerate() {
+            let expected = &expected_fec_bits_list[i];
+            let mut errors = 0;
+            for (j, &bit) in expected.iter().enumerate() {
+                let llr = p_llrs[j];
+                if (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0) {
+                    errors += 1;
+                }
+            }
+            if i % 10 == 0 || i == llrs.len() - 1 {
+                println!("Packet {}: {} errors / {} bits", i, errors, expected.len());
+            }
+        }
+
+        assert!(realtime_ratio < 1.0, "Processing too slow: ratio={}", realtime_ratio);
+        let recovered = decoder.recovered_data()
+            .expect("Decoder should recover data under carrier offset (needs tracking)");
+        assert_eq!(&recovered[..data.len()], &data[..]);
+    }
+
+
+    }
+
