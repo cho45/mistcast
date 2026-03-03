@@ -101,13 +101,17 @@ impl Modulator {
         let mut chips_i = Vec::with_capacity(sf * repeat);
         let mut chips_q = Vec::with_capacity(sf * repeat);
 
-        let walsh_seq = &self.wdict.w16[0]; // Walsh[0]
-
         for i in 0..repeat {
-            let sign = if i == repeat - 1 { -1.0 } else { 1.0 };
+            // 最後のシンボルのみ反転 (DBPSK delta=2)、それ以外はそのまま (delta=0)
+            let delta = if i == repeat - 1 { 2 } else { 0 };
+            self.prev_phase = (self.prev_phase + delta) & 0x03;
+            let (si, sq) = phase_to_iq(self.prev_phase);
+
+            let walsh_seq = &self.wdict.w16[0]; // Walsh[0]
             for &w in walsh_seq.iter().take(sf) {
-                chips_i.push(sign * w as f32);
-                chips_q.push(0.0);
+                let w_val = w as f32;
+                chips_i.push(si * w_val);
+                chips_q.push(sq * w_val);
             }
         }
 
@@ -237,21 +241,16 @@ impl Modulator {
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
-        self.prev_phase = 0;
+        // プリアンブル生成
+        // 注意: generate_preamble内部で chips_to_samples が呼ばれ、NCOが進む。
+        // プリアンブルは DBPSK (delta 0 or 2) として扱う。
+        let preamble = self.generate_preamble();
 
         // 同期ワード (DBPSK, Walsh[0], sf=15)
         let sync_bits: Vec<u8> = (0..self.config.sync_word_bits)
             .rev()
             .map(|i| ((SYNC_WORD >> i) & 1) as u8)
             .collect();
-
-        // プリアンブル
-        let preamble = self.generate_preamble();
-
-        // プリアンブルは [-W, W, W, -W] または [W, W, W, -W] のように
-        // 最終シンボルが必ず反転 (-1.0) するように生成される。
-        // 反転 = 位相π = phase_index 2 なので、後続のDBPSKはその状態から開始する。
-        self.prev_phase = 2;
 
         // 同期ワード (DBPSK)
         let mut sync_chips_i = Vec::new();
