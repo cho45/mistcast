@@ -138,6 +138,10 @@ impl FountainEncoder {
     pub fn next_packet(&mut self) -> FountainPacket {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
+        self.get_packet(seq)
+    }
+
+    pub fn get_packet(&self, seq: u32) -> FountainPacket {
         let coefficients = reconstruct_packet_coefficients(seq, self.params.k);
         let mut data = vec![0u8; self.params.block_size];
 

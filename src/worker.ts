@@ -16,6 +16,7 @@ import { RecycleTransferSender } from "./recycle-transfer-bridge";
 type WasmEncoderLike = {
   set_data(data: Uint8Array): void;
   pull_frame(): Float32Array | null | undefined;
+  pull_frame_with_seq(seq: number): Float32Array | null | undefined;
   reset(): void;
 };
 
@@ -130,6 +131,7 @@ export class MistcastBackend {
   private wasmInitialized = false;
   private wasmBindings: WasmBindings | null = null;
   private isEncoding = false;
+  private randomizeSeq = false;
 
   private onPacket: ((data: Uint8Array) => void) | null = null;
   private onProgress: ((p: any) => void) | null = null;
@@ -217,12 +219,13 @@ export class MistcastBackend {
     this.audioInPort.start();
   }
 
-  async startEncoder(data: Uint8Array, sampleRate: number, mode: ModemMode = "dsss") {
+  async startEncoder(data: Uint8Array, sampleRate: number, mode: ModemMode = "dsss", randomizeSeq = false) {
     await this.init();
     const bindings = this.requireBindings();
 
     // 前回の送信状態をリセット
     this.isEncoding = false;
+    this.randomizeSeq = randomizeSeq;
     this.audioOutPort?.postMessage({ type: "reset" });
 
     if (this.encoder) {
@@ -265,7 +268,15 @@ export class MistcastBackend {
     if (!this.isEncoding || !this.encoder || !this.audioPacketSender || !this.audioOutPort) return;
 
     while (this.isEncoding) {
-        const frame = this.encoder.pull_frame();
+        let frame: Float32Array | null | undefined;
+        if (this.randomizeSeq) {
+            // seq は 0..65535 の範囲でランダムに選択（ヘッダが u16 なので）
+            const randomSeq = Math.floor(Math.random() * 65536);
+            frame = this.encoder.pull_frame_with_seq(randomSeq);
+        } else {
+            frame = this.encoder.pull_frame();
+        }
+
         if (!frame) break;
 
         const samples = new Float32Array(frame);

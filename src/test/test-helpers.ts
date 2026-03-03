@@ -4,7 +4,8 @@ import { provideDemoRuntime, type ModemMode } from '../demo-runtime';
 export function createMockRuntime() {
   return {
     coreReady: ref(false),
-    modemMode: ref<ModemMode>('dsss'),
+    modemMode: ref<ModemMode>('mary'),
+    randomizeSeq: ref(false),
     isBusy: ref(false),
     ensureAudioCore: async () => ({
       audioContext: {

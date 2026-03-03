@@ -10,6 +10,7 @@ export type AudioCore = {
 export type DemoRuntime = {
   coreReady: Ref<boolean>;
   modemMode: Ref<ModemMode>;
+  randomizeSeq: Ref<boolean>;
   isBusy: Ref<boolean>;
   ensureAudioCore: () => Promise<AudioCore>;
 };
@@ -18,12 +19,14 @@ const DemoRuntimeKey: InjectionKey<DemoRuntime> = Symbol('DemoRuntime');
 
 export function createDemoRuntime(ensureAudioCore: () => Promise<AudioCore>): DemoRuntime {
   const coreReady = ref(false);
-  const modemMode = ref<ModemMode>('dsss');
+  const modemMode = ref<ModemMode>('mary');
+  const randomizeSeq = ref(false);
   const isBusy = ref(false);
 
   return {
     coreReady,
     modemMode,
+    randomizeSeq,
     isBusy,
     ensureAudioCore,
   };
