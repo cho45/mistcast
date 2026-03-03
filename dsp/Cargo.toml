@@ -21,6 +21,7 @@ getrandom = { version = "0.2", features = ["js"] }
 [dev-dependencies]
 # WAVファイル出力 (テスト・デバッグ用)
 hound = "3.5"
+rustfft = "6.1"
 
 [[example]]
 name = "encode_wav"

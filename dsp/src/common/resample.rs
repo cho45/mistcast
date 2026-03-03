@@ -7,7 +7,6 @@ pub struct Resampler {
     taps_per_phase: usize,
     coeffs: Vec<Vec<f32>>,
     history: Vec<f32>,
-    scratch: Vec<f32>,
 }
 
 impl Resampler {
@@ -84,8 +83,7 @@ impl Resampler {
             num_phases,
             taps_per_phase,
             coeffs,
-            history: vec![0.0; taps_per_phase - 1],
-            scratch: Vec::new(),
+            history: vec![0.0; taps_per_phase - 1], // 立ち上がり分の遅延をゼロで埋める
         }
     }
 
@@ -94,20 +92,19 @@ impl Resampler {
             return;
         }
 
-        let prefix_len = self.history.len();
+        // 入力をすべて履歴に追加
+        self.history.extend_from_slice(input);
 
-        // 履歴 + 入力
-        self.scratch.clear();
-        self.scratch.reserve(prefix_len + input.len());
-        self.scratch.extend_from_slice(&self.history);
-        self.scratch.extend_from_slice(input);
-        let buffer = &self.scratch;
+        // 処理に必要な最小の長さはフィルタの全タップ数
+        if self.history.len() < self.taps_per_phase {
+            return;
+        }
 
-        let center = (self.taps_per_phase as isize - 1) / 2;
-        // 未来サンプルが必要な範囲（phase >= len - center）は次チャンクへ持ち越す。
-        let safe_limit = input.len() as f64 - center as f64;
-        while self.phase < safe_limit {
-            let base = self.phase.floor() as isize;
+        // 常に history[base .. base + taps_per_phase] の窓で演算する。
+        let limit = (self.history.len() as isize - self.taps_per_phase as isize + 1).max(0) as f64;
+        
+        while self.phase < limit {
+            let base = self.phase.floor() as usize;
             let frac = self.phase - base as f64;
 
             let mut phase_idx = (frac * self.num_phases as f64).floor() as usize;
@@ -116,45 +113,70 @@ impl Resampler {
             }
 
             let coeffs = &self.coeffs[phase_idx];
-            let start = base - center;
-
+            
             let mut sum = 0.0f32;
             for (tap, &h) in coeffs.iter().enumerate() {
-                let src_idx = start + tap as isize;
-                let buf_idx = (src_idx + prefix_len as isize) as usize;
-                sum += buffer[buf_idx] * h;
+                // history の中から現在の位相に対応する窓を畳み込む
+                sum += self.history[base + tap] * h;
             }
 
             output.push(sum);
             self.phase += self.step;
         }
 
-        self.phase -= input.len() as f64;
-
-        if prefix_len == 0 {
-            return;
+        // 整数サンプル分だけ history を消費
+        let consumed = self.phase.floor() as usize;
+        if consumed > 0 {
+            self.history.drain(0..consumed);
+            self.phase -= consumed as f64;
         }
-
-        if input.len() >= prefix_len {
-            self.history
-                .copy_from_slice(&input[input.len() - prefix_len..]);
-        } else {
-            self.history.copy_within(input.len().., 0);
-            self.history[prefix_len - input.len()..].copy_from_slice(input);
+        
+        if self.phase < 0.0 {
+            self.phase = 0.0;
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.history = vec![0.0; self.taps_per_phase - 1];
+        self.phase = 0.0;
     }
 
     pub fn reconfigure(&mut self, source_rate: u32, target_rate: u32, cutoff_hz: Option<f32>) {
         *self = Self::new_with_cutoff(source_rate, target_rate, cutoff_hz);
+    }
+
+    /// 残っている履歴をすべて出力し、内部状態をリセットする。
+    /// バーストの最後で呼び出す。
+    pub fn flush(&mut self, output: &mut Vec<f32>) {
+        if self.history.is_empty() {
+            return;
+        }
+
+        // history の中にある有効なサンプルをすべて窓に通すために、必要な分のゼロを追加
+        let padding_len = self.taps_per_phase - 1;
+        let padding = vec![0.0f32; padding_len];
+        self.process(&padding, output);
+        
+        // 状態リセット
+        self.history = vec![0.0; self.taps_per_phase - 1];
+        self.phase = 0.0;
+    }
+
+    /// リサンプラの物理的遅延（ターゲットレート換算のサンプル数）を返す
+    pub fn delay(&self) -> usize {
+        let center = (self.taps_per_phase as f64 - 1.0) / 2.0;
+        let ratio = self.target_rate as f64 / self.source_rate as f64;
+        (center * ratio).ceil() as usize
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::Complex;
+    use rustfft::FftPlanner;
     use std::f32::consts::PI;
 
-    /*
     fn dominant_frequency(samples: &[f32], sample_rate: u32) -> f32 {
         let n = samples.len();
         let mut planner = FftPlanner::new();
@@ -198,6 +220,7 @@ mod tests {
         let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
         let mut output = Vec::new();
         resampler.process(&input, &mut output);
+        resampler.flush(&mut output);
 
         // 出力のFFTを行い、ピーク周波数を探す
         let output_len = output.len();
@@ -219,12 +242,10 @@ mod tests {
             freq_resolution
         );
     }
-    */
 
-    /*
     #[test]
     fn test_downsampling_preserves_frequency() {
-        // 50kHz から 48kHz へのダウンサンプリング (HackRF側のAM復調後などで想定されるケース)
+        // 50kHz から 48kHz へのダウンサンプリング
         test_resampling_sine_wave(50_000, 48_000, 1_000.0, 0.5);
     }
 
@@ -233,7 +254,6 @@ mod tests {
         // 44.1kHz から 48kHz へのアップサンプリング
         test_resampling_sine_wave(44_100, 48_000, 4_000.0, 0.5);
     }
-    */
 
     #[test]
     fn test_continuous_processing() {
@@ -438,5 +458,51 @@ mod tests {
             rms_default,
             rms_low_cut
         );
+    }
+
+    #[test]
+    fn test_negative_phase_drift_repro() {
+        let mut rs = Resampler::new_with_cutoff(24000, 48000, None);
+        println!("\nInitial phase: {}", rs.phase);
+        
+        let mut total_output = 0;
+        // 1サンプルずつの入力を20回繰り返す
+        for i in 0..20 {
+            let mut out = Vec::new();
+            rs.process(&[0.0], &mut out);
+            total_output += out.len();
+            println!("Iter {}: phase={}, output_len={}", i, rs.phase, out.len());
+        }
+        
+        // 期待される挙動: 24k->48k (比率2.0) なので、20個入れたら約40個出るべき
+        // バグがある場合、phase が負に沈み続け、出力が全く出ないか、あるいは負のインデックスでクラッシュする
+        println!("Total output samples: {}", total_output);
+        assert!(total_output > 0, "Resampler produced NO output due to negative phase drift!");
+    }
+
+    #[test]
+    fn test_resampler_latency_and_timing_accuracy() {
+        // 24kHz -> 48kHz (ratio 2.0)
+        let mut rs = Resampler::new_with_cutoff(24000, 48000, None);
+        let expected_delay_out = rs.delay(); 
+
+        // 0番目にインパルスを入力
+        let mut input = vec![0.0f32; 64];
+        input[0] = 1.0; 
+        
+        let mut output = Vec::new();
+        rs.process(&input, &mut output);
+        rs.flush(&mut output);
+
+        // 出力の中で最大の振幅（ピーク）を持つ位置を探す
+        let (peak_idx, &peak_val) = output.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap();
+
+        println!("Resampler Delay Verification: Peak at idx={}, value={:.4}, delay()={}", peak_idx, peak_val, expected_delay_out);
+
+        // 物理的整合性の検証: 0番目の入力がピークに達するまでの時間は delay() と一致しなければならない
+        assert_eq!(peak_idx, expected_delay_out, "Resampler peak position mismatch with delay()");
+        assert!(peak_val > 0.5, "Impulse response peak is too weak");
     }
 }

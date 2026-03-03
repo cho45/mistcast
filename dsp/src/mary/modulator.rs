@@ -207,32 +207,54 @@ impl Modulator {
 
     /// RRCフィルタに残っている遅延分のサンプルをゼロで押し出して出力する
     pub fn flush(&mut self) -> Vec<f32> {
-        self.modulate_silence(self.rrc_i.delay().max(self.rrc_q.delay()))
+        // RRCフィルタの応答全体（全タップ分）を押し出すために必要な無音サンプルを計算。
+        let rrc_taps_bb = self.rrc_i.num_taps().max(self.rrc_q.num_taps());
+        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let rrc_push_out = (rrc_taps_bb as f32 * ratio).ceil() as usize;
+
+        let mut out = self.modulate_silence(rrc_push_out);
+
+        let mut res_i = Vec::new();
+        let mut res_q = Vec::new();
+        self.resampler_i.flush(&mut res_i);
+        self.resampler_q.flush(&mut res_q);
+
+        for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
+            let lo = self.nco.step();
+            out.push(si * lo.re - sq * lo.im);
+        }
+
+        out
     }
 
     /// 指定されたサンプル数分だけ無音 (0.0) を入力して Modulator を進める
     pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
-        let mut out = Vec::with_capacity(samples);
+        if samples == 0 {
+            return Vec::new();
+        }
 
         let ratio = self.config.sample_rate / self.proc_config.sample_rate;
         let needed_bb = (samples as f32 / ratio).ceil() as usize + 1;
 
+        // ベースバンド側で無音を生成
+        let mut bb_i = Vec::with_capacity(needed_bb);
+        let mut bb_q = Vec::with_capacity(needed_bb);
         for _ in 0..needed_bb {
-            let i_f = self.rrc_i.process(0.0);
-            let q_f = self.rrc_q.process(0.0);
+            bb_i.push(self.rrc_i.process(0.0));
+            bb_q.push(self.rrc_q.process(0.0));
+        }
 
-            let mut res_i = Vec::new();
-            let mut res_q = Vec::new();
-            self.resampler_i.process(&[i_f], &mut res_i);
-            self.resampler_q.process(&[q_f], &mut res_q);
+        // リサンプリングを一括で行う
+        let mut res_i = Vec::new();
+        let mut res_q = Vec::new();
+        self.resampler_i.process(&bb_i, &mut res_i);
+        self.resampler_q.process(&bb_q, &mut res_q);
 
-            for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
-                let lo = self.nco.step();
-                out.push(si * lo.re - sq * lo.im);
-            }
-            if out.len() >= samples {
-                break;
-            }
+        // キャリア混合
+        let mut out = Vec::with_capacity(res_i.len());
+        for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
+            let lo = self.nco.step();
+            out.push(si * lo.re - sq * lo.im);
         }
 
         out.truncate(samples);
@@ -305,6 +327,19 @@ impl Modulator {
         &self.config
     }
 
+    /// 変調器の物理的な群遅延（出力サンプル数単位でのピーク位置）を返す
+    pub fn delay(&self) -> usize {
+        // 1. RRCフィルタの群遅延 (ベースバンドレート)
+        let rrc_delay_bb = self.rrc_i.delay(); // (num_taps - 1) / 2
+        // 2. リサンプラの群遅延 (ベースバンドレート)
+        let resampler_delay_bb = self.resampler_i.delay() as f64 
+            / (self.config.sample_rate as f64 / self.proc_config.sample_rate as f64);
+        
+        // 合計遅延をターゲットレートへ換算
+        let ratio = self.config.sample_rate as f64 / self.proc_config.sample_rate as f64;
+        ((rrc_delay_bb as f64 + resampler_delay_bb) * ratio).round() as usize
+    }
+
     /// NCOへの参照を取得（テスト用）
     pub fn nco(&self) -> &Nco {
         &self.nco
@@ -328,15 +363,23 @@ mod tests {
     #[test]
     fn test_preamble_length() {
         let mut mod_ = make_modulator();
-        let preamble = mod_.generate_preamble();
+        let mut preamble = mod_.generate_preamble();
+        // ストリームの末尾を出し切る
+        preamble.extend(mod_.flush());
+
         let config = DspConfig::default_48k();
-        let expected_samples = 15 * config.preamble_repeat * config.samples_per_chip();
-        let diff = (preamble.len() as i32 - expected_samples as i32).abs();
+        let expected_base = 15 * config.preamble_repeat * config.samples_per_chip();
+        
+        // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
+        // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
+        let expected_total = expected_base + 130; 
+        
+        let diff = (preamble.len() as i32 - expected_total as i32).abs();
         assert!(
-            diff <= 16,
-            "len={}, expected={}, diff={}",
+            diff <= 2,
+            "len={}, expected_total={}, diff={}",
             preamble.len(),
-            expected_samples,
+            expected_total,
             diff
         );
     }
@@ -370,6 +413,28 @@ mod tests {
         mod_.reset();
         let s2 = mod_.modulate(&bits);
         assert_eq!(s1, s2);
+    }
+
+    /// 変調器の物理的な遅延（delay()メソッド）が実際のピーク位置と一致することを検証する
+    #[test]
+    fn test_modulator_delay_method_matches_physical_peak() {
+        let mut mod_ = make_modulator();
+        let expected_delay = mod_.delay();
+
+        // 1チップ（1.0）のインパルスを入力
+        let mut samples = mod_.chips_to_samples(&[1.0], &[0.0]);
+        samples.extend(mod_.flush());
+
+        // ピーク位置を特定
+        let (peak_idx, &peak_val) = samples.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap();
+
+        println!("Mary Modulator Latency: peak_idx={}, delay()={}, peak_val={:.4}", peak_idx, expected_delay, peak_val);
+
+        // delay() の戻り値が物理現象（インパルス応答のピーク）と完全に一致することを保証
+        assert_eq!(peak_idx, expected_delay, "Mary Modulator::delay() mismatch with physical peak position");
+        assert!(peak_val > 0.5, "Peak is too weak");
     }
 
     /// MaryDQPSKの数学的正しさを検証する（Walsh直交性とDQPSK位相の独立検証）
@@ -582,50 +647,53 @@ mod tests {
         assert!(!frame.is_empty());
         assert!(frame.iter().all(|&s| s.is_finite()));
 
-        // フレーム長の妥当性（プリアンブル + Sync + Payload）
-        let preamble_len = 15 * mod_.config.preamble_repeat * mod_.config.samples_per_chip();
-        let sync_len = 16 * 15 * mod_.config.samples_per_chip();
-        let payload_len = 16 * 1 * mod_.config.samples_per_chip(); // 1シンボル
-        let expected_min = preamble_len + sync_len + payload_len;
+        // フレーム長の妥当性計算:
+        // 1. プリアンブル: sf=15, repeat=2, spc=6 -> 180
+        // 2. 同期ワード: sf=15, bits=16, spc=6 -> 1440
+        // 3. ペイロード: sf=16, symbols=1, spc=6 -> 96
+        // 4. マージン: sf=16, symbols=1, spc=6 -> 96
+        let preamble_len = 15 * 2 * 6;
+        let sync_len = 15 * 16 * 6; 
+        let payload_len = 16 * 1 * 6;
+        let margin_len = 16 * 1 * 6;
+        let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1812
 
-        // 根拠：RRCフィルタの群遅延(L-1)/2 + リサンプラの補間遅延±1
-        // encode_frame()では全体の信号が一度に生成され、一度の処理で遅延が発生
-        let rrc_delay = (mod_.config.rrc_num_taps() - 1) / 2;
-        let resampler_delay = 1;
-        let total_max_delay = rrc_delay + resampler_delay;
+        // 物理的テール (32サンプル) を加算
+        // encode_frame() 内部ですでに flush() が呼ばれており、RRCのテールは押し出されている。
+        // リサンプラによる物理的な伸び（立ち上がり16 + 立ち下がり16）の 32 サンプルを加算する。
+        let expected_total = expected_base + 32; 
+
         assert!(
-            frame.len() >= expected_min as usize - total_max_delay as usize,
-            "Frame should be at least {} samples",
-            expected_min - total_max_delay
+            (frame.len() as i32 - expected_total as i32).abs() <= 5,
+            "Frame length mismatch: actual={}, expected_total={}, base={}, diff={}",
+            frame.len(),
+            expected_total,
+            expected_base,
+            (frame.len() as i32 - expected_total as i32).abs()
         );
-        assert!(
-            frame.len() <= expected_min as usize + total_max_delay as usize,
-            "Frame should be at most {} samples",
-            expected_min + total_max_delay
-        );
+
     }
 
     /// プリアンブル構造を検証する
     #[test]
     fn test_preamble_structure() {
         let mut mod_ = make_modulator();
-        let preamble = mod_.generate_preamble();
+        let mut preamble = mod_.generate_preamble();
+        preamble.extend(mod_.flush());
 
         // プリアンブルはWalsh[0]で構成される
         let sf = 15;
         let repeat = mod_.config.preamble_repeat;
-        let expected_len = sf * repeat * mod_.config.samples_per_chip();
+        let expected_base = sf * repeat * mod_.config.samples_per_chip(); // 180
 
-        // 根拠：RRCフィルタの群遅延(L-1)/2 + リサンプラの補間遅延±1
-        let rrc_delay = (mod_.config.rrc_num_taps() - 1) / 2;
-        let resampler_delay = 1;
-        let max_total_delay = rrc_delay + resampler_delay;
+        // 物理的テール (130サンプル) を加算
+        let expected_total = expected_base + 130; 
 
-        let diff = (preamble.len() as i32 - expected_len as i32).abs();
+        let diff = (preamble.len() as i32 - expected_total as i32).abs();
         assert!(
-            diff <= max_total_delay as i32,
-            "Preamble length mismatch: expected={}, actual={}, diff={}",
-            expected_len,
+            diff <= 10,
+            "Preamble length mismatch: expected_total={}, actual={}, diff={}",
+            expected_total,
             preamble.len(),
             diff
         );
@@ -813,13 +881,14 @@ mod tests {
 
         // 単一パルスを入力してインパルス応答を取得
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0] + DQPSK 00
-        let samples = mod_.modulate(&bits);
+        let mut samples = mod_.modulate(&bits);
+        samples.extend(mod_.flush());
 
         // 1. 信号は滑らかでなければならない（RRCのパルス整形）
         // 急激な変化が発生しないことを確認
-        // 根拠：RRCフィルタは帯域制限されたフィルタ（α=0.5）のため、
-        //       隣接サンプル間の変化はサンプルレートとフィルタ帯域幅で制限される
-        //       2階差分の閾値1.0は、フィルタの最大勾配から導出される経験的許容値
+        // 根拠：RRCフィルタは帯域制限されたフィルタ（α=0.3〜0.5）のため、
+        //       隣接サンプル間の変化はサンプルレートとフィルタ帯域幅で制限される。
+        //       2階差分の閾値1.0は、フィルタの最大勾配から導出される経験的許容値。
         let mut sudden_changes = 0;
         for i in 2..samples.len().saturating_sub(2) {
             let prev = samples[i - 1];
@@ -828,7 +897,6 @@ mod tests {
 
             // 2階差分が大きすぎる場合は滑らかではない
             let second_diff = (next - curr) - (curr - prev);
-            // 閾値1.0の根拠：RRCフィルタの帯域制限による最大加速度
             // 実測値：RRCフィルタ通過後の信号の2階差分は通常0.5以下
             if second_diff.abs() > 1.0 {
                 sudden_changes += 1;
@@ -836,9 +904,7 @@ mod tests {
         }
 
         // 急激な変化は全体の20%未満でなければならない
-        // 根拠：RRCフィルタは帯域制限するが、シンボル境界では不連続が生じる可能性がある
-        //       シンボル境界の数は全体の長さに比べて小さいはず
-        //       20%は保守的な推定（実際には5%以下であるべき）
+        // 根拠：RRCフィルタは帯域制限するが、シンボル境界では不連続が生じる可能性がある。
         let ratio = sudden_changes as f32 / samples.len() as f32;
         assert!(
             ratio < 0.20,
@@ -846,22 +912,19 @@ mod tests {
             ratio
         );
 
-        // 2. 信号エネルギーの大部分は中央に集中する（RRCの特性）
-        // 根拠：RRCフィルタのインパルス応答は中央に集中（ガウスに近い形状）
-        //       理論上、中央50%の区間に約80%のエネルギーが集中する
-        //       30%は非常に保守的な下限（実際には70%以上であるべき）
+        // 2. 信号エネルギーの大部分は中央（ピーク付近）に集中する（RRCの特性）
         let total_energy: f32 = samples.iter().map(|&s| s * s).sum();
-        let mid = samples.len() / 2;
-        let window_size = samples.len() / 4;
-        let start = mid.saturating_sub(window_size);
-        let end = (mid + window_size).min(samples.len());
+        let peak_pos = mod_.delay();
+        let window_half = 64; 
+        let start = peak_pos.saturating_sub(window_half);
+        let end = (peak_pos + window_half).min(samples.len());
 
         let central_energy: f32 = samples[start..end].iter().map(|&s| s * s).sum();
         let central_ratio = central_energy / total_energy;
 
         assert!(
-            central_ratio > 0.3,
-            "Significant energy should be concentrated in center: ratio={}",
+            central_ratio > 0.5,
+            "Significant energy should be concentrated around peak: ratio={}",
             central_ratio
         );
     }
@@ -1130,41 +1193,46 @@ mod tests {
     fn test_preamble_last_symbol_inversion() {
         let mut mod_ = make_modulator();
 
-        // プリアンブルを生成
-        let preamble = mod_.generate_preamble();
-
-        // プリアンブルは [W, W, W, -W] パターン（最後のシンボルが反転）
-        // これはRRCフィルタリングによって滑らかに変化する
-        // しかし、エネルギー分布の変化で検証できる
+        // プリアンブルを生成（全応答を出し切る）
+        let mut preamble = mod_.generate_preamble();
+        preamble.extend(mod_.flush());
 
         let repeat = mod_.config.preamble_repeat;
         let spc = mod_.config.samples_per_chip();
         let symbol_len = 15 * spc;
+        let delay = mod_.delay();
 
-        // 各シンボルのエネルギーを計算
+        // 各シンボルのエネルギーを、物理的な遅延を考慮した窓で計算
         let mut symbol_energies = Vec::new();
         for sym_idx in 0..repeat {
-            let start = sym_idx * symbol_len;
-            let end = ((sym_idx + 1) * symbol_len).min(preamble.len());
+            // 物理的根拠：
+            // Modulator::delay() は最初の入力 $x[0]$ がピークに達する時間である。
+            // ベースバンドRRCフィルタの遅延 (24) は出力レートで 48 サンプルに相当する。
+            // シンボルのエネルギー中心を正確に捉えるため、このオフセットを加味する。
+            let rrc_offset = 48; 
+            let center = delay + sym_idx * symbol_len + rrc_offset;
+            let start = center.saturating_sub(symbol_len / 2);
+            let end = center + symbol_len / 2;
+            
+            if end > preamble.len() { break; }
+            
             let energy: f32 = preamble[start..end].iter().map(|&s| s * s).sum();
             symbol_energies.push(energy);
         }
 
-        // 最後のシンボルのエネルギーは他のシンボルと同等であるはず
-        // （符号反転はエネルギーに影響しない）
-        if symbol_energies.len() >= 2 {
-            let avg_energy: f32 = symbol_energies[..symbol_energies.len() - 1]
-                .iter()
-                .sum::<f32>()
-                / (symbol_energies.len() - 1) as f32;
-            let last_energy = symbol_energies[symbol_energies.len() - 1];
+        println!("Symbol energies: {:?}", symbol_energies);
 
-            let ratio = last_energy / avg_energy;
-            assert!(
-                ratio > 0.5 && ratio < 2.0,
-                "Last symbol energy should be similar to others, ratio: {}",
-                ratio
-            );
+        // 最後のシンボルのエネルギーは他のシンボルと同等であるはず
+        if symbol_energies.len() >= 2 {
+            let last_energy = *symbol_energies.last().unwrap();
+            for (i, &energy) in symbol_energies.iter().enumerate().take(symbol_energies.len() - 1) {
+                let ratio = last_energy / energy;
+                assert!(
+                    ratio > 0.8 && ratio < 1.2,
+                    "Energy mismatch between symbol {} and last: ratio={:.4}",
+                    i, ratio
+                );
+            }
         }
     }
 

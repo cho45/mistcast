@@ -216,7 +216,25 @@ impl Modulator {
 
     /// RRCフィルタに残っている遅延分のサンプルをゼロで押し出して出力する
     pub fn flush(&mut self) -> Vec<f32> {
-        self.modulate_silence(self.rrc_i.delay().max(self.rrc_q.delay()))
+        // RRCフィルタの応答全体（全タップ分）を押し出すために必要な無音サンプルを計算。
+        // delay() ではなく num_taps() を使うのが物理的に正しい（テールの終わりまで出すため）。
+        let rrc_taps_bb = self.rrc_i.num_taps().max(self.rrc_q.num_taps());
+        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let rrc_push_out = (rrc_taps_bb as f32 * ratio).ceil() as usize;
+
+        let mut out = self.modulate_silence(rrc_push_out);
+
+        let mut res_i = Vec::new();
+        let mut res_q = Vec::new();
+        self.resampler_i.flush(&mut res_i);
+        self.resampler_q.flush(&mut res_q);
+
+        for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
+            let lo = self.nco.step();
+            out.push(si * lo.re - sq * lo.im);
+        }
+
+        out
     }
 
     /// 指定されたサンプル数分だけ無音 (0.0) を入力して Modulator を進める
@@ -325,6 +343,19 @@ impl Modulator {
     pub fn config(&self) -> &DspConfig {
         &self.config
     }
+
+    /// 変調器の物理的な群遅延（出力サンプル数単位でのピーク位置）を返す
+    pub fn delay(&self) -> usize {
+        // 1. RRCフィルタの群遅延 (ベースバンドレート)
+        let rrc_delay_bb = self.rrc_i.delay(); // (num_taps - 1) / 2
+        // 2. リサンプラの群遅延 (ベースバンドレート)
+        let resampler_delay_bb = self.resampler_i.delay() as f64 
+            / (self.config.sample_rate as f64 / self.proc_config.sample_rate as f64);
+        
+        // 合計遅延をターゲットレートへ換算
+        let ratio = self.config.sample_rate as f64 / self.proc_config.sample_rate as f64;
+        ((rrc_delay_bb as f64 + resampler_delay_bb) * ratio).round() as usize
+    }
 }
 
 #[cfg(test)]
@@ -370,17 +401,24 @@ mod tests {
     #[test]
     fn test_preamble_length() {
         let mut mod_ = make_modulator();
-        let preamble = mod_.generate_preamble();
+        let mut preamble = mod_.generate_preamble();
+        // ストリームの末尾を出し切る
+        preamble.extend(mod_.flush());
+
         let config = DspConfig::default_48k();
-        let expected_samples =
+        let expected_base =
             config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
-        // リサンプラの群遅延により、数サンプルの不足が発生することを許容
-        let diff = (preamble.len() as i32 - expected_samples as i32).abs();
+        
+        // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
+        // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
+        let expected_total = expected_base + 130; 
+        
+        let diff = (preamble.len() as i32 - expected_total as i32).abs();
         assert!(
-            diff <= 16,
-            "len={}, expected={}, diff={}",
+            diff <= 2,
+            "len={}, expected_total={}, diff={}",
             preamble.len(),
-            expected_samples,
+            expected_total,
             diff
         );
     }
@@ -432,16 +470,22 @@ mod tests {
         let mut mod_ = make_modulator();
         let config = DspConfig::default_48k();
         let bits = vec![0u8; 8];
-        let samples = mod_.modulate(&bits);
-        let expected =
+        let mut samples = mod_.modulate(&bits);
+        // ストリームの末尾を出し切る
+        samples.extend(mod_.flush());
+
+        let expected_base =
             symbols_for_bits(bits.len()) * config.spread_factor() * config.samples_per_chip();
-        // リサンプラの群遅延により、数サンプルの不足が発生することを許容
-        let diff = (samples.len() as i32 - expected as i32).abs();
+        
+        // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
+        let expected_total = expected_base + 130; 
+        
+        let diff = (samples.len() as i32 - expected_total as i32).abs();
         assert!(
-            diff <= 16,
-            "len={}, expected={}, diff={}",
+            diff <= 2,
+            "len={}, expected_total={}, diff={}",
             samples.len(),
-            expected,
+            expected_total,
             diff
         );
     }
@@ -465,6 +509,64 @@ mod tests {
         mod_.reset();
         let s2 = mod_.modulate(&bits);
         assert_eq!(s1, s2);
+    }
+
+    /// 変調器の物理的な遅延（delay()メソッド）が実際のピーク位置と一致することを検証する
+    #[test]
+    fn test_modulator_delay_method_matches_physical_peak() {
+        let mut mod_ = make_modulator();
+        let expected_delay = mod_.delay();
+
+        // 1チップ（1.0）のインパルスを入力
+        let mut samples = mod_.chips_to_samples(&[1.0], &[0.0]);
+        samples.extend(mod_.flush());
+
+        // ピーク位置を特定
+        let (peak_idx, &peak_val) = samples.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap();
+
+        println!("Modulator Latency: peak_idx={}, delay()={}, peak_val={:.4}", peak_idx, expected_delay, peak_val);
+
+        // delay() の戻り値が物理現象（インパルス応答のピーク）と完全に一致することを保証
+        assert_eq!(peak_idx, expected_delay, "Modulator::delay() mismatch with physical peak position");
+        assert!(peak_val > 0.5, "Peak is too weak");
+    }
+
+    /// 変調器全体の物理的な遅延と応答長を検証する
+    ///
+    /// インパルス（1チップ）を入力した際のピーク位置と全体長を測定し、
+    /// RRCフィルタおよびリサンプラの群遅延の合計と一致することを検証する。
+    #[test]
+    fn test_modulator_total_physical_latency() {
+        let mut mod_ = make_modulator();
+
+        // 1チップ（1インパルス）を入力
+        let mut samples = mod_.chips_to_samples(&[1.0], &[0.0]);
+        samples.extend(mod_.flush());
+
+        // 1. 物理的なピーク位置（Group Delay）の検証
+        let (peak_idx, &peak_val) = samples.iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+            .unwrap();
+
+        // 理論値の計算:
+        // RRCフィルタ群遅延: (16 symbols * 3 spc + 1 taps - 1) / 2 = 24 サンプル (@24kHz)
+        // リサンプラ群遅延: (17 taps - 1) / 2 = 8 サンプル (@24kHz)
+        // 合計群遅延: 24 + 8 = 32 サンプル (@24kHz)
+        // 出力レート換算: 32 * (48000 / 24000) = 64 サンプル (@48kHz)
+        let expected_peak_idx = 64; 
+
+        println!("Modulator Physical Peak: idx={}, value={:.4}, expected={}", peak_idx, peak_val, expected_peak_idx);
+        assert_eq!(peak_idx, expected_peak_idx, "Modulator group delay (peak position) mismatch");
+        assert!(peak_val > 0.5, "Peak value is too weak, signal may be distorted");
+
+        // 2. 全応答長（Total Response Length）の検証
+        // 理論値: (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2 = 130 サンプル付近
+        // 実際には flush 分が含まれ、136 サンプル程度になる。
+        println!("Modulator Total Response Length: {}", samples.len());
+        assert!(samples.len() >= 130, "Total response is too short, samples are being lost");
+        assert!(samples.len() <= 150, "Total response is unexpectedly long");
     }
 
     /// 44.1kHzでも動作すること
