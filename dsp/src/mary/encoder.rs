@@ -103,7 +103,7 @@ impl Encoder {
     }
 
     /// パケットをエンコードする
-    fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
+    pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
         let bits = self.encode_packet_bits(packet);
         self.modulator.encode_frame(&bits)
     }
@@ -141,7 +141,7 @@ impl Encoder {
     }
 
     /// Fountain Kを取得する
-    fn fountain_k(&self) -> usize {
+    pub fn fountain_k(&self) -> usize {
         self.config.fountain_k
     }
 

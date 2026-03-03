@@ -201,13 +201,13 @@ mod tests {
 
             // 16系列並列相関
             let mut correlations = [0.0f32; 16];
-            for idx in 0..16 {
+            for (idx, item) in correlations.iter_mut().enumerate() {
                 let seq = &wdict.w16[idx];
                 let mut corr = Complex32::new(0.0, 0.0);
                 for (&s, &w) in signal.iter().zip(seq.iter()) {
                     corr += s * w as f32;
                 }
-                correlations[idx] = corr.norm_sqr();
+                *item = corr.norm_sqr();
             }
 
             // 対応するWalsh系列の相関が最大
@@ -225,14 +225,14 @@ mod tests {
             );
 
             // 他の系列との直交性
-            for idx in 0..16 {
+            for (idx, item) in correlations.iter().enumerate() {
                 if idx != walsh_idx {
                     assert!(
-                        correlations[idx] < 1e-6,
+                        *item < 1e-6,
                         "Walsh[{}] and Walsh[{}] should be orthogonal, correlation={}",
                         walsh_idx,
                         idx,
-                        correlations[idx]
+                        item
                     );
                 }
             }

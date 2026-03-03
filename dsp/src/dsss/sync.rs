@@ -368,7 +368,7 @@ mod tests {
             let (i, q) = generate_signal(&config, 500, 1.0);
 
             let (res, _) = detector.detect(&i, &q, 0);
-            let sync = res.expect(&format!("Should find sync for SF={}", sf));
+            let sync = res.unwrap_or_else(|| panic!("Should find sync for SF={}", sf));
             println!(
                 "  SF={} Score: {:.4} (Threshold: {:.4})",
                 sf, sync.score, detector.threshold_fine

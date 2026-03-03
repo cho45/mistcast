@@ -222,9 +222,9 @@ mod tests {
         let correlations = demod.despread_all(&signal);
 
         // Walsh[0]以外の相関は0（直交性）
-        for idx in 1..16 {
+        for (idx, item) in correlations.iter().enumerate().skip(1) {
             assert!(
-                correlations[idx].norm() < 1e-6,
+                item.norm() < 1e-6,
                 "Cross-correlation with Walsh[{}] should be 0",
                 idx
             );
@@ -269,35 +269,27 @@ mod tests {
         // Walsh[0]のエネルギーが最大
         let mut energies = [0.0f32; 16];
         energies[0] = 100.0;
-        for i in 1..16 {
-            energies[i] = 10.0;
+        for item in energies.iter_mut().skip(1) {
+            *item = 10.0;
         }
         let llr = demod.walsh_llr(&energies, 100.0);
 
         // Walsh[0] = 0b0000 -> 全ビットのLLRが正
-        for bit in 0..4 {
-            assert!(
-                llr[bit] > 0.0,
-                "LLR[{}] should be positive for Walsh[0]",
-                bit
-            );
+        for (bit, item) in llr.iter().enumerate() {
+            assert!(*item > 0.0, "LLR[{}] should be positive for Walsh[0]", bit);
         }
 
         // Walsh[15] = 0b1111のエネルギーが最大
         let mut energies = [0.0f32; 16];
         energies[15] = 100.0;
-        for i in 0..15 {
-            energies[i] = 10.0;
+        for item in energies.iter_mut().take(15) {
+            *item = 10.0;
         }
         let llr = demod.walsh_llr(&energies, 100.0);
 
         // Walsh[15] = 0b1111 -> 全ビットのLLRが負
-        for bit in 0..4 {
-            assert!(
-                llr[bit] < 0.0,
-                "LLR[{}] should be negative for Walsh[15]",
-                bit
-            );
+        for (bit, item) in llr.iter().enumerate() {
+            assert!(*item < 0.0, "LLR[{}] should be negative for Walsh[15]", bit);
         }
     }
 
@@ -365,12 +357,12 @@ mod tests {
         let (walsh_llr, dqpsk_llr, _diff) = demod.demod_symbol(&signal);
 
         // Walsh[0] = 0b0000 -> 全ビットのLLRが正
-        for bit in 0..4 {
+        for (bit, item) in walsh_llr.iter().enumerate() {
             assert!(
-                walsh_llr[bit] > 0.0,
+                *item > 0.0,
                 "Walsh[0] bit{} should be positive, got {}",
                 bit,
-                walsh_llr[bit]
+                item
             );
         }
 
@@ -678,12 +670,12 @@ mod tests {
         let (sync_walsh_llr, _sync_dqpsk_llr, _sync_diff) = demod.demod_symbol(&sync_signal);
 
         // SyncではWalsh[0]=0b0000なので全ビットLLR>0
-        for bit in 0..4 {
+        for (bit, item) in sync_walsh_llr.iter().enumerate() {
             assert!(
-                sync_walsh_llr[bit] > 0.0,
+                *item > 0.0,
                 "Sync Walsh[0] bit{} should have positive LLR, got {}",
                 bit,
-                sync_walsh_llr[bit]
+                item
             );
         }
 
@@ -776,12 +768,8 @@ mod tests {
         let llrs0 = demod.walsh_llr(&energies0, max_energy0);
 
         // Walsh[0]=0b0000: 全LLR>0, かつLLR[0]が最大（bit0の識別力が最強）
-        for bit in 0..4 {
-            assert!(
-                llrs0[bit] > 0.0,
-                "Walsh[0] bit{} LLR should be positive",
-                bit
-            );
+        for (bit, item) in llrs0.iter().enumerate() {
+            assert!(*item > 0.0, "Walsh[0] bit{} LLR should be positive", bit);
         }
 
         // Walsh[0]自身のエネルギーが最大
@@ -799,12 +787,8 @@ mod tests {
         let llrs15 = demod.walsh_llr(&energies15, max_energy15);
 
         // Walsh[15]=0b1111: 全LLR<0
-        for bit in 0..4 {
-            assert!(
-                llrs15[bit] < 0.0,
-                "Walsh[15] bit{} LLR should be negative",
-                bit
-            );
+        for (bit, item) in llrs15.iter().enumerate() {
+            assert!(*item < 0.0, "Walsh[15] bit{} LLR should be negative", bit);
         }
     }
 
@@ -836,13 +820,13 @@ mod tests {
         //       f32の機械イプシロン ≈ 1.2e-7
         //       16回の演算で誤差が蓄積：ε × √16 ≈ 5e-7
         //       閾値1e-6は、丸め誤差の2倍の安全余裕を含む
-        for idx in 0..16 {
+        for (idx, item) in energies.iter().enumerate() {
             if idx != 5 {
                 assert!(
-                    energies[idx] < 1e-6,
+                    *item < 1e-6,
                     "Walsh[{}] should have zero energy (floating point error < 1e-6), got {}",
                     idx,
-                    energies[idx]
+                    item
                 );
             }
         }
@@ -991,12 +975,12 @@ mod tests {
         let (walsh_llr, dqpsk_llr, _diff) = demodulator.demod_symbol(&signal);
 
         // Walsh[0] = 0b0000 -> 全ビットLLR > 0
-        for bit in 0..4 {
+        for (bit, item) in walsh_llr.iter().enumerate() {
             assert!(
-                walsh_llr[bit] > 0.0,
+                *item > 0.0,
                 "Walsh[0] bit{} LLR should be positive, got {}",
                 bit,
-                walsh_llr[bit]
+                item
             );
         }
 
@@ -1033,15 +1017,15 @@ mod tests {
             let (walsh_llr, _dqpsk_llr, _diff) = demodulator.demod_symbol(&signal);
 
             // 各ビットのLLR符号を確認
-            for bit in 0..4 {
-                let bit_is_set = (walsh_idx >> bit) & 1 == 1;
-                let llr_idx = 3 - bit;
-                let llr_positive = walsh_llr[llr_idx] > 0.0;
+            for (bit, item) in walsh_llr.iter().enumerate() {
+                let bit_idx = 3 - bit;
+                let bit_is_set = (walsh_idx >> bit_idx) & 1 == 1;
+                let llr_positive = *item > 0.0;
 
                 assert_eq!(
                     llr_positive, !bit_is_set,
                     "Walsh[{}] bit{}: LLR={}, bit_set={}",
-                    walsh_idx, bit, walsh_llr[llr_idx], bit_is_set
+                    walsh_idx, bit_idx, item, bit_is_set
                 );
             }
         }
@@ -1236,13 +1220,13 @@ mod tests {
         // 入力ビットとLLRの符号が完全に一致するか確認
         // bit=0 -> LLR > 0
         // bit=1 -> LLR < 0
-        for i in 0..bits_len {
-            let expected_positive = bits[i] == 0;
+        for (i, &bit) in bits.iter().enumerate().take(bits_len) {
+            let expected_positive = bit == 0;
             let actual_positive = all_llrs[i] > 0.0;
             assert_eq!(
                 actual_positive, expected_positive,
                 "Bit mismatch at index {}. Input bit: {}, LLR: {}",
-                i, bits[i], all_llrs[i]
+                i, bit, all_llrs[i]
             );
         }
     }
@@ -1324,12 +1308,12 @@ mod tests {
 
         // Walsh[0]のLLRは高信頼性（1.0に近い）
         // 根拠：正規化ロジックにより、理想的な信号（ノイズなし）では (E_max - 0) / E_max = 1.0 となる。
-        for bit in 0..4 {
+        for (bit, item) in walsh_llr.iter().enumerate() {
             assert!(
-                (walsh_llr[bit].abs() - 1.0).abs() < 1e-3,
+                (item.abs() - 1.0).abs() < 1e-3,
                 "Walsh[0] LLR[{}] should be ~1.0, got {}",
                 bit,
-                walsh_llr[bit]
+                item
             );
         }
     }

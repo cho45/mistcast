@@ -567,7 +567,7 @@ mod tests {
         // シンボル3: phase=3 -> (0.0, -1.0)
         for idx in 0..sf {
             let expected_i = 0.0 * walsh0[idx] as f32;
-            let expected_q = -1.0 * walsh0[idx] as f32;
+            let expected_q = -(walsh0[idx] as f32);
             let offset = 2 * sf;
             assert!((chips_i[offset + idx] - expected_i).abs() < 1e-6);
             assert!((chips_q[offset + idx] - expected_q).abs() < 1e-6);
@@ -662,8 +662,8 @@ mod tests {
         // 4. マージン: sf=16, symbols=1, spc=6 -> 96
         let preamble_len = 15 * 2 * 6;
         let sync_len = 15 * 16 * 6;
-        let payload_len = 16 * 1 * 6;
-        let margin_len = 16 * 1 * 6;
+        let payload_len = 96;
+        let margin_len = 96;
         let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1812
 
         // 物理的テール (32サンプル) を加算
@@ -672,12 +672,12 @@ mod tests {
         let expected_total = expected_base + 32;
 
         assert!(
-            (frame.len() as i32 - expected_total as i32).abs() <= 5,
+            (frame.len() as i32 - expected_total).abs() <= 5,
             "Frame length mismatch: actual={}, expected_total={}, base={}, diff={}",
             frame.len(),
             expected_total,
             expected_base,
-            (frame.len() as i32 - expected_total as i32).abs()
+            (frame.len() as i32 - expected_total).abs()
         );
     }
 
@@ -725,7 +725,7 @@ mod tests {
             let (chips_i, chips_q) = mod_.bits_to_chips(&input);
 
             // 位相を確認
-            let phase = (0 + expected_delta) & 0x03;
+            let phase = expected_delta & 0x03;
             let (expected_i, expected_q) = phase_to_iq(phase);
             let walsh0 = &mod_.wdict.w16[0];
 
@@ -1124,15 +1124,15 @@ mod tests {
         let sf = 16;
         let expected_phases = [(1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, 0.0)];
 
-        for sym_idx in 0..4 {
+        for (sym_idx, &exp_iq) in expected_phases.iter().enumerate() {
             let offset = sym_idx * sf;
-            let (exp_i, exp_q) = expected_phases[sym_idx];
+            let (exp_i, exp_q) = exp_iq;
             let walsh0 = &mod_.wdict.w16[0];
 
-            for chip_idx in 0..sf {
+            for (chip_idx, &w) in walsh0.iter().enumerate().take(sf) {
                 let idx = offset + chip_idx;
-                let expected_i = exp_i * walsh0[chip_idx] as f32;
-                let expected_q = exp_q * walsh0[chip_idx] as f32;
+                let expected_i = exp_i * w as f32;
+                let expected_q = exp_q * w as f32;
 
                 assert!(
                     (chips_i[idx] - expected_i).abs() < 1e-6,

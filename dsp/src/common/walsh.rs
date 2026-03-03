@@ -197,7 +197,7 @@ mod tests {
         let dict = WalshDictionary::default_w16();
         let pn2 = dict.pn.clone();
 
-        let pn1_i8: Vec<i8> = pn1.into_iter().map(|x| x as i8).collect();
+        let pn1_i8: Vec<i8> = pn1.into_iter().collect();
         assert_eq!(pn1_i8, pn2, "pn1={:?} pn2={:?}", pn1_i8, pn2);
     }
 
