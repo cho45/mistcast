@@ -160,7 +160,8 @@ impl MarySyncDetector {
                 (Some(res), idx)
             } else {
                 let keep_tail = sym_len * 2 + spc;
-                (None, (search_range_end + 1).saturating_sub(keep_tail))
+                let next_idx = (search_range_end + 1).saturating_sub(keep_tail);
+                (None, next_idx)
             }
         }
     }

@@ -93,6 +93,10 @@ impl WalshCorrelator {
         Self { sequence }
     }
 
+    pub fn sequence(&self) -> &[i8] {
+        &self.sequence
+    }
+
     /// 信号との相関を計算する
     ///
     /// `signal`: 長さ16の複素数信号

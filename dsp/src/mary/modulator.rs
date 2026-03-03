@@ -152,11 +152,8 @@ impl Modulator {
             }
 
             // 上位4ビット: Walsh index (0-15)
-            let w_idx = ((sym_bits[0] << 3)
-                | (sym_bits[1] << 2)
-                | (sym_bits[2] << 1)
-                | sym_bits[3])
-                & 0x0F;
+            let w_idx =
+                ((sym_bits[0] << 3) | (sym_bits[1] << 2) | (sym_bits[2] << 1) | sym_bits[3]) & 0x0F;
 
             // 下位2ビット: DQPSK phase
             let b0 = sym_bits[4];

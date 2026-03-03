@@ -91,7 +91,12 @@ impl Encoder {
 
         // インターリーブ
         let interleaver = BlockInterleaver::new(rows, cols);
-        interleaver.interleave(&padded)
+        let interleaved = interleaver.interleave(&padded);
+
+        // Maryシンボル（6ビット単位）の境界に揃えるようにパディング
+        let mut mary_bits = interleaved;
+        mary_bits.resize(mary_bits.len().div_ceil(6) * 6, 0);
+        mary_bits
     }
 
     /// Fountain Kを取得する
@@ -359,17 +364,16 @@ mod tests {
 
         let bits1 = encoder.encode_packet_bits(&packet1);
 
-        // 1. インターリーブ後のビット数はブロックサイズの整数倍であるはず
-        // 根拠：BlockInterleaverはrows×colsの行列構造を使用
-        // rows=16（固定設計）、colsはビット数に応じて決定
-        let rows = 16; // エンコーダの設計で固定
+        // 1. インターリーブ後のビット数は 6ビット境界（Maryシンボル）に揃っているはず
         assert_eq!(
-            bits1.len() % rows,
+            bits1.len() % 6,
             0,
-            "Interleaved bits ({}) should be divisible by rows ({})",
-            bits1.len(),
-            rows
+            "Interleaved bits ({}) must be a multiple of 6 for Mary symbols",
+            bits1.len()
         );
+
+        // インターリーバのコアサイズ（352）が rows(16) の倍数であることは encode_packet_bits の内部定数で保証済み。
+        // ここでは最終出力が Mary 境界を満たしていることを検証する。
 
         // 2. 同じパケット→同じビット列（可逆性・決定性）
         let bits2 = encoder.encode_packet_bits(&packet1);
@@ -670,23 +674,22 @@ mod tests {
         let fec_bits = raw_bits * 2; // 348
         let rows = 16;
         let cols = fec_bits.div_ceil(rows); // 348 / 16 = 21.75 → 22
-        let expected_bits = rows * cols; // 16 * 22 = 352
+        let interleaved_bits = rows * cols; // 16 * 22 = 352
+
+        // Maryシンボル境界（6ビット）にパディングした後の期待されるビット数
+        let expected_mary_bits = interleaved_bits.div_ceil(6) * 6; // 354
 
         assert_eq!(
             bits.len(),
-            expected_bits,
-            "encode_packet_bits should produce {} bits (rows*cols), got {}",
-            expected_bits,
+            expected_mary_bits,
+            "encode_packet_bits should produce {} bits (6-bit aligned), got {}",
+            expected_mary_bits,
             bits.len()
         );
 
         // MaryDQPSKシンボル数（6ビット/シンボル）
-        // 352 / 6 = 58.66... → 58シンボル（348ビット）+ 4ビットパディング
-        let full_symbols = bits.len() / 6; // 58
-        let padding_bits = bits.len() % 6; // 4
-
-        assert_eq!(full_symbols, 58, "Should have 58 full symbols");
-        assert_eq!(padding_bits, 4, "Should have 4 padding bits");
+        let full_symbols = bits.len() / 6; // 59
+        assert_eq!(full_symbols, 59, "Should have 59 full symbols");
 
         // 注：最後の4ビットはmodulatorで無視されるか、パディングとして扱われる
         // decoderでも同様にパディングを無視する必要がある

@@ -160,6 +160,18 @@ impl Demodulator {
     pub fn set_reference_phase(&mut self, i: f32, q: f32) {
         self.prev = Complex32::new(i, q);
     }
+
+    pub fn correlators(&self) -> &[WalshCorrelator] {
+        &self.correlators
+    }
+
+    pub fn prev_phase(&self) -> Complex32 {
+        self.prev
+    }
+
+    pub fn set_prev_phase(&mut self, phase: Complex32) {
+        self.prev = phase;
+    }
 }
 
 #[cfg(test)]
