@@ -29,6 +29,7 @@ const inputText = ref('Hello Acoustic World!');
 const fftCanvas = ref<HTMLCanvasElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const isTransmitting = ref(false);
+const isPreparing = ref(false);
 const senderStatus = ref('Idle');
 const isDragging = ref(false);
 const toasts = ref<Toast[]>([]);
@@ -302,18 +303,23 @@ async function rebuildSenderGraph() {
 async function startSendingData(data: Uint8Array) {
   await runExclusive(async () => {
     if (!runtime.coreReady.value) return;
-    const { audioContext } = await runtime.ensureAudioCore();
-    if (audioContext.state === 'suspended') {
-      await audioContext.resume();
+    isPreparing.value = true;
+    try {
+      const { audioContext } = await runtime.ensureAudioCore();
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
+      senderStatus.value = 'Preparing...';
+      await rebuildSenderGraph();
+      if (!senderBackend) return;
+
+      senderStatus.value = 'Transmitting...';
+      isTransmitting.value = true;
+      await senderBackend.startEncoder(data, audioContext.sampleRate, runtime.modemMode.value, runtime.randomizeSeq.value);
+    } finally {
+      isPreparing.value = false;
     }
-
-    senderStatus.value = 'Preparing...';
-    await rebuildSenderGraph();
-    if (!senderBackend) return;
-
-    senderStatus.value = 'Transmitting...';
-    isTransmitting.value = true;
-    await senderBackend.startEncoder(data, audioContext.sampleRate, runtime.modemMode.value, runtime.randomizeSeq.value);
   });
 }
 
@@ -388,9 +394,11 @@ defineExpose({
     <textarea v-model="inputText" rows="4" placeholder="Enter text to broadcast..." />
     <div class="button-row">
       <template v-if="!isTransmitting">
-        <button @click="startSendingText" class="btn btn-primary" :disabled="!runtime.coreReady.value">Send</button>
-        <button @click="startSendingSampleImage" class="btn" :disabled="!runtime.coreReady.value">Send Sample Image</button>
-        <button @click="triggerFileSelect" class="btn" :disabled="!runtime.coreReady.value">Send File (max 4KB)</button>
+        <button @click="startSendingText" class="btn btn-primary" :disabled="!runtime.coreReady.value || isPreparing">
+          {{ isPreparing ? 'Preparing...' : 'Send' }}
+        </button>
+        <button @click="startSendingSampleImage" class="btn" :disabled="!runtime.coreReady.value || isPreparing">Send Sample Image</button>
+        <button @click="triggerFileSelect" class="btn" :disabled="!runtime.coreReady.value || isPreparing">Send File (max 4KB)</button>
         <input type="file" ref="fileInput" style="display: none" @change="handleFileSelect" />
       </template>
       <button v-else @click="stopSending" class="btn btn-danger" :disabled="!runtime.coreReady.value">Stop</button>

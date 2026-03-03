@@ -29,8 +29,6 @@ const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
 
-const basisMatrixWidth = ref(0);
-const basisMatrixHeight = ref(0);
 const basisMatrixK = ref(0);
 
 const decoderProcAvgMs = ref(0);
@@ -69,6 +67,7 @@ const stallProbability = computed(() => {
 });
 
 const receiverStatus = ref('Idle');
+const isTogglingMic = ref(false);
 
 const inputMode = ref<InputMode>('loopback');
 const isMicActive = computed(() => inputMode.value === 'mic');
@@ -263,8 +262,6 @@ function makeOnProgressCallback() {
         const dpr = window.devicePixelRatio || 1;
         const scale = 4; // 1係数あたりの論理ピクセル数
         const logicalSize = k * scale;
-        basisMatrixWidth.value = logicalSize;
-        basisMatrixHeight.value = logicalSize;
         const physicalSize = Math.floor(logicalSize * dpr);
 
         if (canvas.width !== physicalSize || canvas.height !== physicalSize) {
@@ -410,35 +407,40 @@ async function rebuildReceiverGraph() {
 async function toggleMic() {
   await runExclusive(async () => {
     if (!runtime.coreReady.value) return;
-    const { audioContext } = await runtime.ensureAudioCore();
-    if (audioContext.state === 'suspended') {
-      await audioContext.resume();
-    }
-
-    if (inputMode.value === 'loopback') {
-      try {
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: 48000,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-        });
-        inputMode.value = 'mic';
-      } catch (e) {
-        console.error(e);
-        receiverStatus.value = 'Mic Error';
-        return;
+    isTogglingMic.value = true;
+    try {
+      const { audioContext } = await runtime.ensureAudioCore();
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
       }
-    } else {
-      micStream?.getTracks().forEach((t) => t.stop());
-      micStream = null;
-      inputMode.value = 'loopback';
-    }
 
-    await rebuildReceiverGraph();
+      if (inputMode.value === 'loopback') {
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 48000,
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+          });
+          inputMode.value = 'mic';
+        } catch (e) {
+          console.error(e);
+          receiverStatus.value = 'Mic Error';
+          return;
+        }
+      } else {
+        micStream?.getTracks().forEach((t) => t.stop());
+        micStream = null;
+        inputMode.value = 'loopback';
+      }
+
+      await rebuildReceiverGraph();
+    } finally {
+      isTogglingMic.value = false;
+    }
   });
 }
 
@@ -505,39 +507,24 @@ onBeforeUnmount(() => {
   <section class="panel receiver-panel">
     <div class="receiver-header">
       <div>
-        <h2>Receiver</h2>
-        <p class="panel-sub">Adaptive K decode + progress tracing</p>
-        <div class="status-chip" :class="receiverStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
-          {{ receiverStatus }}
+        <div class="receiver-title-row">
+          <h2>Receiver</h2>
+          <div class="status-chip" :class="receiverStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
+            {{ receiverStatus }}
+          </div>
+        </div>
+        <div class="path-banner">
+          <span class="path-label">Input Path</span>
+          <code v-if="!isMicActive">[demoAirGapNode] -digital- [Receiver]</code>
+          <code v-else>[Mic] -acoustic- [Receiver]</code>
         </div>
       </div>
-      <div class="button-row compact">
-        <button @click="toggleMic" :class="{ 'btn-active': isMicActive }" class="btn" :disabled="!runtime.coreReady.value">
-          {{ isMicActive ? 'Disable Mic' : 'Enable Mic' }}
+      <div class="button-row compact button-row-2col">
+        <button @click="toggleMic" :class="{ 'btn-active': isMicActive }" class="btn" :disabled="!runtime.coreReady.value || isTogglingMic">
+          {{ isTogglingMic ? 'Switching...' : (isMicActive ? 'Disable Mic' : 'Enable Mic') }}
         </button>
-        <button @click="reset" class="btn" :disabled="!runtime.coreReady.value">Clear</button>
+        <button @click="reset" class="btn" :disabled="!runtime.coreReady.value || isTogglingMic">Clear</button>
       </div>
-    </div>
-
-    <div class="path-banner">
-      <span class="path-label">Input Path</span>
-      <code v-if="!isMicActive">[demoAirGapNode] -digital- [Receiver]</code>
-      <code v-else>[Mic] -acoustic- [Receiver]</code>
-    </div>
-
-    <div class="display">
-      <p class="display-title">Decoded Result</p>
-      <pre v-if="outputText">{{ outputText }}</pre>
-      <div v-else-if="outputImageUrl" class="image-result">
-        <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
-        <p class="image-meta">{{ outputImageMime }}</p>
-      </div>
-      <div v-else-if="outputBinaryData" class="binary-result">
-        <button @click="downloadBinary" class="btn btn-primary">
-          [received.bin: {{ formatSize(outputBinarySize) }}]
-        </button>
-      </div>
-      <p v-else class="placeholder">Waiting for synchronization...</p>
     </div>
 
     <div class="progress-block">
@@ -548,9 +535,23 @@ onBeforeUnmount(() => {
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" :style="{ width: `${progressPercent * 100}%` }" />
       </div>
-      <div class="basis-panel" data-tooltip="ガウスの消去法によるランク更新の可視化。各パケットは行ベクトルとして表現され、青いセルは非ゼロ要素を表します。左下三角領域（灰色）は、前進消去によって常にゼロに保たれる領域です。白色のセルはまだ処理されていない上三角部分のゼロ要素です。">
+      <div class="basis-panel" v-if="progressPercent < 1.0 && receivedPackets > 0" data-tooltip="ガウスの消去法によるランク更新の可視化。各パケットは行ベクトルとして表現され、青いセルは非ゼロ要素を表します。左下三角領域（灰色）は、前進消去によって常にゼロに保たれる領域です。白色のセルはまだ処理されていない上三角部分のゼロ要素です。">
         <p class="basis-title">Basis Matrix (Gaussian Elimination) ({{ basisMatrixK }}x{{ basisMatrixK }}, {{ basisMatrixK * 16 * 8 }}bits)</p>
-        <canvas ref="basisCanvas" class="basis-canvas" :style="{ width: `${basisMatrixWidth}px`, height: `${basisMatrixHeight}px` }"></canvas>
+        <canvas ref="basisCanvas" class="basis-canvas"></canvas>
+      </div>
+      <div class="display" v-if="progressPercent >= 1.0">
+        <p class="display-title">Decoded Result</p>
+        <pre v-if="outputText">{{ outputText }}</pre>
+        <div v-else-if="outputImageUrl" class="image-result">
+          <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
+          <p class="image-meta">{{ outputImageMime }}</p>
+        </div>
+        <div v-else-if="outputBinaryData" class="binary-result">
+          <button @click="downloadBinary" class="btn btn-primary">
+            [received.bin: {{ formatSize(outputBinarySize) }}]
+          </button>
+        </div>
+        <p v-else class="placeholder">No decoded data</p>
       </div>
     </div>
 

@@ -9,7 +9,7 @@ import { createDemoRuntime, provideDemoRuntime, type AudioCore } from './demo-ru
 let audioContext: AudioContext | null = null;
 let demoAirGapNode: GainNode | null = null;
 let initPromise: Promise<AudioCore> | null = null;
-const appStatus = ref('Idle');
+const isInitializing = ref(false);
 
 async function ensureAudioCore(): Promise<AudioCore> {
   if (audioContext && demoAirGapNode) {
@@ -26,7 +26,6 @@ async function ensureAudioCore(): Promise<AudioCore> {
     audioContext = context;
     demoAirGapNode = airGap;
     runtime.coreReady.value = true;
-    appStatus.value = 'Ready (Rx standby)';
 
     return { audioContext: context, demoAirGapNode: airGap };
   })();
@@ -44,13 +43,14 @@ provideDemoRuntime(runtime);
 const activeTab = ref<'sender' | 'receiver'>('receiver');
 
 async function initialize() {
-  if (runtime.coreReady.value) return;
-  appStatus.value = 'Initializing...';
+  if (runtime.coreReady.value || isInitializing.value) return;
+  isInitializing.value = true;
   try {
     await ensureAudioCore();
   } catch (e) {
     console.error(e);
-    appStatus.value = 'Init Error';
+  } finally {
+    isInitializing.value = false;
   }
 }
 
@@ -80,14 +80,14 @@ onBeforeUnmount(() => {
         <div class="mode-selector" :class="{ 'is-disabled': runtime.isBusy.value }">
           <label class="mode-label">Modem Mode:</label>
           <div class="mode-buttons">
-            <button 
-              class="mode-btn" 
+            <button
+              class="mode-btn"
               :class="{ active: runtime.modemMode.value === 'dsss' }"
               :disabled="runtime.isBusy.value"
               @click="runtime.modemMode.value = 'dsss'"
             >DSSS (Slow)</button>
-            <button 
-              class="mode-btn" 
+            <button
+              class="mode-btn"
               :class="{ active: runtime.modemMode.value === 'mary' }"
               :disabled="runtime.isBusy.value"
               @click="runtime.modemMode.value = 'mary'"
@@ -95,15 +95,16 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </div>
-      <div class="status-chip" :class="appStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
-        {{ appStatus }}
-      </div>
     </header>
 
     <main class="content">
       <section v-if="!runtime.coreReady.value" class="panel init-panel">
         <p>まず Audio System を初期化して、送受信ノードを作成します。</p>
-        <button @click="initialize" class="btn btn-primary btn-large">Initialize Audio System</button>
+        <button
+          @click="initialize"
+          class="btn btn-primary btn-large"
+          :disabled="isInitializing"
+        >{{ isInitializing ? 'Initializing...' : 'Initialize Audio System' }}</button>
       </section>
 
       <template v-else>
@@ -119,7 +120,7 @@ onBeforeUnmount(() => {
     </main>
 
     <footer class="footnote">
-      <div><strong>Demo Bridge:</strong> <code>[Sender] -demoAirGapNode- [Receiver]</code></div>
+      <a href="https://github.com/cho45/mistcast" target="_blank" rel="noopener noreferrer">GitHub</a>
     </footer>
   </div>
 </template>
@@ -321,6 +322,10 @@ onBeforeUnmount(() => {
   font-size: 1.06rem;
 }
 
+.receiver-title-row h2 {
+  margin: 0;
+}
+
 .panel-sub {
   margin: 0.2rem 0 0.9rem;
   color: var(--muted);
@@ -352,6 +357,16 @@ textarea {
 
 .button-row.compact {
   margin-top: 0;
+}
+
+.button-row-2col {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.button-row-2col .btn {
+  flex: 1;
+  min-width: 0;
 }
 
 .btn {
@@ -424,22 +439,36 @@ textarea {
   gap: 0.8rem;
 }
 
-.path-banner {
-  margin-top: 0.3rem;
+.receiver-title-row {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  padding: 0.55rem 0.7rem;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: #f7fafc;
-  min-width: 0;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.receiver-title-row .status-chip {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.path-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.path-banner code {
+  font-size: 0.7em;
+  padding: 0.1rem 0.35rem;
 }
 
 .path-label {
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 code {
@@ -447,13 +476,15 @@ code {
   background: #eef3f8;
   color: #24455e;
   border: 1px solid #d6e1ea;
-  border-radius: 8px;
-  padding: 0.2rem 0.35rem;
+  border-radius: 6px;
+  padding: 0.15rem 0.4rem;
   display: inline-block;
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+  font-size: 0.85em;
+  line-height: 1.3;
 }
 
 .progress-block {
@@ -709,6 +740,15 @@ code {
     grid-template-columns: repeat(2, minmax(0, max-content));
   }
 
+  .button-row-2col {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .button-row-2col .btn {
+    flex: 1;
+  }
+
   .metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -741,6 +781,8 @@ code {
   border: 1px solid #cbd5e1;
   image-rendering: pixelated;
   max-width: 100%;
+  aspect-ratio: 1 / 1;
+  height: auto;
 }
 
 /* Tooltip styles */
