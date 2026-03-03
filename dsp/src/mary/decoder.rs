@@ -36,8 +36,18 @@ const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
 pub struct DecodeProgress {
     pub received_packets: usize,
     pub needed_packets: usize,
+    pub rank_packets: usize,
+    pub stalled_packets: usize,
+    pub dependent_packets: usize,
+    pub duplicate_packets: usize,
+    pub crc_error_packets: usize,
+    pub parse_error_packets: usize,
+    pub invalid_neighbor_packets: usize,
+    pub last_packet_seq: i32,
+    pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
+    pub basis_matrix: Vec<u8>,
 }
 
 /// LLR観測用コールバック型
@@ -66,12 +76,20 @@ pub struct Decoder {
     tracking_state: Option<TrackingState>,
     packets_processed_in_burst: usize,
     last_packet_seq: Option<u32>,
+    last_rank_up_seq: Option<u32>,
+
+    // 統計
+    pub received_packets: usize,
+    pub stalled_packets: usize,
+    pub dependent_packets: usize,
+    pub duplicate_packets: usize,
+    pub crc_error_packets: usize,
+    pub parse_error_packets: usize,
+    pub invalid_neighbor_packets: usize,
+    pub stats_total_samples: usize,
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
-
-    // 統計
-    pub stats_total_samples: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +141,14 @@ impl Decoder {
             tracking_state: None,
             packets_processed_in_burst: 0,
             last_packet_seq: None,
+            last_rank_up_seq: None,
+            received_packets: 0,
+            stalled_packets: 0,
+            dependent_packets: 0,
+            duplicate_packets: 0,
+            crc_error_packets: 0,
+            parse_error_packets: 0,
+            invalid_neighbor_packets: 0,
             llr_callback: None,
             stats_total_samples: 0,
         }
@@ -399,25 +425,54 @@ impl Decoder {
 
             let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
 
-            if let Ok(packet) = Packet::deserialize(&decoded_bytes) {
-                let pkt_k = packet.lt_k as usize;
-                if pkt_k != self.fountain_decoder.params().k {
-                    self.rebuild_fountain_decoder(pkt_k);
+            match Packet::deserialize(&decoded_bytes) {
+                Ok(packet) => {
+                    let pkt_k = packet.lt_k as usize;
+                    if pkt_k != self.fountain_decoder.params().k {
+                        self.rebuild_fountain_decoder(pkt_k);
+                    }
+
+                    self.last_packet_seq = Some(packet.lt_seq as u32);
+
+                    let fountain_packet = FountainPacket {
+                        seq: packet.lt_seq as u32,
+                        coefficients: crate::coding::fountain::reconstruct_packet_coefficients(
+                            packet.lt_seq as u32,
+                            self.fountain_decoder.params().k,
+                        ),
+                        data: packet.payload.to_vec(),
+                    };
+
+                    use crate::coding::fountain::ReceiveOutcome;
+                    let outcome = self.fountain_decoder.receive_with_outcome(fountain_packet);
+                    match outcome {
+                        ReceiveOutcome::AcceptedRankUp => {
+                            self.received_packets += 1;
+                            self.last_rank_up_seq = Some(packet.lt_seq as u32);
+                        }
+                        ReceiveOutcome::AcceptedNoRankUp => {
+                            self.received_packets += 1;
+                            self.stalled_packets += 1;
+                            self.dependent_packets += 1;
+                        }
+                        ReceiveOutcome::DuplicateSeq => {
+                            self.duplicate_packets += 1;
+                        }
+                        ReceiveOutcome::InvalidPacket => {
+                            self.parse_error_packets += 1;
+                        }
+                    }
+
+                    if let Some(data) = self.fountain_decoder.decode() {
+                        self.recovered_data = Some(data);
+                    }
                 }
-
-                let fountain_packet = FountainPacket {
-                    seq: packet.lt_seq as u32,
-                    coefficients: crate::coding::fountain::reconstruct_packet_coefficients(
-                        packet.lt_seq as u32,
-                        self.fountain_decoder.params().k,
-                    ),
-                    data: packet.payload.to_vec(),
-                };
-
-                self.fountain_decoder.receive(fountain_packet);
-
-                if let Some(data) = self.fountain_decoder.decode() {
-                    self.recovered_data = Some(data);
+                Err(e) => {
+                    use crate::frame::packet::PacketParseError;
+                    match e {
+                        PacketParseError::CrcMismatch { .. } => self.crc_error_packets += 1,
+                        _ => self.parse_error_packets += 1,
+                    }
                 }
             }
         }
@@ -428,18 +483,35 @@ impl Decoder {
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
         self.last_packet_seq = None;
+        self.last_rank_up_seq = None;
+        self.received_packets = 0;
+        self.stalled_packets = 0;
+        self.dependent_packets = 0;
+        self.duplicate_packets = 0;
+        self.crc_error_packets = 0;
+        self.parse_error_packets = 0;
+        self.invalid_neighbor_packets = 0;
     }
 
     fn progress(&self) -> DecodeProgress {
-        let received = self.fountain_decoder.received_count();
         let needed = self.fountain_decoder.params().k;
         let progress = self.fountain_decoder.progress();
 
         DecodeProgress {
-            received_packets: received,
+            received_packets: self.received_packets,
             needed_packets: needed,
+            rank_packets: self.fountain_decoder.rank(),
+            stalled_packets: self.stalled_packets,
+            dependent_packets: self.dependent_packets,
+            duplicate_packets: self.duplicate_packets,
+            crc_error_packets: self.crc_error_packets,
+            parse_error_packets: self.parse_error_packets,
+            invalid_neighbor_packets: self.invalid_neighbor_packets,
+            last_packet_seq: self.last_packet_seq.map(|s| s as i32).unwrap_or(-1),
+            last_rank_up_seq: self.last_rank_up_seq.map(|s| s as i32).unwrap_or(-1),
             progress,
             complete: self.recovered_data.is_some(),
+            basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
     }
 

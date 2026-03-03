@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import init, { WasmEncoder, WasmDecoder } from '../pkg/dsp';
+import init, { WasmDsssEncoder, WasmDsssDecoder } from '../pkg/dsp';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -18,10 +18,10 @@ describe('WASM E2E Integration (Fixed Protocol)', () => {
         const data = new TextEncoder().encode("Hello Acoustic World!");
         const sampleRate = 48000;
         
-        const encoder = new WasmEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate);
         encoder.set_data(data);
         
-        const decoder = new WasmDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate);
         let complete = false;
         
         for (let i = 0; i < 30; i++) {
@@ -56,7 +56,7 @@ describe('Performance Benchmark (Fixed Protocol)', () => {
     it('should measure real-time processing margin at 48kHz', () => {
         const sampleRate = 48000;
         const data = new TextEncoder().encode("Performance Test Data for FIXED_K=10 protocol.");
-        const encoder = new WasmEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate);
         encoder.set_data(data);
 
         let allSamples = new Float32Array(0);
@@ -70,7 +70,7 @@ describe('Performance Benchmark (Fixed Protocol)', () => {
             }
         }
         
-        const decoder = new WasmDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate);
         const startTime = performance.now();
         decoder.process_samples(allSamples);
         const endTime = performance.now();

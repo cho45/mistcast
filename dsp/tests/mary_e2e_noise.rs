@@ -31,7 +31,7 @@ fn test_transmission_quick(sigma: f32, seed: u64, sample_rate: f32) -> bool {
     let dsp_config = DspConfig::new(sample_rate);
     let mut encoder = Encoder::new(dsp_config.clone());
     encoder.set_data(data);
-    
+
     let mut decoder = Decoder::new(data.len(), lt_k, dsp_config.clone());
     let mut rng = StdRng::seed_from_u64(seed);
 
@@ -133,8 +133,10 @@ fn test_mary_awgn_e2e_sigma_margin_sweep() {
     let candidates = [0.01f32, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045];
     let mut best_sigma = 0.0f32;
 
-    println!("
---- Mary AWGN sigma margin sweep ---");
+    println!(
+        "
+--- Mary AWGN sigma margin sweep ---"
+    );
     for sigma in candidates {
         let start = Instant::now();
         let success = success_count_for_sigma(sigma, &seeds, 48000.0);
@@ -151,8 +153,10 @@ fn test_mary_awgn_e2e_sigma_margin_sweep() {
     }
     println!("recommended always-on margin sigma: {best_sigma:.3}");
     println!("configured MARGIN_SIGMA: {MARGIN_SIGMA:.3}");
-    println!("--------------------------------
-");
+    println!(
+        "--------------------------------
+"
+    );
     assert!(
         best_sigma > 0.0,
         "どの候補 sigma でも全seed成功しませんでした。Mary復調性能の劣化が疑われます。"

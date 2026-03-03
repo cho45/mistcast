@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import init, { WasmEncoder, WasmDecoder } from '../pkg/dsp';
+import init, { WasmDsssEncoder, WasmDsssDecoder } from '../pkg/dsp';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -19,10 +19,10 @@ describe('Reproduction: 10/10 Verification', () => {
         for(let i=0; i<16; i++) data[i] = 65 + i; // "ABC..."
         
         const sampleRate = 48000;
-        const encoder = new WasmEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate);
         encoder.set_data(data);
         
-        const decoder = new WasmDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate);
 
         // 受信系の初期過渡を避けるために事前に無音を流す。
         decoder.process_samples(new Float32Array(4096));
@@ -55,9 +55,9 @@ describe('Reproduction: 10/10 Verification', () => {
         for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
 
         const sampleRate = 48000;
-        const encoder = new WasmEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate);
         encoder.set_data(data);
-        const decoder = new WasmDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate);
         decoder.process_samples(new Float32Array(4096));
 
         let complete = false;
@@ -109,9 +109,9 @@ describe('Reproduction: 10/10 Verification', () => {
         const data = new TextEncoder().encode(text);
 
         const sampleRate = 48000;
-        const encoder = new WasmEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate);
         encoder.set_data(data);
-        const decoder = new WasmDecoder(sampleRate);
+        const decoder = new WasmDsssDecoder(sampleRate);
         decoder.process_samples(new Float32Array(4096));
 
         const seenRanks: number[] = [];
@@ -161,9 +161,9 @@ describe('Reproduction: 10/10 Verification', () => {
             dataWithSize.set(originalData, 2);
 
             // WASMエンコーダ/デコーダで処理
-            const encoder = new WasmEncoder(sampleRate);
+            const encoder = new WasmDsssEncoder(sampleRate);
             encoder.set_data(dataWithSize);
-            const decoder = new WasmDecoder(sampleRate);
+            const decoder = new WasmDsssDecoder(sampleRate);
             decoder.process_samples(new Float32Array(4096));
 
             // パケットを処理
@@ -212,9 +212,9 @@ describe('Reproduction: 10/10 Verification', () => {
             dataWithSize.set(webpLikeData, 2);
 
             // WASMエンコーダ/デコーダで処理
-            const encoder = new WasmEncoder(sampleRate);
+            const encoder = new WasmDsssEncoder(sampleRate);
             encoder.set_data(dataWithSize);
-            const decoder = new WasmDecoder(sampleRate);
+            const decoder = new WasmDsssDecoder(sampleRate);
             decoder.process_samples(new Float32Array(4096));
 
             // パケットを処理
@@ -267,9 +267,9 @@ describe('Reproduction: 10/10 Verification', () => {
                 dataWithSize.set(originalData, 2);
 
                 // WASMエンコーダ/デコーダで処理
-                const encoder = new WasmEncoder(sampleRate);
+                const encoder = new WasmDsssEncoder(sampleRate);
                 encoder.set_data(dataWithSize);
-                const decoder = new WasmDecoder(sampleRate);
+                const decoder = new WasmDsssDecoder(sampleRate);
                 decoder.process_samples(new Float32Array(4096));
 
                 // パケットを処理

@@ -4,6 +4,7 @@ import { provideDemoRuntime } from '../demo-runtime';
 export function createMockRuntime() {
   return {
     coreReady: ref(false),
+    modemMode: ref('dsss' as const),
     ensureAudioCore: async () => ({
       audioContext: {
         sampleRate: 48000,

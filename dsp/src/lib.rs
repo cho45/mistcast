@@ -114,8 +114,10 @@ impl DspConfig {
     }
 }
 
+// --- DSSS (Standard) WASM Interface ---
+
 #[wasm_bindgen]
-pub struct WasmDecodeProgress {
+pub struct WasmDsssDecodeProgress {
     pub received_packets: usize,
     pub needed_packets: usize,
     pub rank_packets: usize,
@@ -134,7 +136,7 @@ pub struct WasmDecodeProgress {
 }
 
 #[wasm_bindgen]
-impl WasmDecodeProgress {
+impl WasmDsssDecodeProgress {
     #[wasm_bindgen(getter)]
     pub fn basis_matrix(&self) -> js_sys::Uint8Array {
         js_sys::Uint8Array::from(&self.basis_matrix[..])
@@ -142,17 +144,17 @@ impl WasmDecodeProgress {
 }
 
 #[wasm_bindgen]
-pub struct WasmDecoder {
+pub struct WasmDsssDecoder {
     inner: dsss::decoder::Decoder,
 }
 
 #[wasm_bindgen]
-impl WasmDecoder {
+impl WasmDsssDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32) -> Self {
         console_error_panic_hook::set_once();
         let config = DspConfig::new(sample_rate);
-        WasmDecoder {
+        WasmDsssDecoder {
             inner: dsss::decoder::Decoder::new(
                 params::FIXED_K * params::PAYLOAD_SIZE,
                 params::FIXED_K,
@@ -160,9 +162,9 @@ impl WasmDecoder {
             ),
         }
     }
-    pub fn process_samples(&mut self, samples: &[f32]) -> WasmDecodeProgress {
+    pub fn process_samples(&mut self, samples: &[f32]) -> WasmDsssDecodeProgress {
         let progress = self.inner.process_samples(samples);
-        WasmDecodeProgress {
+        WasmDsssDecodeProgress {
             received_packets: progress.received_packets,
             needed_packets: progress.needed_packets,
             rank_packets: progress.rank_packets,
@@ -188,18 +190,18 @@ impl WasmDecoder {
 }
 
 #[wasm_bindgen]
-pub struct WasmEncoder {
+pub struct WasmDsssEncoder {
     inner: dsss::encoder::Encoder,
     fountain_encoder: Option<coding::fountain::FountainEncoder>,
 }
 
 #[wasm_bindgen]
-impl WasmEncoder {
+impl WasmDsssEncoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32) -> Self {
         let config = DspConfig::new(sample_rate);
         let enc_config = dsss::encoder::EncoderConfig::new(config);
-        WasmEncoder {
+        WasmDsssEncoder {
             inner: dsss::encoder::Encoder::new(enc_config),
             fountain_encoder: None,
         }
@@ -235,5 +237,111 @@ impl WasmEncoder {
     pub fn reset(&mut self) {
         self.inner.reset();
         self.fountain_encoder = None;
+    }
+}
+
+// --- Mary (Robust) WASM Interface ---
+
+#[wasm_bindgen]
+pub struct WasmMaryDecodeProgress {
+    pub received_packets: usize,
+    pub needed_packets: usize,
+    pub rank_packets: usize,
+    pub stalled_packets: usize,
+    pub dependent_packets: usize,
+    pub duplicate_packets: usize,
+    pub crc_error_packets: usize,
+    pub parse_error_packets: usize,
+    pub invalid_neighbor_packets: usize,
+    pub last_packet_seq: i32,
+    pub last_rank_up_seq: i32,
+    pub progress: f32,
+    pub complete: bool,
+    #[wasm_bindgen(skip)]
+    pub basis_matrix: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WasmMaryDecodeProgress {
+    #[wasm_bindgen(getter)]
+    pub fn basis_matrix(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(&self.basis_matrix[..])
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmMaryDecoder {
+    inner: mary::decoder::Decoder,
+}
+
+#[wasm_bindgen]
+impl WasmMaryDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(sample_rate: f32) -> Self {
+        console_error_panic_hook::set_once();
+        let config = DspConfig::new(sample_rate);
+        WasmMaryDecoder {
+            inner: mary::decoder::Decoder::new(
+                params::FIXED_K * params::PAYLOAD_SIZE,
+                params::FIXED_K,
+                config,
+            ),
+        }
+    }
+    pub fn process_samples(&mut self, samples: &[f32]) -> WasmMaryDecodeProgress {
+        let progress = self.inner.process_samples(samples);
+        WasmMaryDecodeProgress {
+            received_packets: progress.received_packets,
+            needed_packets: progress.needed_packets,
+            rank_packets: progress.rank_packets,
+            stalled_packets: progress.stalled_packets,
+            dependent_packets: progress.dependent_packets,
+            duplicate_packets: progress.duplicate_packets,
+            crc_error_packets: progress.crc_error_packets,
+            parse_error_packets: progress.parse_error_packets,
+            invalid_neighbor_packets: progress.invalid_neighbor_packets,
+            last_packet_seq: progress.last_packet_seq,
+            last_rank_up_seq: progress.last_rank_up_seq,
+            progress: progress.progress,
+            complete: progress.complete,
+            basis_matrix: progress.basis_matrix,
+        }
+    }
+    pub fn recovered_data(&self) -> Option<Vec<u8>> {
+        self.inner.recovered_data().map(|d| d.to_vec())
+    }
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmMaryEncoder {
+    inner: mary::encoder::Encoder,
+}
+
+#[wasm_bindgen]
+impl WasmMaryEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(sample_rate: f32) -> Self {
+        let config = DspConfig::new(sample_rate);
+        WasmMaryEncoder {
+            inner: mary::encoder::Encoder::new(config),
+        }
+    }
+    pub fn set_data(&mut self, data: &[u8]) {
+        self.inner.set_data(data);
+    }
+    pub fn pull_frame(&mut self) -> Option<Vec<f32>> {
+        self.inner.encode_frame()
+    }
+    pub fn flush(&mut self) -> Vec<f32> {
+        self.inner.flush()
+    }
+    pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        self.inner.modulate_silence(samples)
+    }
+    pub fn reset(&mut self) {
+        self.inner.reset();
     }
 }

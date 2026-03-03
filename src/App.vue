@@ -72,8 +72,29 @@ onBeforeUnmount(() => {
 <template>
   <div class="app-shell">
     <header class="hero">
-      <h1>Mistcast Demo v2.3</h1>
-      <p>Acoustic DSSS + RLNC playground</p>
+      <div class="hero-top">
+        <div>
+          <h1>Mistcast Demo v2.3</h1>
+          <p>Acoustic DSSS + RLNC playground</p>
+        </div>
+        <div class="mode-selector" :class="{ 'is-disabled': runtime.isBusy.value }">
+          <label class="mode-label">Modem Mode:</label>
+          <div class="mode-buttons">
+            <button 
+              class="mode-btn" 
+              :class="{ active: runtime.modemMode.value === 'dsss' }"
+              :disabled="runtime.isBusy.value"
+              @click="runtime.modemMode.value = 'dsss'"
+            >DSSS (Slow)</button>
+            <button 
+              class="mode-btn" 
+              :class="{ active: runtime.modemMode.value === 'mary' }"
+              :disabled="runtime.isBusy.value"
+              @click="runtime.modemMode.value = 'mary'"
+            >M-ARY (Fast)</button>
+          </div>
+        </div>
+      </div>
       <div class="status-chip" :class="appStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
         {{ appStatus }}
       </div>
@@ -133,6 +154,65 @@ onBeforeUnmount(() => {
     radial-gradient(130% 120% at 100% 0%, #d9efff 0%, transparent 45%),
     linear-gradient(165deg, var(--bg-a), var(--bg-b));
   font-family: var(--sans);
+}
+
+.hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.mode-selector {
+  background: rgba(255, 255, 255, 0.5);
+  padding: 0.5rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+
+.mode-selector.is-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.mode-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+  margin-left: 0.2rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mode-buttons {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.mode-btn {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-btn:hover {
+  background: #f1f5f9;
+}
+
+.mode-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary-strong);
+  box-shadow: 0 2px 4px rgba(15, 107, 215, 0.2);
 }
 
 .hero {

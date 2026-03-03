@@ -4,9 +4,9 @@ use crate::{
     coding::fec,
     coding::fountain::{FountainEncoder, FountainPacket, FountainParams},
     coding::interleaver::BlockInterleaver,
+    dsss::modulator::Modulator,
     frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX},
     params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
-    dsss::modulator::Modulator,
     DspConfig,
 };
 

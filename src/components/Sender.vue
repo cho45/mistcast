@@ -313,7 +313,7 @@ async function startSendingData(data: Uint8Array) {
 
     senderStatus.value = 'Transmitting...';
     isTransmitting.value = true;
-    await senderBackend.startEncoder(data, audioContext.sampleRate);
+    await senderBackend.startEncoder(data, audioContext.sampleRate, runtime.modemMode.value);
   });
 }
 
@@ -350,6 +350,10 @@ watch(
   },
   { immediate: true }
 );
+
+watch(isTransmitting, (busy) => {
+  runtime.isBusy.value = busy;
+});
 
 onBeforeUnmount(() => {
   void teardownSenderGraph();

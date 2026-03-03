@@ -1,11 +1,22 @@
 import { expose } from "comlink";
-import initBase, { WasmEncoder as WasmEncoderBase, WasmDecoder as WasmDecoderBase } from "../pkg/dsp";
-import initSimd, { WasmEncoder as WasmEncoderSimd, WasmDecoder as WasmDecoderSimd } from "../pkg-simd/dsp";
+import initBase, { 
+  WasmDsssEncoder as WasmDsssEncoderBase, 
+  WasmDsssDecoder as WasmDsssDecoderBase,
+  WasmMaryEncoder as WasmMaryEncoderBase,
+  WasmMaryDecoder as WasmMaryDecoderBase
+} from "../pkg/dsp";
+import initSimd, { 
+  WasmDsssEncoder as WasmDsssEncoderSimd, 
+  WasmDsssDecoder as WasmDsssDecoderSimd,
+  WasmMaryEncoder as WasmMaryEncoderSimd,
+  WasmMaryDecoder as WasmMaryDecoderSimd
+} from "../pkg-simd/dsp";
 import { RecycleTransferSender } from "./recycle-transfer-bridge";
 
 type WasmEncoderLike = {
   set_data(data: Uint8Array): void;
   pull_frame(): Float32Array | null | undefined;
+  reset(): void;
 };
 
 type WasmDecoderLike = {
@@ -34,8 +45,10 @@ type WasmDecoderCtor = new (sampleRate: number) => WasmDecoderLike;
 type WasmInitFn = () => Promise<unknown>;
 type WasmBindings = {
   init: WasmInitFn;
-  WasmEncoder: WasmEncoderCtor;
-  WasmDecoder: WasmDecoderCtor;
+  WasmDsssEncoder: WasmEncoderCtor;
+  WasmDsssDecoder: WasmDecoderCtor;
+  WasmMaryEncoder: WasmEncoderCtor;
+  WasmMaryDecoder: WasmDecoderCtor;
   flavor: "base" | "simd";
 };
 
@@ -66,17 +79,23 @@ const supportsWasmSimd = () => {
 
 const BASE_BINDINGS: WasmBindings = {
   init: initBase as WasmInitFn,
-  WasmEncoder: WasmEncoderBase as unknown as WasmEncoderCtor,
-  WasmDecoder: WasmDecoderBase as unknown as WasmDecoderCtor,
+  WasmDsssEncoder: WasmDsssEncoderBase as unknown as WasmEncoderCtor,
+  WasmDsssDecoder: WasmDsssDecoderBase as unknown as WasmDecoderCtor,
+  WasmMaryEncoder: WasmMaryEncoderBase as unknown as WasmEncoderCtor,
+  WasmMaryDecoder: WasmMaryDecoderBase as unknown as WasmDecoderCtor,
   flavor: "base",
 };
 
 const SIMD_BINDINGS: WasmBindings = {
   init: initSimd as WasmInitFn,
-  WasmEncoder: WasmEncoderSimd as unknown as WasmEncoderCtor,
-  WasmDecoder: WasmDecoderSimd as unknown as WasmDecoderCtor,
+  WasmDsssEncoder: WasmDsssEncoderSimd as unknown as WasmEncoderCtor,
+  WasmDsssDecoder: WasmDsssDecoderSimd as unknown as WasmDecoderCtor,
+  WasmMaryEncoder: WasmMaryEncoderSimd as unknown as WasmEncoderCtor,
+  WasmMaryDecoder: WasmMaryDecoderSimd as unknown as WasmDecoderCtor,
   flavor: "simd",
 };
+
+export type ModemMode = "dsss" | "mary";
 
 type RecyclePortInboundMessage = 
   | { type: "recycle"; data: Float32Array }
@@ -198,7 +217,7 @@ export class MistcastBackend {
     this.audioInPort.start();
   }
 
-  async startEncoder(data: Uint8Array, sampleRate: number) {
+  async startEncoder(data: Uint8Array, sampleRate: number, mode: ModemMode = "dsss") {
     await this.init();
     const bindings = this.requireBindings();
 
@@ -206,8 +225,15 @@ export class MistcastBackend {
     this.isEncoding = false;
     this.audioOutPort?.postMessage({ type: "reset" });
 
-    if (!this.encoder) {
-        this.encoder = new bindings.WasmEncoder(sampleRate);
+    if (this.encoder) {
+      this.encoder.reset();
+      this.encoder = null;
+    }
+    
+    if (mode === "mary") {
+      this.encoder = new bindings.WasmMaryEncoder(sampleRate);
+    } else {
+      this.encoder = new bindings.WasmDsssEncoder(sampleRate);
     }
 
     // 元のデータの先頭にサイズ情報（2バイト、ビッグエンディアン）を埋め込む
@@ -222,7 +248,7 @@ export class MistcastBackend {
     dataWithSize.set(data, 2);
 
     this.encoder.set_data(dataWithSize);
-    console.log(`[Worker] Encoder started (size=${data.length}, withPrefix=${dataWithSize.length}, rate=${sampleRate})`);
+    console.log(`[Worker] Encoder started (${mode}, size=${data.length}, withPrefix=${dataWithSize.length}, rate=${sampleRate})`);
 
     const dummyFrame = this.encoder.pull_frame();
     if (!dummyFrame) return;
@@ -259,12 +285,22 @@ export class MistcastBackend {
 
   async startDecoder(sampleRate: number, 
                      onPacket: (data: Uint8Array) => void,
-                     onProgress: (p: any) => void) {
+                     onProgress: (p: any) => void,
+                     mode: ModemMode = "dsss") {
     await this.init();
     const bindings = this.requireBindings();
-    console.log(`[Worker] Decoder setup (adaptive-k protocol, rate=${sampleRate})`);
+    console.log(`[Worker] Decoder setup (${mode}, adaptive-k protocol, rate=${sampleRate})`);
     
-    this.decoder = new bindings.WasmDecoder(sampleRate);
+    if (this.decoder) {
+        this.decoder.reset();
+        this.decoder = null;
+    }
+
+    if (mode === "mary") {
+        this.decoder = new bindings.WasmMaryDecoder(sampleRate);
+    } else {
+        this.decoder = new bindings.WasmDsssDecoder(sampleRate);
+    }
     this.decoderProcessorStats = {
       blocks: 0,
       avgProcessMs: 0,

@@ -9,9 +9,9 @@ use crate::{
     common::nco::Nco,
     common::resample::Resampler,
     common::rrc_filter::RrcFilter,
+    dsss::sync::{SyncDetector, SyncResult},
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
     params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
-    dsss::sync::{SyncDetector, SyncResult},
     DifferentialModulation, DspConfig,
 };
 use num_complex::Complex32;

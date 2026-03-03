@@ -402,7 +402,8 @@ async function rebuildReceiverGraph() {
   await receiverBackend.startDecoder(
     audioContext.sampleRate,
     makeOnPacketCallback(),
-    makeOnProgressCallback()
+    makeOnProgressCallback(),
+    runtime.modemMode.value
   );
 }
 
@@ -465,6 +466,28 @@ watch(
     });
   },
   { immediate: true }
+);
+
+watch(
+  () => runtime.modemMode.value,
+  async () => {
+    if (!runtime.coreReady.value) return;
+    await reset();
+  }
+);
+
+watch(
+  [receivedPackets, progressPercent],
+  ([received, progress]) => {
+    // パケットを1つでも受信しており、かつ完了していない場合は「ビジー」とみなす
+    const active = received > 0 && progress < 1.0;
+    // 送信側がビジーでない場合のみ、受信側の状態で上書きする（簡易的な論理和）
+    if (!active && runtime.isBusy.value && receivedPackets.value > 0) {
+       runtime.isBusy.value = false;
+    } else if (active) {
+       runtime.isBusy.value = true;
+    }
+  }
 );
 
 onBeforeUnmount(() => {

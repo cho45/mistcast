@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import init, { WasmEncoder, WasmDecoder } from '../pkg/dsp';
+import init, { WasmDsssEncoder, WasmDsssDecoder } from '../pkg/dsp';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -19,10 +19,10 @@ describe('Reliability Stress Test (Fixed Protocol)', () => {
         const data = new TextEncoder().encode("Reliability Test");
         
         for (let run = 1; run <= 10; run++) {
-            const encoder = new WasmEncoder(sampleRate);
+            const encoder = new WasmDsssEncoder(sampleRate);
             encoder.set_data(data);
 
-            const decoder = new WasmDecoder(sampleRate);
+            const decoder = new WasmDsssDecoder(sampleRate);
             
             let complete = false;
             let p_count = 0;
@@ -49,18 +49,18 @@ describe('Reliability Stress Test (Fixed Protocol)', () => {
     it('should succeed even with dirty buffers by ensuring full decoder reset', async () => {
         const sampleRate = 48000;
         const data = new TextEncoder().encode("Dirty Restart");
-        const encoder = new WasmEncoder(sampleRate);
+        const encoder = new WasmDsssEncoder(sampleRate);
 
         // 1. ゴミを流す
         encoder.set_data(new TextEncoder().encode("Garbage"));
-        const trashDecoder = new WasmDecoder(sampleRate);
+        const trashDecoder = new WasmDsssDecoder(sampleRate);
         for(let i=0; i<3; i++) {
             const f = encoder.pull_frame();
             if (f) trashDecoder.process_samples(f);
         }
 
         // 2. 本番（デコーダを新調）
-        const freshDecoder = new WasmDecoder(sampleRate);
+        const freshDecoder = new WasmDsssDecoder(sampleRate);
         encoder.set_data(data);
         
         let complete = false;

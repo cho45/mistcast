@@ -15,16 +15,15 @@ vi.mock('comlink', () => ({
 }));
 
 vi.mock('../pkg/dsp', () => {
-  class WasmEncoder {
+  class WasmDsssEncoder {
     constructor(...args: any[]) {
       hoisted.WasmEncoder(...args);
     }
     set_data = vi.fn();
-    get_k = vi.fn(() => 10);
     pull_frame = vi.fn(() => new Float32Array(2000));
-    encode_all = vi.fn(() => new Float32Array(2000));
+    reset = vi.fn();
   }
-  class WasmDecoder {
+  class WasmDsssDecoder {
     constructor(...args: any[]) {
       hoisted.WasmDecoder(...args);
     }
@@ -41,30 +40,31 @@ vi.mock('../pkg/dsp', () => {
       invalid_neighbor_packets: 0,
       last_packet_seq: 0,
       last_rank_up_seq: 0,
-      progress: 0.1
+      progress: 0.1,
+      basis_matrix: new Uint8Array(121)
     }));
-    // サイズプレフィックスを含むデータを返す: [size: 2bytes][actual_data]
     recovered_data = vi.fn(() => new Uint8Array([0, 3, 1, 2, 3]));
     reset = vi.fn();
   }
   return {
     default: hoisted.initBase,
-    WasmEncoder,
-    WasmDecoder,
+    WasmDsssEncoder,
+    WasmDsssDecoder,
+    WasmMaryEncoder: WasmDsssEncoder,
+    WasmMaryDecoder: WasmDsssDecoder,
   };
 });
 
 vi.mock('../pkg-simd/dsp', () => {
-  class WasmEncoder {
+  class WasmDsssEncoder {
     constructor(...args: any[]) {
       hoisted.WasmEncoder(...args);
     }
     set_data = vi.fn();
-    get_k = vi.fn(() => 10);
     pull_frame = vi.fn(() => new Float32Array(2000));
-    encode_all = vi.fn(() => new Float32Array(2000));
+    reset = vi.fn();
   }
-  class WasmDecoder {
+  class WasmDsssDecoder {
     constructor(...args: any[]) {
       hoisted.WasmDecoder(...args);
     }
@@ -81,16 +81,18 @@ vi.mock('../pkg-simd/dsp', () => {
       invalid_neighbor_packets: 0,
       last_packet_seq: 0,
       last_rank_up_seq: 0,
-      progress: 0.1
+      progress: 0.1,
+      basis_matrix: new Uint8Array(121)
     }));
-    // サイズプレフィックスを含むデータを返す: [size: 2bytes][actual_data]
     recovered_data = vi.fn(() => new Uint8Array([0, 3, 1, 2, 3]));
     reset = vi.fn();
   }
   return {
     default: hoisted.initSimd,
-    WasmEncoder,
-    WasmDecoder,
+    WasmDsssEncoder,
+    WasmDsssDecoder,
+    WasmMaryEncoder: WasmDsssEncoder,
+    WasmMaryDecoder: WasmDsssDecoder,
   };
 });
 
