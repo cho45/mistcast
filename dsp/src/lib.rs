@@ -234,8 +234,12 @@ impl WasmDsssEncoder {
     }
     pub fn pull_frame_with_seq(&mut self, seq: u32) -> Option<Vec<f32>> {
         let encoder = self.fountain_encoder.as_ref()?;
-        let packet = encoder.get_packet(seq);
-        Some(self.inner.encode_burst(&[packet]))
+        let burst_size = self.inner.config().packets_per_sync_burst;
+        let mut packets = Vec::with_capacity(burst_size);
+        for i in 0..burst_size {
+            packets.push(encoder.get_packet(seq.wrapping_add(i as u32)));
+        }
+        Some(self.inner.encode_burst(&packets))
     }
     pub fn flush(&mut self) -> Vec<f32> {
         self.inner.flush()
@@ -348,8 +352,12 @@ impl WasmMaryEncoder {
     }
     pub fn pull_frame_with_seq(&mut self, seq: u32) -> Option<Vec<f32>> {
         let encoder = self.inner.fountain_encoder()?;
-        let packet = encoder.get_packet(seq);
-        Some(self.inner.encode_burst(&[packet]))
+        let burst_size = self.inner.config().packets_per_sync_burst;
+        let mut packets = Vec::with_capacity(burst_size);
+        for i in 0..burst_size {
+            packets.push(encoder.get_packet(seq.wrapping_add(i as u32)));
+        }
+        Some(self.inner.encode_burst(&packets))
     }
     pub fn flush(&mut self) -> Vec<f32> {
         self.inner.flush()

@@ -145,6 +145,10 @@ impl Encoder {
         self.config.fountain_k
     }
 
+    pub fn config(&self) -> &EncoderConfig {
+        &self.config
+    }
+
     /// フラッシュ
     pub fn flush(&mut self) -> Vec<f32> {
         self.modulator.flush()
