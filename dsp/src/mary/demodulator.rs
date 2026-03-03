@@ -12,6 +12,12 @@
 use crate::common::walsh::{WalshCorrelator, WalshDictionary};
 use num_complex::Complex32;
 
+impl Default for Demodulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// MaryDQPSK復調器
 pub struct Demodulator {
     correlators: Vec<WalshCorrelator>,
@@ -64,7 +70,7 @@ impl Demodulator {
         // Encoderは bits[idx] (配列の先頭) を w_idx の MSB (bit=3) にマップする。
         // Decoderは all_llrs に先頭から追加していくため、
         // 戻り値の配列は [LLR(MSB=3), LLR(bit=2), LLR(bit=1), LLR(LSB=0)] の順でなければならない。
-        for i in 0..4 {
+        for (i, item) in llr.iter_mut().enumerate() {
             let bit = 3 - i; // i=0 -> bit=3, i=1 -> bit=2 ...
 
             // bit=0のWalsh indexの最大エネルギー
@@ -79,7 +85,7 @@ impl Demodulator {
                 .map(|idx| energies[idx])
                 .fold(f32::NEG_INFINITY, f32::max);
 
-            llr[i] = (max_e0 - max_e1) / denom;
+            *item = (max_e0 - max_e1) / denom;
         }
 
         llr
@@ -134,7 +140,7 @@ impl Demodulator {
         // LLR計算
         let energies: [f32; 16] = correlations.map(|c| c.norm_sqr());
         let walsh_llr = self.walsh_llr(&energies, max_energy);
-        
+
         // DQPSK LLRの正規化
         // D = Z_curr * Z_prev* の次元はエネルギー次元 (|A*SF|^2)
         // なので E_max で割ることで [-1, 1] に収まる
@@ -182,11 +188,7 @@ mod tests {
         let max_idx = correlations
             .iter()
             .enumerate()
-            .max_by(|a, b| {
-                a.1.norm_sqr()
-                    .partial_cmp(&b.1.norm_sqr())
-                    .unwrap()
-            })
+            .max_by(|a, b| a.1.norm_sqr().partial_cmp(&b.1.norm_sqr()).unwrap())
             .map(|(idx, _)| idx)
             .unwrap();
 
@@ -361,7 +363,11 @@ mod tests {
         }
 
         // 位相(1,0) -> diff = (16,0) * (16,0) = (256,0) -> LLR = 256/256 = 1.0
-        assert!(dqpsk_llr[0] > 0.5, "Phase (1,0) should give positive LLR[0], got {}", dqpsk_llr[0]);
+        assert!(
+            dqpsk_llr[0] > 0.5,
+            "Phase (1,0) should give positive LLR[0], got {}",
+            dqpsk_llr[0]
+        );
     }
 
     /// Walsh[1] (0b0001)のLLR確認
@@ -415,9 +421,15 @@ mod tests {
                 let llr_idx = 3 - bit;
                 let llr_positive = walsh_llr[llr_idx] > 0.0;
 
-                assert_eq!(llr_positive, expected_sign > 0.0,
-                           "Walsh[{}] bit{}: LLR={}, bit_set={}",
-                           walsh_idx, bit, walsh_llr[llr_idx], expected_sign < 0.0);
+                assert_eq!(
+                    llr_positive,
+                    expected_sign > 0.0,
+                    "Walsh[{}] bit{}: LLR={}, bit_set={}",
+                    walsh_idx,
+                    bit,
+                    walsh_llr[llr_idx],
+                    expected_sign < 0.0
+                );
             }
         }
     }
@@ -476,8 +488,8 @@ mod tests {
 
         // 全てのDQPSK位相を検証
         let test_cases = [
-            (Complex32::new(1.0, 0.0), [1.0, 1.0]),   // 位相0 (delta=0)
-            (Complex32::new(0.0, 1.0), [1.0, -1.0]),  // 位相1 (delta=1)
+            (Complex32::new(1.0, 0.0), [1.0, 1.0]),    // 位相0 (delta=0)
+            (Complex32::new(0.0, 1.0), [1.0, -1.0]),   // 位相1 (delta=1)
             (Complex32::new(-1.0, 0.0), [-1.0, -1.0]), // 位相2 (delta=2)
             (Complex32::new(0.0, -1.0), [-1.0, 1.0]),  // 位相3 (delta=3)
         ];
@@ -528,8 +540,16 @@ mod tests {
         // diff = (0,1) * conj(1,0) = (0,1)
         // LLR[0] = diff.re + diff.im = 1
         // LLR[1] = diff.re - diff.im = -1
-        assert!(dqpsk_llr2[0] > 0.0, "DQPSK LLR[0] should be positive for delta=1, got {}", dqpsk_llr2[0]);
-        assert!(dqpsk_llr2[1] < 0.0, "DQPSK LLR[1] should be negative for delta=1, got {}", dqpsk_llr2[1]);
+        assert!(
+            dqpsk_llr2[0] > 0.0,
+            "DQPSK LLR[0] should be positive for delta=1, got {}",
+            dqpsk_llr2[0]
+        );
+        assert!(
+            dqpsk_llr2[1] < 0.0,
+            "DQPSK LLR[1] should be negative for delta=1, got {}",
+            dqpsk_llr2[1]
+        );
     }
 
     /// LLRのスケーリングと正規化の厳密な検証
@@ -556,12 +576,20 @@ mod tests {
         // 1. & 2. スケールの検証
         // 現状の実装では Walsh LLR は ~256 になるため、ここで失敗するはず
         for (i, &llr) in walsh_llr.iter().enumerate() {
-            assert!(llr.abs() <= 2.1, 
-                    "Walsh LLR[{}] is out of expected range [-2, 2]: {}", i, llr);
+            assert!(
+                llr.abs() <= 2.1,
+                "Walsh LLR[{}] is out of expected range [-2, 2]: {}",
+                i,
+                llr
+            );
         }
         for (i, &llr) in dqpsk_llr.iter().enumerate() {
-            assert!(llr.abs() <= 2.1, 
-                    "DQPSK LLR[{}] is out of expected range [-2, 2]: {}", i, llr);
+            assert!(
+                llr.abs() <= 2.1,
+                "DQPSK LLR[{}] is out of expected range [-2, 2]: {}",
+                i,
+                llr
+            );
         }
 
         // 3. WalshとDQPSKの相対的な重みが同程度であることを確認
@@ -570,13 +598,17 @@ mod tests {
         let dqpsk_avg = dqpsk_llr[0].abs(); // bit0は1.0, bit1は~0を想定
 
         let ratio = walsh_avg / dqpsk_avg;
-        assert!(ratio > 0.5 && ratio < 2.0, 
-                "LLR scale mismatch between Walsh ({}) and DQPSK ({}). Ratio: {}", 
-                walsh_avg, dqpsk_avg, ratio);
+        assert!(
+            ratio > 0.5 && ratio < 2.0,
+            "LLR scale mismatch between Walsh ({}) and DQPSK ({}). Ratio: {}",
+            walsh_avg,
+            dqpsk_avg,
+            ratio
+        );
     }
 
     /// LLRの信頼性を検証する：エネルギーが大きいほどLLRの絶対値が大きい
-    /// 
+    ///
     /// 注：現在の正規化ロジック (E_maxで除算) では、ノイズのない理想信号は
     /// 振幅に関わらず LLR=1.0 に収束する。そのため、ここでは絶対値ではなく
     /// 正しく 1.0 に正規化されることを検証する。
@@ -604,10 +636,18 @@ mod tests {
 
         // 検証：理想信号ではどちらも LLR ≈ 1.0 になる
         for bit in 0..4 {
-            assert!((walsh_llr_weak[bit].abs() - 1.0).abs() < 1e-3,
-                    "Weak signal bit{} LLR should be ~1.0, got {}", bit, walsh_llr_weak[bit]);
-            assert!((walsh_llr_strong[bit].abs() - 1.0).abs() < 1e-3,
-                    "Strong signal bit{} LLR should be ~1.0, got {}", bit, walsh_llr_strong[bit]);
+            assert!(
+                (walsh_llr_weak[bit].abs() - 1.0).abs() < 1e-3,
+                "Weak signal bit{} LLR should be ~1.0, got {}",
+                bit,
+                walsh_llr_weak[bit]
+            );
+            assert!(
+                (walsh_llr_strong[bit].abs() - 1.0).abs() < 1e-3,
+                "Strong signal bit{} LLR should be ~1.0, got {}",
+                bit,
+                walsh_llr_strong[bit]
+            );
         }
     }
 
@@ -641,13 +681,26 @@ mod tests {
             .map(|&w| Complex32::new(w as f32, 0.0))
             .collect();
 
-        let (payload_walsh_llr, _payload_dqpsk_llr, _payload_diff) = demod.demod_symbol(&payload_signal);
+        let (payload_walsh_llr, _payload_dqpsk_llr, _payload_diff) =
+            demod.demod_symbol(&payload_signal);
 
         // Walsh[7] = 0b0111 -> bit3(0)>0, bit2(1)<0, bit1(1)<0, bit0(1)<0
-        assert!(payload_walsh_llr[0] > 0.0, "Payload Walsh[7] bit3 should be positive");
-        assert!(payload_walsh_llr[1] < 0.0, "Payload Walsh[7] bit2 should be negative");
-        assert!(payload_walsh_llr[2] < 0.0, "Payload Walsh[7] bit1 should be negative");
-        assert!(payload_walsh_llr[3] < 0.0, "Payload Walsh[7] bit0 should be negative");
+        assert!(
+            payload_walsh_llr[0] > 0.0,
+            "Payload Walsh[7] bit3 should be positive"
+        );
+        assert!(
+            payload_walsh_llr[1] < 0.0,
+            "Payload Walsh[7] bit2 should be negative"
+        );
+        assert!(
+            payload_walsh_llr[2] < 0.0,
+            "Payload Walsh[7] bit1 should be negative"
+        );
+        assert!(
+            payload_walsh_llr[3] < 0.0,
+            "Payload Walsh[7] bit0 should be negative"
+        );
     }
 
     /// Sync→Payloadハンドオーバー：DQPSK phaseの継続性
@@ -666,7 +719,10 @@ mod tests {
 
         // Sync差分 = (1,0) * (1,0) = (1,0) -> phase=0
         assert!(sync_diff.re > 0.5, "Sync diff should indicate phase 0");
-        assert!(sync_diff.im.abs() < 0.5, "Sync diff should indicate phase 0");
+        assert!(
+            sync_diff.im.abs() < 0.5,
+            "Sync diff should indicate phase 0"
+        );
 
         // Payload先頭: 位相(0,1) -> phase=1 (delta=1 from phase 0)
         let payload_first: Vec<Complex32> = wdict.w16[0]
@@ -674,13 +730,20 @@ mod tests {
             .map(|&w| Complex32::new(0.0, w as f32))
             .collect();
 
-        let (_payload_walsh_llr, payload_dqpsk_llr, _payload_diff) = demod.demod_symbol(&payload_first);
+        let (_payload_walsh_llr, payload_dqpsk_llr, _payload_diff) =
+            demod.demod_symbol(&payload_first);
 
         // Payload差分 = (0,1) * (1,0) = (0,1) -> DQPSK 01
         // LLR[0] = 0 + 1 = 1 (> 0)
         // LLR[1] = 0 - 1 = -1 (< 0)
-        assert!(payload_dqpsk_llr[0] > 0.0, "Payload DQPSK bit0 should be positive for delta=1");
-        assert!(payload_dqpsk_llr[1] < 0.0, "Payload DQPSK bit1 should be negative for delta=1");
+        assert!(
+            payload_dqpsk_llr[0] > 0.0,
+            "Payload DQPSK bit0 should be positive for delta=1"
+        );
+        assert!(
+            payload_dqpsk_llr[1] < 0.0,
+            "Payload DQPSK bit1 should be negative for delta=1"
+        );
     }
 
     /// Walsh LLRの符号・絶対値の詳細検証
@@ -702,7 +765,11 @@ mod tests {
 
         // Walsh[0]=0b0000: 全LLR>0, かつLLR[0]が最大（bit0の識別力が最強）
         for bit in 0..4 {
-            assert!(llrs0[bit] > 0.0, "Walsh[0] bit{} LLR should be positive", bit);
+            assert!(
+                llrs0[bit] > 0.0,
+                "Walsh[0] bit{} LLR should be positive",
+                bit
+            );
         }
 
         // Walsh[0]自身のエネルギーが最大
@@ -721,7 +788,11 @@ mod tests {
 
         // Walsh[15]=0b1111: 全LLR<0
         for bit in 0..4 {
-            assert!(llrs15[bit] < 0.0, "Walsh[15] bit{} LLR should be negative", bit);
+            assert!(
+                llrs15[bit] < 0.0,
+                "Walsh[15] bit{} LLR should be negative",
+                bit
+            );
         }
     }
 
@@ -788,10 +859,16 @@ mod tests {
         // dqpsk_llr()の実装:
         //   LLR[0] = diff.re + diff.im = -1
         //   LLR[1] = diff.re - diff.im = 1
-        assert!(dqpsk_llr[0] < 0.0,
-                "diff=(0,-1): LLR[0] should be negative, got {}", dqpsk_llr[0]);
-        assert!(dqpsk_llr[1] > 0.0,
-                "diff=(0,-1): LLR[1] should be positive, got {}", dqpsk_llr[1]);
+        assert!(
+            dqpsk_llr[0] < 0.0,
+            "diff=(0,-1): LLR[0] should be negative, got {}",
+            dqpsk_llr[0]
+        );
+        assert!(
+            dqpsk_llr[1] > 0.0,
+            "diff=(0,-1): LLR[1] should be positive, got {}",
+            dqpsk_llr[1]
+        );
 
         // リセット
         demod.reset();
@@ -810,10 +887,16 @@ mod tests {
         // dqpsk_llr()の実装:
         //   LLR[0] = diff.re + diff.im = 1
         //   LLR[1] = diff.re - diff.im = 1
-        assert!(dqpsk_llr2[0] > 0.0,
-                "diff=(1,0): LLR[0] should be positive, got {}", dqpsk_llr2[0]);
-        assert!(dqpsk_llr2[1] > 0.0,
-                "diff=(1,0): LLR[1] should be positive, got {}", dqpsk_llr2[1]);
+        assert!(
+            dqpsk_llr2[0] > 0.0,
+            "diff=(1,0): LLR[0] should be positive, got {}",
+            dqpsk_llr2[0]
+        );
+        assert!(
+            dqpsk_llr2[1] > 0.0,
+            "diff=(1,0): LLR[1] should be positive, got {}",
+            dqpsk_llr2[1]
+        );
     }
 
     /// 複数シンボル連続復調時の状態遷移
@@ -847,13 +930,22 @@ mod tests {
         let (_llr3, dqpsk3, _diff3) = demod.demod_symbol(&s3);
 
         // シンボル1: phase=0, diff=(1,0) -> delta=0 -> DQPSK 00 (LLR0>0, LLR1>0)
-        assert!(dqpsk1[0] > 0.5 && dqpsk1[1] > 0.5, "Symbol 1 should be DQPSK 00");
+        assert!(
+            dqpsk1[0] > 0.5 && dqpsk1[1] > 0.5,
+            "Symbol 1 should be DQPSK 00"
+        );
 
         // シンボル2: phase=1, diff=(0,1) -> delta=1 -> DQPSK 01 (LLR0>0, LLR1<0)
-        assert!(dqpsk2[0] > 0.5 && dqpsk2[1] < -0.5, "Symbol 2 should be DQPSK 01");
+        assert!(
+            dqpsk2[0] > 0.5 && dqpsk2[1] < -0.5,
+            "Symbol 2 should be DQPSK 01"
+        );
 
         // シンボル3: phase=2, diff=(0,1) -> delta=1 -> DQPSK 01 (LLR0>0, LLR1<0)
-        assert!(dqpsk3[0] > 0.5 && dqpsk3[1] < -0.5, "Symbol 3 should be DQPSK 01");
+        assert!(
+            dqpsk3[0] > 0.5 && dqpsk3[1] < -0.5,
+            "Symbol 3 should be DQPSK 01"
+        );
     }
 
     // ========== 厳密な信号処理テスト（modulatorを使用）==========
@@ -888,8 +980,12 @@ mod tests {
 
         // Walsh[0] = 0b0000 -> 全ビットLLR > 0
         for bit in 0..4 {
-            assert!(walsh_llr[bit] > 0.0,
-                    "Walsh[0] bit{} LLR should be positive, got {}", bit, walsh_llr[bit]);
+            assert!(
+                walsh_llr[bit] > 0.0,
+                "Walsh[0] bit{} LLR should be positive, got {}",
+                bit,
+                walsh_llr[bit]
+            );
         }
 
         // DQPSK 00 -> phase=0, prev=0 -> delta=0 -> LLR[0] > 0, LLR[1] > 0
@@ -930,9 +1026,11 @@ mod tests {
                 let llr_idx = 3 - bit;
                 let llr_positive = walsh_llr[llr_idx] > 0.0;
 
-                assert_eq!(llr_positive, !bit_is_set,
-                           "Walsh[{}] bit{}: LLR={}, bit_set={}",
-                           walsh_idx, bit, walsh_llr[llr_idx], bit_is_set);
+                assert_eq!(
+                    llr_positive, !bit_is_set,
+                    "Walsh[{}] bit{}: LLR={}, bit_set={}",
+                    walsh_idx, bit, walsh_llr[llr_idx], bit_is_set
+                );
             }
         }
     }
@@ -948,9 +1046,9 @@ mod tests {
         // 全DQPSK位相をテスト
         let test_cases = [
             ([0u8, 0], 0), // 00 -> delta=0 -> phase=0
-            ([0, 1], 1),  // 01 -> delta=1 -> phase=1
-            ([1, 1], 2),  // 11 -> delta=2 -> phase=3
-            ([1, 0], 3),  // 10 -> delta=3 -> phase=2
+            ([0, 1], 1),   // 01 -> delta=1 -> phase=1
+            ([1, 1], 2),   // 11 -> delta=2 -> phase=3
+            ([1, 0], 3),   // 10 -> delta=3 -> phase=2
         ];
 
         for (dqpsk_bits, expected_delta) in test_cases {
@@ -964,7 +1062,7 @@ mod tests {
                 .map(|i| Complex32::new(chips_i[i], chips_q[i]))
                 .collect();
 
-            let (_walsh_llr, dqpsk_llr, diff) = demodulator.demod_symbol(&signal);
+            let (_walsh_llr, dqpsk_llr, _diff) = demodulator.demod_symbol(&signal);
 
             // LLRの符号を確認（Gray codingに基づく）
             // - diff=(1,0) → LLR[0]>0, LLR[1]>0
@@ -972,30 +1070,58 @@ mod tests {
             // - diff=(-1,0) → LLR[0]<0, LLR[1]<0
             // - diff=(0,-1) → LLR[0]<0, LLR[1]>0
             match expected_delta {
-                0 => { // delta=0 → diff=(1,0)
-                    assert!(dqpsk_llr[0] > 0.0,
-                            "delta=0: LLR[0] should be positive, got {}", dqpsk_llr[0]);
-                    assert!(dqpsk_llr[1] > 0.0,
-                            "delta=0: LLR[1] should be positive, got {}", dqpsk_llr[1]);
-                },
-                1 => { // delta=1 → diff=(0,1)
-                    assert!(dqpsk_llr[0] > 0.0,
-                            "delta=1: LLR[0] should be positive, got {}", dqpsk_llr[0]);
-                    assert!(dqpsk_llr[1] < 0.0,
-                            "delta=1: LLR[1] should be negative, got {}", dqpsk_llr[1]);
-                },
-                2 => { // delta=2 → diff=(-1,0)
-                    assert!(dqpsk_llr[0] < 0.0,
-                            "delta=2: LLR[0] should be negative, got {}", dqpsk_llr[0]);
-                    assert!(dqpsk_llr[1] < 0.0,
-                            "delta=2: LLR[1] should be negative, got {}", dqpsk_llr[1]);
-                },
-                3 => { // delta=3 → diff=(0,-1)
-                    assert!(dqpsk_llr[0] < 0.0,
-                            "delta=3: LLR[0] should be negative, got {}", dqpsk_llr[0]);
-                    assert!(dqpsk_llr[1] > 0.0,
-                            "delta=3: LLR[1] should be positive, got {}", dqpsk_llr[1]);
-                },
+                0 => {
+                    // delta=0 → diff=(1,0)
+                    assert!(
+                        dqpsk_llr[0] > 0.0,
+                        "delta=0: LLR[0] should be positive, got {}",
+                        dqpsk_llr[0]
+                    );
+                    assert!(
+                        dqpsk_llr[1] > 0.0,
+                        "delta=0: LLR[1] should be positive, got {}",
+                        dqpsk_llr[1]
+                    );
+                }
+                1 => {
+                    // delta=1 → diff=(0,1)
+                    assert!(
+                        dqpsk_llr[0] > 0.0,
+                        "delta=1: LLR[0] should be positive, got {}",
+                        dqpsk_llr[0]
+                    );
+                    assert!(
+                        dqpsk_llr[1] < 0.0,
+                        "delta=1: LLR[1] should be negative, got {}",
+                        dqpsk_llr[1]
+                    );
+                }
+                2 => {
+                    // delta=2 → diff=(-1,0)
+                    assert!(
+                        dqpsk_llr[0] < 0.0,
+                        "delta=2: LLR[0] should be negative, got {}",
+                        dqpsk_llr[0]
+                    );
+                    assert!(
+                        dqpsk_llr[1] < 0.0,
+                        "delta=2: LLR[1] should be negative, got {}",
+                        dqpsk_llr[1]
+                    );
+                }
+                3 => {
+                    // delta=3 → diff=(0,-1)
+                    assert!(
+                        dqpsk_llr[0] < 0.0,
+                        "delta=3: LLR[0] should be negative, got {}",
+                        dqpsk_llr[0]
+                    );
+                    assert!(
+                        dqpsk_llr[1] > 0.0,
+                        "delta=3: LLR[1] should be positive, got {}",
+                        dqpsk_llr[1]
+                    );
+                }
                 _ => unreachable!(),
             }
         }
@@ -1012,9 +1138,9 @@ mod tests {
 
         // 3シンボル連続
         let bits = vec![
-            0u8, 0, 0, 0, 0, 0,  // Walsh[0], DQPSK 00 (phase=0)
-            0, 0, 0, 0, 0, 1,   // Walsh[0], DQPSK 01 (phase=1)
-            0, 0, 0, 0, 1, 1,   // Walsh[0], DQPSK 11 (phase=3)
+            0u8, 0, 0, 0, 0, 0, // Walsh[0], DQPSK 00 (phase=0)
+            0, 0, 0, 0, 0, 1, // Walsh[0], DQPSK 01 (phase=1)
+            0, 0, 0, 0, 1, 1, // Walsh[0], DQPSK 11 (phase=3)
         ];
 
         let (chips_i, chips_q) = modulator.bits_to_chips(&bits);
@@ -1034,16 +1160,22 @@ mod tests {
         }
 
         // シンボル1: phase=0, delta=0 -> DQPSK 00
-        assert!(results[0].0[0] > 0.5 && results[0].0[1] > 0.5,
-                "Symbol 1 should be DQPSK 00");
+        assert!(
+            results[0].0[0] > 0.5 && results[0].0[1] > 0.5,
+            "Symbol 1 should be DQPSK 00"
+        );
 
         // シンボル2: phase=1, delta=1 -> DQPSK 01
-        assert!(results[1].0[0] > 0.5 && results[1].0[1] < -0.5,
-                "Symbol 2 should be DQPSK 01");
+        assert!(
+            results[1].0[0] > 0.5 && results[1].0[1] < -0.5,
+            "Symbol 2 should be DQPSK 01"
+        );
 
         // シンボル3: phase=3, delta=2 -> DQPSK 11
-        assert!(results[2].0[0] < -0.5 && results[2].0[1] < -0.5,
-                "Symbol 3 should be DQPSK 11");
+        assert!(
+            results[2].0[0] < -0.5 && results[2].0[1] < -0.5,
+            "Symbol 3 should be DQPSK 11"
+        );
     }
 
     /// 変復調レイヤー (Modulator <-> Demodulator) の LLR 完全一致テスト
@@ -1095,9 +1227,11 @@ mod tests {
         for i in 0..bits_len {
             let expected_positive = bits[i] == 0;
             let actual_positive = all_llrs[i] > 0.0;
-            assert_eq!(actual_positive, expected_positive,
-                       "Bit mismatch at index {}. Input bit: {}, LLR: {}",
-                       i, bits[i], all_llrs[i]);
+            assert_eq!(
+                actual_positive, expected_positive,
+                "Bit mismatch at index {}. Input bit: {}, LLR: {}",
+                i, bits[i], all_llrs[i]
+            );
         }
     }
 
@@ -1126,25 +1260,36 @@ mod tests {
         // Walsh[0]信号を復調 -> Walsh[0]のエネルギーが最大
         let correlations0 = demodulator.despread_all(&signal0);
         let energies0: [f32; 16] = correlations0.map(|c| c.norm_sqr());
-        let max_idx0 = energies0.iter()
+        let max_idx0 = energies0
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .map(|(idx, _)| idx)
             .unwrap();
-        assert_eq!(max_idx0, 0, "Walsh[0] signal should have max energy at index 0");
+        assert_eq!(
+            max_idx0, 0,
+            "Walsh[0] signal should have max energy at index 0"
+        );
 
         // Walsh[1]信号を復調 -> Walsh[1]のエネルギーが最大
         let correlations1 = demodulator.despread_all(&signal1);
         let energies1: [f32; 16] = correlations1.map(|c| c.norm_sqr());
-        let max_idx1 = energies1.iter()
+        let max_idx1 = energies1
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .map(|(idx, _)| idx)
             .unwrap();
-        assert_eq!(max_idx1, 1, "Walsh[1] signal should have max energy at index 1");
+        assert_eq!(
+            max_idx1, 1,
+            "Walsh[1] signal should have max energy at index 1"
+        );
 
         // 直交性: Walsh[0]信号に対してWalsh[1]の相関は0
-        assert!(energies1[0] < 1e-6, "Walsh[0] and Walsh[1] should be orthogonal");
+        assert!(
+            energies1[0] < 1e-6,
+            "Walsh[0] and Walsh[1] should be orthogonal"
+        );
     }
 
     /// LLRの信頼性とエネルギーの相関を検証
@@ -1168,9 +1313,12 @@ mod tests {
         // Walsh[0]のLLRは高信頼性（1.0に近い）
         // 根拠：正規化ロジックにより、理想的な信号（ノイズなし）では (E_max - 0) / E_max = 1.0 となる。
         for bit in 0..4 {
-            assert!((walsh_llr[bit].abs() - 1.0).abs() < 1e-3,
-                    "Walsh[0] LLR[{}] should be ~1.0, got {}",
-                    bit, walsh_llr[bit]);
+            assert!(
+                (walsh_llr[bit].abs() - 1.0).abs() < 1e-3,
+                "Walsh[0] LLR[{}] should be ~1.0, got {}",
+                bit,
+                walsh_llr[bit]
+            );
         }
     }
 
@@ -1183,7 +1331,6 @@ mod tests {
         use crate::mary::modulator::Modulator;
 
         let mut modulator = Modulator::default_48k();
-        let mut demodulator = Demodulator::new();
 
         // 1シンボル (6ビット: 4ビットWalsh + 2ビットDQPSK)
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0], DQPSK 00
@@ -1192,19 +1339,34 @@ mod tests {
         let frame = modulator.encode_frame(&bits);
 
         // 出力信号は十分な長さを持つ
-        assert!(frame.len() > 100, "Frame should be long enough, got {}", frame.len());
+        assert!(
+            frame.len() > 100,
+            "Frame should be long enough, got {}",
+            frame.len()
+        );
 
         // 全サンプルが有限値
-        assert!(frame.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            frame.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
 
         // 振幅範囲が合理的（クリッピングなし）
         let max_amp = frame.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
-        assert!(max_amp < 5.0, "Amplitude should be reasonable, got {}", max_amp);
+        assert!(
+            max_amp < 5.0,
+            "Amplitude should be reasonable, got {}",
+            max_amp
+        );
 
         // 信号エネルギーがゼロでない
         let signal_energy: f32 = frame.iter().map(|&s| s * s).sum();
         let avg_energy = signal_energy / frame.len() as f32;
-        assert!(avg_energy > 0.001, "Signal should have energy, got {}", avg_energy);
+        assert!(
+            avg_energy > 0.001,
+            "Signal should have energy, got {}",
+            avg_energy
+        );
 
         // 注：demodulatorは16サンプルのComplex32入力を期待するが、
         // encode_frame()の出力はリサンプル済みの実数信号なので、
@@ -1221,27 +1383,35 @@ mod tests {
 
         // 3シンボル (18ビット)
         let bits = vec![
-            0u8, 0, 0, 0, 0, 0,  // Walsh[0], DQPSK 00
-            0, 0, 0, 1, 0, 1,    // Walsh[1], DQPSK 01
-            0, 0, 1, 0, 1, 1,    // Walsh[2], DQPSK 11
+            0u8, 0, 0, 0, 0, 0, // Walsh[0], DQPSK 00
+            0, 0, 0, 1, 0, 1, // Walsh[1], DQPSK 01
+            0, 0, 1, 0, 1, 1, // Walsh[2], DQPSK 11
         ];
 
         let frame = modulator.encode_frame(&bits);
 
         // 3シンボル分の信号が生成されている
-        assert!(frame.len() > 300, "Frame should be long enough for 3 symbols, got {}", frame.len());
+        assert!(
+            frame.len() > 300,
+            "Frame should be long enough for 3 symbols, got {}",
+            frame.len()
+        );
 
         // 全サンプルが有限値
         assert!(frame.iter().all(|&s| s.is_finite()));
 
         // 信号エネルギーが滑らか（急激な変化なし）
-        let max_diff: f32 = frame.windows(2)
+        let max_diff: f32 = frame
+            .windows(2)
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0f32, |a, d| a.max(d));
 
         // RRCフィルタの出力なので、隣接サンプルの差は過大ではない
         // 根拠：RRCフィルタはバンド limitingなので、急峻な遷移を抑制する
-        assert!(max_diff < 2.0, "Adjacent sample difference should be smooth, got {}", max_diff);
+        assert!(
+            max_diff < 2.0,
+            "Adjacent sample difference should be smooth, got {}",
+            max_diff
+        );
     }
 }
-

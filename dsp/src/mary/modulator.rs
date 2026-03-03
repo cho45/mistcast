@@ -146,7 +146,9 @@ impl Modulator {
         let mut idx = 0usize;
         while idx + 6 <= bits.len() {
             // 上位4ビット: Walsh index (0-15)
-            let w_idx = ((bits[idx] << 3) | (bits[idx + 1] << 2) | (bits[idx + 2] << 1) | bits[idx + 3]) & 0x0F;
+            let w_idx =
+                ((bits[idx] << 3) | (bits[idx + 1] << 2) | (bits[idx + 2] << 1) | bits[idx + 3])
+                    & 0x0F;
 
             // 下位2ビット: DQPSK phase
             let b0 = bits[idx + 4];
@@ -267,7 +269,8 @@ impl Modulator {
         let data_samples = self.modulate(bits);
 
         // 結合
-        let mut result = Vec::with_capacity(preamble.len() + sync_samples.len() + data_samples.len() + 100);
+        let mut result =
+            Vec::with_capacity(preamble.len() + sync_samples.len() + data_samples.len() + 100);
         result.extend_from_slice(&preamble);
         result.extend_from_slice(&sync_samples);
         result.extend_from_slice(&data_samples);
@@ -326,7 +329,13 @@ mod tests {
         let config = DspConfig::default_48k();
         let expected_samples = 15 * config.preamble_repeat * config.samples_per_chip();
         let diff = (preamble.len() as i32 - expected_samples as i32).abs();
-        assert!(diff <= 16, "len={}, expected={}, diff={}", preamble.len(), expected_samples, diff);
+        assert!(
+            diff <= 16,
+            "len={}, expected={}, diff={}",
+            preamble.len(),
+            expected_samples,
+            diff
+        );
     }
 
     /// サンプル値が有限値であること
@@ -379,16 +388,24 @@ mod tests {
         let (chips_i_w1, chips_q_w1) = mod_.bits_to_chips(&bits_w1);
 
         // 直交性検証：内積が0に近いこと
-        let dot_product_i: f32 = chips_i_w0.iter().zip(chips_i_w1.iter())
-            .map(|(&a, &b)| a * b).sum();
-        let dot_product_q: f32 = chips_q_w0.iter().zip(chips_q_w1.iter())
-            .map(|(&a, &b)| a * b).sum();
+        let dot_product_i: f32 = chips_i_w0
+            .iter()
+            .zip(chips_i_w1.iter())
+            .map(|(&a, &b)| a * b)
+            .sum();
+        let dot_product_q: f32 = chips_q_w0
+            .iter()
+            .zip(chips_q_w1.iter())
+            .map(|(&a, &b)| a * b)
+            .sum();
         let total_dot = dot_product_i + dot_product_q;
 
         // Walsh[0]とWalsh[1]は直交しているはず
-        assert!(total_dot.abs() < 1e-5,
-                "Walsh[0] and Walsh[1] should be orthogonal, dot={}",
-                total_dot);
+        assert!(
+            total_dot.abs() < 1e-5,
+            "Walsh[0] and Walsh[1] should be orthogonal, dot={}",
+            total_dot
+        );
 
         // ===== 検証2: DQPSK位相遷移 =====
         // Walsh[0]固定でDQPSK bitsのみ変化
@@ -401,23 +418,37 @@ mod tests {
         // 同じWalsh indexなので、chips_iとchips_qのパターンは同じはず
         // 位相が90度回転しているため、IとQが入れ替わる
         // I_00 ≈ Q_01, Q_00 ≈ -I_01 (90度回転)
-        let max_diff_i = chips_i_00.iter().zip(chips_q_01.iter())
-            .map(|(&a, &b)| (a - b).abs()).fold(0.0f32, |a, b| a.max(b));
-        let max_diff_q = chips_q_00.iter().zip(chips_i_01.iter())
-            .map(|(&a, &b)| (a + b).abs()).fold(0.0f32, |a, b| a.max(b));
+        let max_diff_i = chips_i_00
+            .iter()
+            .zip(chips_q_01.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0f32, |a, b| a.max(b));
+        let max_diff_q = chips_q_00
+            .iter()
+            .zip(chips_i_01.iter())
+            .map(|(&a, &b)| (a + b).abs())
+            .fold(0.0f32, |a, b| a.max(b));
 
-        assert!(max_diff_i < 1e-5, "DQPSK phase rotation I component mismatch");
-        assert!(max_diff_q < 1e-5, "DQPSK phase rotation Q component mismatch");
+        assert!(
+            max_diff_i < 1e-5,
+            "DQPSK phase rotation I component mismatch"
+        );
+        assert!(
+            max_diff_q < 1e-5,
+            "DQPSK phase rotation Q component mismatch"
+        );
 
         // ===== 検証3: エネルギー保存 =====
         // 各シンボルのエネルギーはsf=16（各chipは±1）
         // DQPSK 00の場合：I成分にWalsh系列（±1）、Q成分は0
         // したがってエネルギー = 16（I成分）+ 0（Q成分）= 16
         let energy_00: f32 = chips_i_00.iter().map(|&x| x * x).sum::<f32>()
-                           + chips_q_00.iter().map(|&x| x * x).sum::<f32>();
-        assert!((energy_00 - 16.0).abs() < 1e-5,
-                "Symbol energy should be 16.0 (16 I chips with Q=0), got {}",
-                energy_00);
+            + chips_q_00.iter().map(|&x| x * x).sum::<f32>();
+        assert!(
+            (energy_00 - 16.0).abs() < 1e-5,
+            "Symbol energy should be 16.0 (16 I chips with Q=0), got {}",
+            energy_00
+        );
     }
 
     /// 複数シンボルの位相遷移を検証する
@@ -428,9 +459,11 @@ mod tests {
         // シンボル1: Walsh[0] + DQPSK 00 (delta=0)
         // シンボル2: Walsh[0] + DQPSK 01 (delta=1)
         // シンボル3: Walsh[0] + DQPSK 11 (delta=2)
-        let bits = vec![0u8, 0, 0, 0, 0, 0,  // Walsh[0], DQPSK 00
-                        0, 0, 0, 0, 0, 1,  // Walsh[0], DQPSK 01
-                        0, 0, 0, 0, 1, 1]; // Walsh[0], DQPSK 11
+        let bits = vec![
+            0u8, 0, 0, 0, 0, 0, // Walsh[0], DQPSK 00
+            0, 0, 0, 0, 0, 1, // Walsh[0], DQPSK 01
+            0, 0, 0, 0, 1, 1,
+        ]; // Walsh[0], DQPSK 11
 
         let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
 
@@ -487,7 +520,8 @@ mod tests {
                 ((walsh_idx >> 2) & 1) as u8,
                 ((walsh_idx >> 1) & 1) as u8,
                 (walsh_idx & 1) as u8,
-                0, 0, // DQPSK 00（固定）
+                0,
+                0, // DQPSK 00（固定）
             ];
 
             let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
@@ -498,16 +532,26 @@ mod tests {
         // ===== 検証2: 直交性の確認 =====
         // 異なるWalsh index同士の内積が0に近いことを確認
         for i in 0..16 {
-            for j in (i+1)..16 {
-                let dot_i: f32 = all_chips_i[i].iter().zip(all_chips_i[j].iter())
-                    .map(|(&a, &b)| a * b).sum();
-                let dot_q: f32 = all_chips_q[i].iter().zip(all_chips_q[j].iter())
-                    .map(|(&a, &b)| a * b).sum();
+            for j in (i + 1)..16 {
+                let dot_i: f32 = all_chips_i[i]
+                    .iter()
+                    .zip(all_chips_i[j].iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum();
+                let dot_q: f32 = all_chips_q[i]
+                    .iter()
+                    .zip(all_chips_q[j].iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum();
                 let total_dot = dot_i + dot_q;
 
-                assert!(total_dot.abs() < 1e-5,
-                        "Walsh[{}] and Walsh[{}] should be orthogonal, dot={}",
-                        i, j, total_dot);
+                assert!(
+                    total_dot.abs() < 1e-5,
+                    "Walsh[{}] and Walsh[{}] should be orthogonal, dot={}",
+                    i,
+                    j,
+                    total_dot
+                );
             }
         }
 
@@ -546,10 +590,16 @@ mod tests {
         let rrc_delay = (mod_.config.rrc_num_taps() - 1) / 2;
         let resampler_delay = 1;
         let total_max_delay = rrc_delay + resampler_delay;
-        assert!(frame.len() >= expected_min as usize - total_max_delay as usize,
-                "Frame should be at least {} samples", expected_min - total_max_delay);
-        assert!(frame.len() <= expected_min as usize + total_max_delay as usize,
-                "Frame should be at most {} samples", expected_min + total_max_delay);
+        assert!(
+            frame.len() >= expected_min as usize - total_max_delay as usize,
+            "Frame should be at least {} samples",
+            expected_min - total_max_delay
+        );
+        assert!(
+            frame.len() <= expected_min as usize + total_max_delay as usize,
+            "Frame should be at most {} samples",
+            expected_min + total_max_delay
+        );
     }
 
     /// プリアンブル構造を検証する
@@ -569,9 +619,13 @@ mod tests {
         let max_total_delay = rrc_delay + resampler_delay;
 
         let diff = (preamble.len() as i32 - expected_len as i32).abs();
-        assert!(diff <= max_total_delay as i32,
-                "Preamble length mismatch: expected={}, actual={}, diff={}",
-                expected_len, preamble.len(), diff);
+        assert!(
+            diff <= max_total_delay as i32,
+            "Preamble length mismatch: expected={}, actual={}, diff={}",
+            expected_len,
+            preamble.len(),
+            diff
+        );
     }
 
     /// DQPSK全シンボルの位相遷移を検証する
@@ -582,9 +636,9 @@ mod tests {
         // DQPSKの全ての位相遷移パターンを検証
         let test_cases = [
             ([0u8, 0], 0), // 00 -> delta=0
-            ([0, 1], 1),  // 01 -> delta=1
-            ([1, 1], 2),  // 11 -> delta=2
-            ([1, 0], 3),  // 10 -> delta=3
+            ([0, 1], 1),   // 01 -> delta=1
+            ([1, 1], 2),   // 11 -> delta=2
+            ([1, 0], 3),   // 10 -> delta=3
         ];
 
         for (bits, expected_delta) in test_cases {
@@ -619,12 +673,16 @@ mod tests {
         let (chips_i1, _) = mod_.bits_to_chips(&bits1);
 
         // 直交性: Walsh[0]・Walsh[1] = 0
-        let dot_product: f32 = chips_i0.iter()
+        let dot_product: f32 = chips_i0
+            .iter()
             .zip(chips_i1.iter())
             .map(|(&a, &b)| a * b)
             .sum();
 
-        assert!(dot_product.abs() < 1e-6, "Walsh[0] and Walsh[1] should be orthogonal");
+        assert!(
+            dot_product.abs() < 1e-6,
+            "Walsh[0] and Walsh[1] should be orthogonal"
+        );
     }
 
     // ========== 厳密な信号処理テスト ==========
@@ -651,13 +709,19 @@ mod tests {
         let resampler_delay = 1;
         let max_delay = rrc_group_delay + resampler_delay;
         let diff = (preamble.len() as i32 - expected_len as i32).abs();
-        assert!(diff <= max_delay as i32,
-                "Preamble length should be within delay tolerance of {} samples, got {} (diff={})",
-                max_delay, preamble.len(), diff);
+        assert!(
+            diff <= max_delay as i32,
+            "Preamble length should be within delay tolerance of {} samples, got {} (diff={})",
+            max_delay,
+            preamble.len(),
+            diff
+        );
 
         // 2. 全サンプルが有限値
-        assert!(preamble.iter().all(|&s| s.is_finite()),
-                "All preamble samples should be finite");
+        assert!(
+            preamble.iter().all(|&s| s.is_finite()),
+            "All preamble samples should be finite"
+        );
 
         // 3. 振幅範囲（根拠：RRCフィルタのピーク振幅 = 1.0）
         // 理論最大値の計算：
@@ -670,13 +734,18 @@ mod tests {
         // - 安全余裕2倍：2.5（クリッピング防止）
         let max_amp = preamble.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
         assert!(max_amp > 0.1, "Preamble should have significant energy");
-        assert!(max_amp < 2.5,
-                "Preamble amplitude should not clip, max={} (theoretical max ~1.2)", max_amp);
+        assert!(
+            max_amp < 2.5,
+            "Preamble amplitude should not clip, max={} (theoretical max ~1.2)",
+            max_amp
+        );
 
         // 4. ゼロでないセグメントが存在する
         let nonzero_count = preamble.iter().filter(|&&s| s.abs() > 1e-6).count();
-        assert!(nonzero_count > preamble.len() / 2,
-                "Preamble should have significant signal content");
+        assert!(
+            nonzero_count > preamble.len() / 2,
+            "Preamble should have significant signal content"
+        );
     }
 
     /// Sync WordのDBPSK変調：各ビットの位相遷移を厳密に検証
@@ -706,21 +775,31 @@ mod tests {
         // 位相遷移の正しさを検証
         // SYNC_WORD = 0xDEAD_BEEF の最上位ビットは1
         // bit=1 -> delta=2 -> phase=2
-        assert_eq!(expected_phases[0], 2, "First phase should be 2 (MSB of SYNC_WORD is 1)");
+        assert_eq!(
+            expected_phases[0], 2,
+            "First phase should be 2 (MSB of SYNC_WORD is 1)"
+        );
 
         // Sync Wordの各ビットに対する位相遷移を検証
         let mut running_phase = 0u8;
         for (idx, &bit) in sync_bits.iter().enumerate() {
             let expected_delta = if bit == 0 { 0 } else { 2 };
             running_phase = (running_phase + expected_delta) & 0x03;
-            assert_eq!(expected_phases[idx], running_phase,
-                       "Phase at bit {} should be {} (bit={})", idx, running_phase, bit);
+            assert_eq!(
+                expected_phases[idx], running_phase,
+                "Phase at bit {} should be {} (bit={})",
+                idx, running_phase, bit
+            );
         }
 
         // DBPSKなので、位相は常に0か2（実軸上）
         for (idx, &phase) in expected_phases.iter().enumerate() {
-            assert!(phase == 0 || phase == 2,
-                    "DBPSK phase should be 0 or 2, got {} at index {}", phase, idx);
+            assert!(
+                phase == 0 || phase == 2,
+                "DBPSK phase should be 0 or 2, got {} at index {}",
+                phase,
+                idx
+            );
         }
     }
 
@@ -758,7 +837,11 @@ mod tests {
         //       シンボル境界の数は全体の長さに比べて小さいはず
         //       20%は保守的な推定（実際には5%以下であるべき）
         let ratio = sudden_changes as f32 / samples.len() as f32;
-        assert!(ratio < 0.20, "Signal should be mostly smooth, sudden change ratio: {}", ratio);
+        assert!(
+            ratio < 0.20,
+            "Signal should be mostly smooth, sudden change ratio: {}",
+            ratio
+        );
 
         // 2. 信号エネルギーの大部分は中央に集中する（RRCの特性）
         // 根拠：RRCフィルタのインパルス応答は中央に集中（ガウスに近い形状）
@@ -773,8 +856,11 @@ mod tests {
         let central_energy: f32 = samples[start..end].iter().map(|&s| s * s).sum();
         let central_ratio = central_energy / total_energy;
 
-        assert!(central_ratio > 0.3,
-                "Significant energy should be concentrated in center: ratio={}", central_ratio);
+        assert!(
+            central_ratio > 0.3,
+            "Significant energy should be concentrated in center: ratio={}",
+            central_ratio
+        );
     }
 
     /// キャリア変調の検証：アップコンバート後の信号特性
@@ -793,17 +879,16 @@ mod tests {
         // ゼロ crossings の間隔からキャリア周波数を推定
         let mut zero_crossings = Vec::new();
         for i in 1..samples.len() {
-            if (samples[i - 1] > 0.0 && samples[i] <= 0.0) ||
-               (samples[i - 1] < 0.0 && samples[i] >= 0.0) {
+            if (samples[i - 1] > 0.0 && samples[i] <= 0.0)
+                || (samples[i - 1] < 0.0 && samples[i] >= 0.0)
+            {
                 zero_crossings.push(i);
             }
         }
 
         if zero_crossings.len() > 2 {
             // ゼロクロッシング間隔から周波数を推定
-            let intervals: Vec<usize> = zero_crossings.windows(2)
-                .map(|w| w[1] - w[0])
-                .collect();
+            let intervals: Vec<usize> = zero_crossings.windows(2).map(|w| w[1] - w[0]).collect();
 
             let avg_interval = intervals.iter().sum::<usize>() as f32 / intervals.len() as f32;
             let estimated_freq = sample_rate / avg_interval;
@@ -813,9 +898,12 @@ mod tests {
             //       0.1～10.0の範囲は非常に緩い許容範囲（実際には0.5～2.0であるべき）
             //       これは「何らかのキャリア変調が行われている」ことの最低限の検証
             let freq_ratio = estimated_freq / carrier_freq;
-            assert!(freq_ratio > 0.1 && freq_ratio < 10.0,
-                    "Estimated carrier frequency {} should be near actual {}",
-                    estimated_freq, carrier_freq);
+            assert!(
+                freq_ratio > 0.1 && freq_ratio < 10.0,
+                "Estimated carrier frequency {} should be near actual {}",
+                estimated_freq,
+                carrier_freq
+            );
         }
 
         // 2. 包絡線は滑らかである
@@ -850,9 +938,9 @@ mod tests {
 
         // 3シンボルの信号を生成
         let bits = vec![
-            0u8, 0, 0, 0, 0, 0,  // Walsh[0], DQPSK 00
-            0, 0, 0, 0, 0, 1,   // Walsh[0], DQPSK 01
-            0, 0, 0, 0, 1, 1,   // Walsh[0], DQPSK 11
+            0u8, 0, 0, 0, 0, 0, // Walsh[0], DQPSK 00
+            0, 0, 0, 0, 0, 1, // Walsh[0], DQPSK 01
+            0, 0, 0, 0, 1, 1, // Walsh[0], DQPSK 11
         ];
 
         let samples = mod_.modulate(&bits);
@@ -863,12 +951,19 @@ mod tests {
 
         // 2. エネルギーは信号長に比例する（概ね）
         let avg_energy_per_sample = total_energy / samples.len() as f32;
-        assert!(avg_energy_per_sample > 1e-6 && avg_energy_per_sample < 10.0,
-                "Average energy per sample should be reasonable: {}", avg_energy_per_sample);
+        assert!(
+            avg_energy_per_sample > 1e-6 && avg_energy_per_sample < 10.0,
+            "Average energy per sample should be reasonable: {}",
+            avg_energy_per_sample
+        );
 
         // 3. クリッピングがない（最大振幅が制限内）
         let max_amp = samples.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
-        assert!(max_amp < 5.0, "Signal should not clip, max amplitude: {}", max_amp);
+        assert!(
+            max_amp < 5.0,
+            "Signal should not clip, max amplitude: {}",
+            max_amp
+        );
     }
 
     /// Sync→Payloadハンドオーバー：sf=15→sf=16、DBPSK→DQPSKの切り替え
@@ -892,8 +987,11 @@ mod tests {
 
         // 不連続点は全体の1%未満でなければならない
         let discont_ratio = discontinuities as f32 / frame.len() as f32;
-        assert!(discont_ratio < 0.01,
-                "Frame should be continuous, discontinuity ratio: {}", discont_ratio);
+        assert!(
+            discont_ratio < 0.01,
+            "Frame should be continuous, discontinuity ratio: {}",
+            discont_ratio
+        );
 
         // 2. Syncの最後とPayloadの最初の間で大きな位相ジャンプがない
         // これはdiff検波で問題になる可能性がある
@@ -910,8 +1008,11 @@ mod tests {
 
             // 急激な振幅変化がない（RRCフィルタの滑らかさを維持）
             let amplitude_change = (payload_first.abs() - sync_last.abs()).abs();
-            assert!(amplitude_change < 2.0,
-                    "Amplitude change at Sync→Payload should be smooth: {}", amplitude_change);
+            assert!(
+                amplitude_change < 2.0,
+                "Amplitude change at Sync→Payload should be smooth: {}",
+                amplitude_change
+            );
         }
 
         // 3. 全体的な信号の滑らかさ
@@ -924,8 +1025,11 @@ mod tests {
         }
 
         let smooth_ratio = smooth_violations as f32 / frame.len() as f32;
-        assert!(smooth_ratio < 0.5,
-                "Frame should be mostly smooth, violation ratio: {}", smooth_ratio);
+        assert!(
+            smooth_ratio < 0.5,
+            "Frame should be mostly smooth, violation ratio: {}",
+            smooth_ratio
+        );
     }
 
     /// DQPSK位相遷移の連続性検証
@@ -935,10 +1039,10 @@ mod tests {
 
         // 連続するDQPSKシンボルを生成
         let bits = vec![
-            0u8, 0, 0, 0, 0, 0,  // Walsh[0], DQPSK 00 (phase=0)
-            0, 0, 0, 0, 0, 1,   // Walsh[0], DQPSK 01 (phase=1)
-            0, 0, 0, 0, 1, 1,   // Walsh[0], DQPSK 11 (phase=3)
-            0, 0, 0, 0, 1, 0,   // Walsh[0], DQPSK 10 (phase=2)
+            0u8, 0, 0, 0, 0, 0, // Walsh[0], DQPSK 00 (phase=0)
+            0, 0, 0, 0, 0, 1, // Walsh[0], DQPSK 01 (phase=1)
+            0, 0, 0, 0, 1, 1, // Walsh[0], DQPSK 11 (phase=3)
+            0, 0, 0, 0, 1, 0, // Walsh[0], DQPSK 10 (phase=2)
         ];
 
         let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
@@ -957,12 +1061,22 @@ mod tests {
                 let expected_i = exp_i * walsh0[chip_idx] as f32;
                 let expected_q = exp_q * walsh0[chip_idx] as f32;
 
-                assert!((chips_i[idx] - expected_i).abs() < 1e-6,
-                        "Chip I[{}]={}, expected {} at symbol {}",
-                        idx, chips_i[idx], expected_i, sym_idx);
-                assert!((chips_q[idx] - expected_q).abs() < 1e-6,
-                        "Chip Q[{}]={}, expected {} at symbol {}",
-                        idx, chips_q[idx], expected_q, sym_idx);
+                assert!(
+                    (chips_i[idx] - expected_i).abs() < 1e-6,
+                    "Chip I[{}]={}, expected {} at symbol {}",
+                    idx,
+                    chips_i[idx],
+                    expected_i,
+                    sym_idx
+                );
+                assert!(
+                    (chips_q[idx] - expected_q).abs() < 1e-6,
+                    "Chip Q[{}]={}, expected {} at symbol {}",
+                    idx,
+                    chips_q[idx],
+                    expected_q,
+                    sym_idx
+                );
             }
         }
     }
@@ -992,10 +1106,18 @@ mod tests {
                 let expected_i = 1.0 * walsh_seq[idx] as f32;
                 let expected_q = 0.0;
 
-                assert!((chips_i[idx] - expected_i).abs() < 1e-6,
-                        "Walsh[{}] chip I[{}]", walsh_idx, idx);
-                assert!((chips_q[idx] - expected_q).abs() < 1e-6,
-                        "Walsh[{}] chip Q[{}]", walsh_idx, idx);
+                assert!(
+                    (chips_i[idx] - expected_i).abs() < 1e-6,
+                    "Walsh[{}] chip I[{}]",
+                    walsh_idx,
+                    idx
+                );
+                assert!(
+                    (chips_q[idx] - expected_q).abs() < 1e-6,
+                    "Walsh[{}] chip Q[{}]",
+                    walsh_idx,
+                    idx
+                );
             }
         }
     }
@@ -1028,13 +1150,18 @@ mod tests {
         // 最後のシンボルのエネルギーは他のシンボルと同等であるはず
         // （符号反転はエネルギーに影響しない）
         if symbol_energies.len() >= 2 {
-            let avg_energy: f32 = symbol_energies[..symbol_energies.len()-1].iter().sum::<f32>()
+            let avg_energy: f32 = symbol_energies[..symbol_energies.len() - 1]
+                .iter()
+                .sum::<f32>()
                 / (symbol_energies.len() - 1) as f32;
             let last_energy = symbol_energies[symbol_energies.len() - 1];
 
             let ratio = last_energy / avg_energy;
-            assert!(ratio > 0.5 && ratio < 2.0,
-                    "Last symbol energy should be similar to others, ratio: {}", ratio);
+            assert!(
+                ratio > 0.5 && ratio < 2.0,
+                "Last symbol energy should be similar to others, ratio: {}",
+                ratio
+            );
         }
     }
 
@@ -1067,7 +1194,8 @@ mod tests {
         assert!(
             (rms1 - rms2).abs() < rms1 * 0.02,
             "Carrier phase precision loss detected! rms1: {}, rms2: {}",
-            rms1, rms2
+            rms1,
+            rms2
         );
     }
 
@@ -1091,13 +1219,21 @@ mod tests {
         let mut samples_combined = samples_part1;
         samples_combined.extend_from_slice(&samples_part2);
 
-        assert_eq!(samples_all.len(), samples_combined.len(),
-                   "Combined length should match all-at-once length");
+        assert_eq!(
+            samples_all.len(),
+            samples_combined.len(),
+            "Combined length should match all-at-once length"
+        );
 
         // 浮動小数点の誤差を考慮して比較
         for (i, (&a, &b)) in samples_all.iter().zip(samples_combined.iter()).enumerate() {
-            assert!((a - b).abs() < 1e-5,
-                    "Sample {} differs: all={}, combined={}", i, a, b);
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Sample {} differs: all={}, combined={}",
+                i,
+                a,
+                b
+            );
         }
     }
 

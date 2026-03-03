@@ -32,10 +32,10 @@ impl MarySyncDetector {
     pub fn new(config: DspConfig, threshold_coarse: f32, threshold_fine: f32) -> Self {
         let sf = 15; // M-aryのプリアンブル/Syncは常にSF=15
         let spc = config.samples_per_chip().max(1);
-        
+
         let wdict = WalshDictionary::default_w16();
         let pn: Vec<f32> = wdict.w16[0].iter().take(sf).map(|&x| x as f32).collect();
-        
+
         let sym_len = sf * spc;
 
         // 36シンボルの期待される符号系列 (BPSK) を構築
@@ -132,7 +132,6 @@ impl MarySyncDetector {
                                     },
                                     fine_best_idx,
                                 ));
-
                             } else {
                                 // 下り坂: 最初の山の頂上を確定して早期リターン (First Peak Match)
                                 let (res, idx) = provisional_best.unwrap();
@@ -315,8 +314,8 @@ mod tests {
 
         // 1. 信号生成 (オフセットを正確に制御)
         let (i, q) = generate_signal(&config, offset, 1.0);
-        
-        // 期待される SYNC_WORD 開始位置: 
+
+        // 期待される SYNC_WORD 開始位置:
         // 生成時のオフセット + フィルタ遅延 + プリアンブル長
         // ※Modulator と Receiver の RRC フィルタによる累積遅延を考慮
         let total_filter_delay = config.rrc_num_taps() - 1;
@@ -326,12 +325,17 @@ mod tests {
         let (res, _) = detector.detect(&i, &q, 0);
         let sync = res.expect("Should find sync");
 
-        println!("Detected idx: {}, Expected idx: {}", sync.peak_sample_idx, expected_idx);
-        
+        println!(
+            "Detected idx: {}, Expected idx: {}",
+            sync.peak_sample_idx, expected_idx
+        );
+
         // 3. 絶対位置の完全一致を検証
         // 1サンプルの狂いも許さない (±0 精度)
-        assert_eq!(sync.peak_sample_idx, expected_idx, 
-            "SYNC_WORD start position must match the physical signal exactly");
+        assert_eq!(
+            sync.peak_sample_idx, expected_idx,
+            "SYNC_WORD start position must match the physical signal exactly"
+        );
     }
 
     #[test]
@@ -367,8 +371,9 @@ mod tests {
                 let mut last_cq = 0.0;
                 let mut last_mag = 0.0;
                 for rep in 0..unified_len {
-                    let (ci, cq, en) = detector.correlate_one_symbol(i, q, best_idx + rep * sym_len);
-                    let mag2 = ci*ci + cq*cq;
+                    let (ci, cq, en) =
+                        detector.correlate_one_symbol(i, q, best_idx + rep * sym_len);
+                    let mag2 = ci * ci + cq * cq;
                     let mag = mag2.sqrt();
                     total_rho_p += if en > 1e-9 { mag2 / (15.0 * en) } else { 0.0 };
                     if rep > 0 && last_mag > 1e-9 && mag > 1e-9 {
@@ -379,11 +384,20 @@ mod tests {
                         sum_im += expected * im;
                         sum_mag += last_mag * mag;
                     }
-                    last_ci = ci; last_cq = cq; last_mag = mag;
+                    last_ci = ci;
+                    last_cq = cq;
+                    last_mag = mag;
                 }
                 let rho_p = total_rho_p / unified_len as f32;
-                let rho_phi = if sum_mag > 1e-9 { (sum_re*sum_re + sum_im*sum_im).sqrt() / sum_mag } else { 0.0 };
-                println!("Ground truth best score: {:.4} at idx {} (rho_p={:.4}, rho_phi={:.4})", best_score, best_idx, rho_p, rho_phi);
+                let rho_phi = if sum_mag > 1e-9 {
+                    (sum_re * sum_re + sum_im * sum_im).sqrt() / sum_mag
+                } else {
+                    0.0
+                };
+                println!(
+                    "Ground truth best score: {:.4} at idx {} (rho_p={:.4}, rho_phi={:.4})",
+                    best_score, best_idx, rho_p, rho_phi
+                );
             }
             (best_score, best_idx)
         };
@@ -530,16 +544,9 @@ mod tests {
 
             // 10サンプルおきにスコアを収集 (スライディング窓の近似)
             let sym_len = 15 * config.samples_per_chip();
-            for n in (0..=(i.len() - sym_len * (config.preamble_repeat + 1)))
-                .step_by(10)
-            {
-                let (score, _) = detector.score_candidate(
-                    &i,
-                    &q,
-                    n,
-                    config.preamble_repeat,
-                    sym_len,
-                );
+            for n in (0..=(i.len() - sym_len * (config.preamble_repeat + 1))).step_by(10) {
+                let (score, _) =
+                    detector.score_candidate(&i, &q, n, config.preamble_repeat, sym_len);
                 noise_scores.push(score);
             }
         }
@@ -559,8 +566,14 @@ mod tests {
             "  Target FAR 1.0%: Recommended Threshold = {:.4}",
             target_far_1pct
         );
-        println!("  Target FAR 0.1%: Recommended Threshold = {:.4}", target_far_01pct);
-        println!("  Max Noise Score Observed: {:.4}", noise_scores.last().unwrap());
+        println!(
+            "  Target FAR 0.1%: Recommended Threshold = {:.4}",
+            target_far_01pct
+        );
+        println!(
+            "  Max Noise Score Observed: {:.4}",
+            noise_scores.last().unwrap()
+        );
         println!();
 
         // 現在のしきい値 (threshold_fine) での性能評価
@@ -611,20 +624,17 @@ mod tests {
         for &snr_db in &[-3.0, 0.0, 3.0] {
             let mut num_detected = 0;
             for trial in 0..NUM_TRIALS {
-                let (i, q) = generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 2000);
+                let (i, q) =
+                    generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 2000);
                 // detect() の代わりに直接しきい値判定を行う (簡易評価)
-                let peak_n = (config.rrc_num_taps() - 1).saturating_sub(config.samples_per_chip() / 2);
+                let peak_n =
+                    (config.rrc_num_taps() - 1).saturating_sub(config.samples_per_chip() / 2);
                 let mut found = false;
                 let sym_len = 15 * config.samples_per_chip();
 
                 for n in (peak_n.saturating_sub(5))..=(peak_n + 5) {
-                    let (score, _) = detector.score_candidate(
-                        &i,
-                        &q,
-                        n,
-                        config.preamble_repeat,
-                        sym_len,
-                    );
+                    let (score, _) =
+                        detector.score_candidate(&i, &q, n, config.preamble_repeat, sym_len);
                     if score > target_far_1pct {
                         found = true;
                         break;
@@ -644,7 +654,8 @@ mod tests {
         // 要件確認
         let mut neg3_db_detection = 0.0f64;
         for trial in 0..NUM_TRIALS {
-            let (i, q) = generate_signal_with_awgn_seeded(&config, 500, -3.0, (trial + 1000) as u64);
+            let (i, q) =
+                generate_signal_with_awgn_seeded(&config, 500, -3.0, (trial + 1000) as u64);
             if detector.detect(&i, &q, 0).0.is_some() {
                 neg3_db_detection += 1.0;
             }

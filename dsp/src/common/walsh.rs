@@ -136,7 +136,11 @@ mod tests {
         // 行の直交性チェック
         for i in 0..16 {
             for j in 0..16 {
-                let dot: i32 = h16[i].iter().zip(h16[j].iter()).map(|(&a, &b)| a as i32 * b as i32).sum();
+                let dot: i32 = h16[i]
+                    .iter()
+                    .zip(h16[j].iter())
+                    .map(|(&a, &b)| a as i32 * b as i32)
+                    .sum();
                 if i == j {
                     assert_eq!(dot, 16);
                 } else {
@@ -159,7 +163,11 @@ mod tests {
         // スクランブル後でも直交性が保たれていることの確認
         for i in 0..16 {
             for j in 0..16 {
-                let dot: i32 = w16[i].iter().zip(w16[j].iter()).map(|(&a, &b)| a as i32 * b as i32).sum();
+                let dot: i32 = w16[i]
+                    .iter()
+                    .zip(w16[j].iter())
+                    .map(|(&a, &b)| a as i32 * b as i32)
+                    .sum();
                 if i == j {
                     assert_eq!(dot, 16);
                 } else {
@@ -168,7 +176,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_pn_contains_pm1() {
         let dict = WalshDictionary::default_w16();
@@ -177,7 +185,7 @@ mod tests {
             assert!(val == 1 || val == -1);
         }
     }
-    
+
     #[test]
     fn test_pn_alignment() {
         let mut mseq = crate::common::msequence::MSequence::new(4);
@@ -254,7 +262,10 @@ mod tests {
     #[test]
     fn test_walsh_dictionary_correlators_orthogonality() {
         let dict = WalshDictionary::default_w16();
-        let signal0: Vec<Complex32> = dict.w16[0].iter().map(|&v| Complex32::new(v as f32, 0.0)).collect();
+        let signal0: Vec<Complex32> = dict.w16[0]
+            .iter()
+            .map(|&v| Complex32::new(v as f32, 0.0))
+            .collect();
 
         for i in 0..16 {
             let correlator = WalshCorrelator::new(dict.w16[i].clone());
@@ -262,7 +273,10 @@ mod tests {
 
             if i == 0 {
                 // 自己相関は16
-                assert!((correlation.re - 16.0).abs() < 1e-6, "Self-correlation should be 16");
+                assert!(
+                    (correlation.re - 16.0).abs() < 1e-6,
+                    "Self-correlation should be 16"
+                );
             } else {
                 // 直交系列との相関は0
                 assert!(correlation.norm() < 1e-6, "Cross-correlation should be 0");

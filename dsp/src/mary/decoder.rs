@@ -7,15 +7,15 @@
 //! 4. Max-Log-MAP LLR計算
 //! 5. Fountainデコーディング
 
-use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::fec;
+use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
 use crate::common::nco::Nco;
 use crate::common::rrc_filter::DecimatingRrcFilter;
-use crate::mary::sync::{MarySyncDetector, SyncResult};
 use crate::frame::packet::Packet;
 use crate::mary::demodulator::Demodulator;
+use crate::mary::sync::{MarySyncDetector, SyncResult};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 use num_complex::Complex32;
@@ -48,10 +48,6 @@ pub struct Decoder {
     current_sync: Option<SyncResult>,
     last_packet_seq: Option<u32>,
 
-    // 観測用
-    pub debug_expected_bits: Option<Vec<u8>>,
-    pub debug_expected_fec_bits: Option<Vec<u8>>,
-
     // 統計
     pub stats_total_samples: usize,
 }
@@ -63,7 +59,7 @@ impl Decoder {
         let proc_config = Self::build_proc_config(&dsp_config, decimation_factor);
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
-        
+
         // M-ary用のしきい値。SF=15ベース
         let tc = MarySyncDetector::THRESHOLD_COARSE_DEFAULT;
         let tf = MarySyncDetector::THRESHOLD_FINE_DEFAULT;
@@ -83,8 +79,6 @@ impl Decoder {
             last_search_idx: 0,
             current_sync: None,
             last_packet_seq: None,
-            debug_expected_bits: None,
-            debug_expected_fec_bits: None,
             stats_total_samples: 0,
         }
     }
@@ -143,7 +137,7 @@ impl Decoder {
         let spc = self.proc_config.samples_per_chip().max(1);
         let sf_preamble = 15;
         let sf_payload = 16;
-        
+
         let _ = sf_preamble; // 同期検出は sync_detector 内部で行われるが、オフセット計算に使用
 
         let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
@@ -174,7 +168,8 @@ impl Decoder {
                 if let Some(s) = sync_opt {
                     self.current_sync = Some(s.clone());
                     // 初期位相をデモジュレータに設定
-                    self.demodulator.set_reference_phase(s.peak_iq.0, s.peak_iq.1);
+                    self.demodulator
+                        .set_reference_phase(s.peak_iq.0, s.peak_iq.1);
                     s
                 } else {
                     self.last_search_idx = next_search_idx;
@@ -191,12 +186,14 @@ impl Decoder {
             let start = sync.peak_sample_idx;
             let sync_word_bits = self.config.sync_word_bits;
             let payload_start = start + sync_word_bits * sf_preamble * spc;
-            
+
             let required_samples = expected_symbols * sf_payload * spc;
-            
+
             if self.sample_buffer_i.len() < payload_start + required_samples {
                 // タイムアウト監視
-                if payload_start + sf_payload * spc < self.sample_buffer_i.len().saturating_sub(max_buffer_len) {
+                if payload_start + sf_payload * spc
+                    < self.sample_buffer_i.len().saturating_sub(max_buffer_len)
+                {
                     self.current_sync = None;
                     self.last_search_idx = 0;
                     continue;
@@ -243,47 +240,20 @@ impl Decoder {
         let rows = 16;
         let cols = fec_bits.div_ceil(rows);
         let interleaved_bits = rows * cols; // 352
-        
+
         for packet_llrs in llrs.chunks(interleaved_bits) {
             if packet_llrs.len() < interleaved_bits {
                 break;
             }
 
-            // [観測 Stage 1] インターリーブ状態での符号照合
-            if let Some(ref expected) = self.debug_expected_bits {
-                let mut errors = 0;
-                for i in 0..interleaved_bits.min(expected.len()) {
-                    let bit = expected[i];
-                    let llr = packet_llrs[i];
-                    let is_error = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
-                    if is_error { errors += 1; }
-                }
-                println!("BER Obs (Interleaved): {} errors in {} bits", errors, interleaved_bits);
-            }
-
             let interleaver = BlockInterleaver::new(rows, cols);
             let mut deinterleaved_llr = interleaver.deinterleave_f32(packet_llrs);
-
-            // [観測 Stage 2] デインターリーブ直後 (スクランブル状態) での照合
-            // ※スクランブル後の期待値が必要だが、一旦 Stage 3 を優先。
 
             let mut scrambler = Scrambler::default();
             for llr in deinterleaved_llr.iter_mut() {
                 if scrambler.next_bit() == 1 {
                     *llr = -*llr;
                 }
-            }
-
-            // [観測 Stage 3] デスクランブル後 (生FECビット) での照合
-            if let Some(ref expected_fec) = self.debug_expected_fec_bits {
-                let mut errors = 0;
-                for i in 0..fec_bits.min(expected_fec.len()) {
-                    let bit = expected_fec[i];
-                    let llr = deinterleaved_llr[i];
-                    let is_error = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
-                    if is_error { errors += 1; }
-                }
-                println!("BER Obs (Descrambled): {} errors in {} bits", errors, fec_bits);
             }
 
             // FECデコード（LLR -> ビット）
@@ -491,10 +461,17 @@ mod tests {
         let sf_payload = 16;
 
         // 同じWalsh[0]でも長さが異なる
-        assert_ne!(sf_sync, sf_payload, "Sync and Payload should have different SF");
+        assert_ne!(
+            sf_sync, sf_payload,
+            "Sync and Payload should have different SF"
+        );
 
         // Payloadの方が1チップ多い
-        assert_eq!(sf_payload - sf_sync, 1, "Payload SF should be 1 more than Sync SF");
+        assert_eq!(
+            sf_payload - sf_sync,
+            1,
+            "Payload SF should be 1 more than Sync SF"
+        );
     }
 
     /// Payload復調でのWalsh index検出（統合テスト）
@@ -592,23 +569,6 @@ mod tests {
         let data = vec![0xABu8; 16];
         encoder.set_data(&data);
 
-        // 観測用に期待されるインターリーブビット列をデコーダにセット
-        let fountain_packet = encoder.fountain_encoder_mut().unwrap().next_packet();
-        
-        // Encoderの内部ロジックを再現して中間ビットを取得
-        let seq = (fountain_packet.seq % (u32::from(u16::MAX) + 1)) as u16;
-        let pkt = Packet::new(seq, 1, &fountain_packet.data);
-        let pkt_bytes = pkt.serialize();
-        let bits = crate::coding::fec::bytes_to_bits(&pkt_bytes);
-        let expected_fec_bits = crate::coding::fec::encode(&bits);
-        decoder.debug_expected_fec_bits = Some(expected_fec_bits);
-
-        let expected_bits = encoder.encode_packet_bits(&fountain_packet);
-        decoder.debug_expected_bits = Some(expected_bits);
-        
-        // Encoderのリセット（fountainのパケット生成順序を戻す）
-        encoder.set_data(&data);
-
         // デコードが完了するまで複数フレームを送信
         for _ in 0..20 {
             if let Some(frame) = encoder.encode_frame() {
@@ -621,7 +581,11 @@ mod tests {
 
         // デコード結果を厳密に確認
         let recovered = decoder.recovered_data().expect("Should recover data");
-        assert_eq!(&recovered[..data.len()], &data[..], "Recovered data mismatch");
+        assert_eq!(
+            &recovered[..data.len()],
+            &data[..],
+            "Recovered data mismatch"
+        );
     }
 
     /// フレーム構造の検証（encoder→decoder）
@@ -646,7 +610,10 @@ mod tests {
 
         // デコーダに送信（クラッシュしないことを確認）
         let progress = decoder.process_samples(&frame);
-        assert!(!progress.complete, "Single frame should not complete decoding");
+        assert!(
+            !progress.complete,
+            "Single frame should not complete decoding"
+        );
     }
 
     /// プリアンブル検出の検証
@@ -706,9 +673,11 @@ mod tests {
         }
 
         // 検証：少なくとも1フレーム処理したこと
-        assert!(frame_count >= 1,
-                "Should have processed at least 1 frame, got {}",
-                frame_count);
+        assert!(
+            frame_count >= 1,
+            "Should have processed at least 1 frame, got {}",
+            frame_count
+        );
     }
 
     /// ノイズ耐性の基本テスト
@@ -763,9 +732,11 @@ mod tests {
         // 検証：リセット後も正常に動作していること
         // - 進捗がリセットされている
         let progress = decoder.progress();
-        assert_eq!(progress.received_packets, 0,
-                   "After reset, received_packets should be 0, got {}",
-                   progress.received_packets);
+        assert_eq!(
+            progress.received_packets, 0,
+            "After reset, received_packets should be 0, got {}",
+            progress.received_packets
+        );
         // - エラーが発生していない
         //（process_samplesがパニックやクラッシュせずに完了した時点で成功）
     }
@@ -825,7 +796,6 @@ mod tests {
     /// プリアンブル相関の数学的正しさ検証
     #[test]
     fn test_preamble_correlation_math() {
-        let decoder = make_decoder();
         let wdict = WalshDictionary::default_w16();
 
         // Walsh[0]のsf=15の信号を生成
@@ -850,9 +820,12 @@ mod tests {
         // 根拠：完全一致する信号の場合、相関値 = sf = 15
         //       浮動小数点演算の誤差を考慮して、90%以上の一致を許容
         //       閾値0.9は、誤差が10%以下であることを確認するための保守的な値
-        assert!(magnitude > sf as f32 * 0.9,
-                "Correlation magnitude should be close to {} (within 10%), got {}",
-                sf, magnitude);
+        assert!(
+            magnitude > sf as f32 * 0.9,
+            "Correlation magnitude should be close to {} (within 10%), got {}",
+            sf,
+            magnitude
+        );
     }
 
     /// ノイズ環境での同期検出耐性
@@ -872,7 +845,8 @@ mod tests {
 
         // 小さなノイズを追加
         let mut rng = thread_rng();
-        let noisy_frame: Vec<f32> = frame.iter()
+        let noisy_frame: Vec<f32> = frame
+            .iter()
             .map(|&s| s + (rng.gen::<f32>() - 0.5) * 0.02) // +/- 0.01のノイズ
             .collect();
 
@@ -928,27 +902,30 @@ mod tests {
         }
 
         // 検証：少なくとも1フレーム処理したこと
-        assert!(frame_count >= 1,
-                "Should have processed at least 1 frame, got {}",
-                frame_count);
+        assert!(
+            frame_count >= 1,
+            "Should have processed at least 1 frame, got {}",
+            frame_count
+        );
 
         // 検証：進捗が進んでいること
         let progress = decoder.progress();
-        assert!(progress.received_packets > 0 || frame_count > 0,
-                "Should have made progress: received_packets={}, frame_count={}",
-                progress.received_packets, frame_count);
+        assert!(
+            progress.received_packets > 0 || frame_count > 0,
+            "Should have made progress: received_packets={}, frame_count={}",
+            progress.received_packets,
+            frame_count
+        );
     }
 
     /// correlate_preamble実装を通じたテスト：完全一致信号の高相関
     #[test]
     fn test_preamble_correlation_with_perfect_signal() {
         use crate::mary::encoder::Encoder;
-        use crate::common::walsh::WalshDictionary;
 
         let config = DspConfig::default_48k();
         let mut encoder = Encoder::new(config.clone());
         let mut decoder = Decoder::new(160, 10, config);
-        let wdict = WalshDictionary::default_w16();
 
         let data = vec![0xABu8; 16];
         encoder.set_data(&data);
@@ -966,10 +943,11 @@ mod tests {
     fn test_preamble_correlation_with_noise_only() {
         let config = DspConfig::default_48k();
         let mut decoder = Decoder::new(160, 10, config);
-        use rand::prelude::*;
 
         // ランダムノイズのみ
-        let noise: Vec<f32> = (0..5000).map(|_| (rand::random::<f32>() - 0.5) * 0.1).collect();
+        let noise: Vec<f32> = (0..5000)
+            .map(|_| (rand::random::<f32>() - 0.5) * 0.1)
+            .collect();
 
         decoder.process_samples(&noise);
 
@@ -1031,7 +1009,11 @@ mod tests {
 
         // 検証：データが正しく復元されたこと
         let recovered = decoder.recovered_data().expect("Should recover data");
-        assert_eq!(&recovered[..data.len()], &data[..], "Recovered data mismatch after {} frames", total_frames);
+        assert_eq!(
+            &recovered[..data.len()],
+            &data[..],
+            "Recovered data mismatch after {} frames",
+            total_frames
+        );
     }
-
 }

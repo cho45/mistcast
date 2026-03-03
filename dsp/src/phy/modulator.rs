@@ -376,7 +376,13 @@ mod tests {
             config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
         // リサンプラの群遅延により、数サンプルの不足が発生することを許容
         let diff = (preamble.len() as i32 - expected_samples as i32).abs();
-        assert!(diff <= 16, "len={}, expected={}, diff={}", preamble.len(), expected_samples, diff);
+        assert!(
+            diff <= 16,
+            "len={}, expected={}, diff={}",
+            preamble.len(),
+            expected_samples,
+            diff
+        );
     }
 
     /// サンプル値が有限値であること
@@ -431,7 +437,13 @@ mod tests {
             symbols_for_bits(bits.len()) * config.spread_factor() * config.samples_per_chip();
         // リサンプラの群遅延により、数サンプルの不足が発生することを許容
         let diff = (samples.len() as i32 - expected as i32).abs();
-        assert!(diff <= 16, "len={}, expected={}, diff={}", samples.len(), expected, diff);
+        assert!(
+            diff <= 16,
+            "len={}, expected={}, diff={}",
+            samples.len(),
+            expected,
+            diff
+        );
     }
 
     /// 変調出力の振幅が概ね±2以内であること

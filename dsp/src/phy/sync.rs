@@ -179,7 +179,6 @@ impl SyncDetector {
                                     },
                                     fine_best_idx,
                                 ));
-
                             } else {
                                 // 下り坂: 最初の山の頂上を確定して早期リターン (First Peak Match)
                                 let (res, idx) = provisional_best.unwrap();
@@ -187,8 +186,8 @@ impl SyncDetector {
                             }
                         } else {
                             // 最初の threshold_fine 超え
-                        provisional_best = Some((
-                                        SyncResult {
+                            provisional_best = Some((
+                                SyncResult {
                                     peak_sample_idx: fine_best_idx + preamble_len + (spc / 2),
                                     peak_iq: last_sym_iq,
                                     score: fine_best_score,
@@ -367,10 +366,13 @@ mod tests {
 
             let detector = SyncDetector::new(config.clone(), tc, tf);
             let (i, q) = generate_signal(&config, 500, 1.0);
-            
+
             let (res, _) = detector.detect(&i, &q, 0);
             let sync = res.expect(&format!("Should find sync for SF={}", sf));
-            println!("  SF={} Score: {:.4} (Threshold: {:.4})", sf, sync.score, detector.threshold_fine);
+            println!(
+                "  SF={} Score: {:.4} (Threshold: {:.4})",
+                sf, sync.score, detector.threshold_fine
+            );
             assert!(sync.score > detector.threshold_fine);
         }
     }
@@ -385,8 +387,8 @@ mod tests {
 
         // 1. 信号生成 (オフセットを正確に制御)
         let (i, q) = generate_signal(&config, offset, 1.0);
-        
-        // 期待される SYNC_WORD 開始位置: 
+
+        // 期待される SYNC_WORD 開始位置:
         // 生成時のオフセット + フィルタ遅延 + プリアンブル長
         // ※Modulator と Receiver の RRC フィルタによる累積遅延を考慮
         let total_filter_delay = config.rrc_num_taps() - 1;
@@ -396,12 +398,17 @@ mod tests {
         let (res, _) = detector.detect(&i, &q, 0);
         let sync = res.expect("Should find sync");
 
-        println!("Detected idx: {}, Expected idx: {}", sync.peak_sample_idx, expected_idx);
-        
+        println!(
+            "Detected idx: {}, Expected idx: {}",
+            sync.peak_sample_idx, expected_idx
+        );
+
         // 3. 絶対位置の完全一致を検証
         // 1サンプルの狂いも許さない (±0 精度)
-        assert_eq!(sync.peak_sample_idx, expected_idx, 
-            "SYNC_WORD start position must match the physical signal exactly");
+        assert_eq!(
+            sync.peak_sample_idx, expected_idx,
+            "SYNC_WORD start position must match the physical signal exactly"
+        );
     }
 
     #[test]
@@ -603,8 +610,14 @@ mod tests {
             "  Target FAR 1.0%: Recommended Threshold = {:.4}",
             target_far_1pct
         );
-        println!("  Target FAR 0.1%: Recommended Threshold = {:.4}", target_far_01pct);
-        println!("  Max Noise Score Observed: {:.4}", noise_scores.last().unwrap());
+        println!(
+            "  Target FAR 0.1%: Recommended Threshold = {:.4}",
+            target_far_01pct
+        );
+        println!(
+            "  Max Noise Score Observed: {:.4}",
+            noise_scores.last().unwrap()
+        );
         println!();
 
         // 現在のしきい値 (threshold_fine) での性能評価
@@ -654,9 +667,11 @@ mod tests {
         for &snr_db in &[-3.0, 0.0, 3.0] {
             let mut num_detected = 0;
             for trial in 0..NUM_TRIALS {
-                let (i, q) = generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 2000);
+                let (i, q) =
+                    generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 2000);
                 // detect() の代わりに直接しきい値判定を行う (簡易評価)
-                let peak_n = (config.rrc_num_taps() - 1).saturating_sub(config.samples_per_chip() / 2);
+                let peak_n =
+                    (config.rrc_num_taps() - 1).saturating_sub(config.samples_per_chip() / 2);
                 let mut found = false;
 
                 for n in (peak_n.saturating_sub(5))..=(peak_n + 5) {
@@ -686,7 +701,8 @@ mod tests {
         // 要件確認 (既存のテストを一時的にパスさせるための調整。最終的にはしきい値を修正すべき)
         let mut neg3_db_detection = 0.0f64;
         for trial in 0..NUM_TRIALS {
-            let (i, q) = generate_signal_with_awgn_seeded(&config, 500, -3.0, (trial + 1000) as u64);
+            let (i, q) =
+                generate_signal_with_awgn_seeded(&config, 500, -3.0, (trial + 1000) as u64);
             if detector.detect(&i, &q, 0).0.is_some() {
                 neg3_db_detection += 1.0;
             }
@@ -773,7 +789,6 @@ mod tests {
                 // 範囲外アクセスを防ぐためバッファ長を十分に確保
                 let i_noise: Vec<f32> = (0..3000).map(|_| dist.sample(&mut rng)).collect();
                 let q_noise: Vec<f32> = (0..3000).map(|_| dist.sample(&mut rng)).collect();
-
 
                 let (score, _) = detector.score_candidate(&i_noise, &q_noise, 0, repeat, sym_len);
 

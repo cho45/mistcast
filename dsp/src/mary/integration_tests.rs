@@ -2,9 +2,9 @@
 //!
 //! エンコーダとデコーダの統合テスト。実用的なシナリオでの動作を検証する。
 
-use crate::mary::encoder::Encoder;
-use crate::mary::decoder::Decoder;
 use crate::common::walsh::WalshDictionary;
+use crate::mary::decoder::Decoder;
+use crate::mary::encoder::Encoder;
 use crate::DspConfig;
 use num_complex::Complex32;
 
@@ -20,7 +20,11 @@ impl MaryTestSystem {
         let config = DspConfig::default_48k();
         let encoder = Encoder::new(config.clone());
         let decoder = Decoder::new(160, 10, config.clone());
-        Self { encoder, decoder, config }
+        Self {
+            encoder,
+            decoder,
+            config,
+        }
     }
 }
 
@@ -43,7 +47,10 @@ mod tests {
         assert!(frame.is_some(), "Should encode a frame");
         let frame_samples = frame.unwrap();
         assert!(!frame_samples.is_empty(), "Frame should not be empty");
-        assert!(frame_samples.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            frame_samples.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
     }
 
     /// フレーム構造の検証：プリアンブル+Sync+Payload
@@ -57,14 +64,21 @@ mod tests {
 
         // フレームは十分な長さを持つべき
         let min_expected_length = 2000; // プリアンブル + Sync + Payload
-        assert!(frame.len() > min_expected_length, "Frame should be long enough");
+        assert!(
+            frame.len() > min_expected_length,
+            "Frame should be long enough"
+        );
 
         // 全サンプルが有限値
         assert!(frame.iter().all(|&s| s.is_finite()));
 
         // 振幅範囲のチェック（クリッピングがない）
         let max_amp = frame.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
-        assert!(max_amp < 3.0, "Amplitude should be reasonable, got {}", max_amp);
+        assert!(
+            max_amp < 3.0,
+            "Amplitude should be reasonable, got {}",
+            max_amp
+        );
     }
 
     /// プリアンブルの基本構造検証
@@ -90,11 +104,19 @@ mod tests {
         let avg_energy = preamble_energy / preamble_samples.len() as f32;
 
         // エネルギーがゼロでない（信号が存在する）
-        assert!(avg_energy > 0.001, "Preamble should have signal energy, got {}", avg_energy);
+        assert!(
+            avg_energy > 0.001,
+            "Preamble should have signal energy, got {}",
+            avg_energy
+        );
 
         // 振幅が過大でない（クリッピングがない）
         let max_amp = preamble_samples.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
-        assert!(max_amp < 3.0, "Preamble amplitude should be reasonable, got {}", max_amp);
+        assert!(
+            max_amp < 3.0,
+            "Preamble amplitude should be reasonable, got {}",
+            max_amp
+        );
     }
 
     /// Sync Wordの埋め込みテスト
@@ -208,7 +230,9 @@ mod tests {
                     assert!(
                         correlations[idx] < 1e-6,
                         "Walsh[{}] and Walsh[{}] should be orthogonal, correlation={}",
-                        walsh_idx, idx, correlations[idx]
+                        walsh_idx,
+                        idx,
+                        correlations[idx]
                     );
                 }
             }
@@ -257,7 +281,11 @@ mod tests {
         // リセット後も同様のフレーム長
         let f1 = frame1.unwrap();
         let f2 = frame2.unwrap();
-        assert_eq!(f1.len(), f2.len(), "Reset should produce consistent frame lengths");
+        assert_eq!(
+            f1.len(),
+            f2.len(),
+            "Reset should produce consistent frame lengths"
+        );
     }
 
     /// デコーダの状態管理の検証

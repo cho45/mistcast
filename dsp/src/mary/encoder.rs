@@ -2,10 +2,10 @@
 //!
 //! Modulatorをラップした高レベルエンコーダ。
 
+use crate::coding::fec;
 use crate::coding::fountain::{FountainEncoder, FountainPacket};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::coding::fec;
 use crate::frame::packet::Packet;
 use crate::mary::modulator::Modulator;
 use crate::params::PAYLOAD_SIZE;
@@ -162,7 +162,10 @@ mod tests {
         assert!(frame.is_some(), "Should encode a frame");
         let frame = frame.unwrap();
         assert!(!frame.is_empty(), "Frame should not be empty");
-        assert!(frame.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            frame.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
     }
 
     /// バーストエンコード
@@ -178,7 +181,10 @@ mod tests {
 
         let burst = encoder.encode_burst(&[packet1, packet2]);
         assert!(!burst.is_empty(), "Burst should not be empty");
-        assert!(burst.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            burst.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
     }
 
     /// フラッシュ
@@ -186,7 +192,10 @@ mod tests {
     fn test_flush() {
         let mut encoder = make_encoder();
         let flushed = encoder.flush();
-        assert!(flushed.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            flushed.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
     }
 
     /// 無音変調
@@ -196,7 +205,10 @@ mod tests {
         let silence = encoder.modulate_silence(100);
         assert!(!silence.is_empty(), "Should produce samples");
         assert!(silence.len() <= 100, "Should not exceed 100 samples");
-        assert!(silence.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            silence.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
     }
 
     /// 連続フレームエンコードの整合性
@@ -246,7 +258,10 @@ mod tests {
 
         // フレームにはプリアンブル、Sync、Payloadが含まれる
         // 最小フレーム長の検証
-        assert!(frame_samples.len() > 1000, "Frame should contain preamble, sync, and payload");
+        assert!(
+            frame_samples.len() > 1000,
+            "Frame should contain preamble, sync, and payload"
+        );
     }
 
     /// リセット後の動作検証
@@ -285,7 +300,11 @@ mod tests {
 
         // 同じパケットを2回エンコードして可逆性を検証
         let packet_data1 = vec![0xABu8; crate::params::PAYLOAD_SIZE];
-        let packet1 = FountainPacket { seq: 0, coefficients: vec![1u8], data: packet_data1 };
+        let packet1 = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: packet_data1,
+        };
 
         let bits1 = encoder.encode_packet_bits(&packet1);
         let bits2 = encoder.encode_packet_bits(&packet1);
@@ -293,19 +312,29 @@ mod tests {
         // 1. FEC符号化後のビット列は入力パケットより長いはず
         // 根拠：FEC（畳み込み符号）は冗長性を追加するため
         let input_bit_count = packet1.data.len() * 8; // payload bits
-        assert!(bits1.len() > input_bit_count,
-                "FEC encoded bits ({}) should be greater than input bits ({})",
-                bits1.len(), input_bit_count);
+        assert!(
+            bits1.len() > input_bit_count,
+            "FEC encoded bits ({}) should be greater than input bits ({})",
+            bits1.len(),
+            input_bit_count
+        );
 
         // 2. 同じパケット→同じビット列（決定性）
         assert_eq!(bits1, bits2, "Same packet should produce same bits");
 
         // 3. 異なるパケット→異なるビット列
         let packet_data3 = vec![0xCDu8; crate::params::PAYLOAD_SIZE];
-        let packet3 = FountainPacket { seq: 0, coefficients: vec![1u8], data: packet_data3 };
+        let packet3 = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: packet_data3,
+        };
         let bits3 = encoder.encode_packet_bits(&packet3);
 
-        assert_ne!(bits1, bits3, "Different packets should produce different bits");
+        assert_ne!(
+            bits1, bits3,
+            "Different packets should produce different bits"
+        );
     }
 
     /// インターリービングの数学的性質を検証
@@ -322,7 +351,11 @@ mod tests {
 
         // パケットを生成
         let packet_data1 = vec![0xABu8; crate::params::PAYLOAD_SIZE];
-        let packet1 = FountainPacket { seq: 0, coefficients: vec![1u8], data: packet_data1 };
+        let packet1 = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: packet_data1,
+        };
 
         let bits1 = encoder.encode_packet_bits(&packet1);
 
@@ -330,9 +363,13 @@ mod tests {
         // 根拠：BlockInterleaverはrows×colsの行列構造を使用
         // rows=16（固定設計）、colsはビット数に応じて決定
         let rows = 16; // エンコーダの設計で固定
-        assert_eq!(bits1.len() % rows, 0,
-                   "Interleaved bits ({}) should be divisible by rows ({})",
-                   bits1.len(), rows);
+        assert_eq!(
+            bits1.len() % rows,
+            0,
+            "Interleaved bits ({}) should be divisible by rows ({})",
+            bits1.len(),
+            rows
+        );
 
         // 2. 同じパケット→同じビット列（可逆性・決定性）
         let bits2 = encoder.encode_packet_bits(&packet1);
@@ -340,10 +377,17 @@ mod tests {
 
         // 3. 異なるパケット→異なるビット列（衝突なし）
         let packet_data3 = vec![0xCDu8; crate::params::PAYLOAD_SIZE];
-        let packet3 = FountainPacket { seq: 0, coefficients: vec![1u8], data: packet_data3 };
+        let packet3 = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: packet_data3,
+        };
         let bits3 = encoder.encode_packet_bits(&packet3);
 
-        assert_ne!(bits1, bits3, "Different packets should produce different interleaved bits");
+        assert_ne!(
+            bits1, bits3,
+            "Different packets should produce different interleaved bits"
+        );
     }
 
     /// エンコードフレームの信号特性検証
@@ -356,7 +400,10 @@ mod tests {
         let frame = encoder.encode_frame().unwrap();
 
         // 1. 全サンプルが有限値
-        assert!(frame.iter().all(|&s| s.is_finite()), "All samples should be finite");
+        assert!(
+            frame.iter().all(|&s| s.is_finite()),
+            "All samples should be finite"
+        );
 
         // 2. 振幅範囲（クリッピングなし）
         // 根拠：modulatorと同じ信号処理パイプライン
@@ -366,9 +413,11 @@ mod tests {
         // - 安全余裕2倍：2.5（クリッピング防止）
         // - 5.0はさらに保守的な値（複数シンボルの蓄積を考慮）
         let max_amp = frame.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
-        assert!(max_amp < 5.0,
-                "Amplitude should be reasonable (theoretical max ~1.2, safety margin 4x), got {}",
-                max_amp);
+        assert!(
+            max_amp < 5.0,
+            "Amplitude should be reasonable (theoretical max ~1.2, safety margin 4x), got {}",
+            max_amp
+        );
 
         // 3. 信号エネルギー（ゼロでない）
         // 根拠：フレームはプリアンブル + Sync + Payloadで構成され、
@@ -383,8 +432,10 @@ mod tests {
         let preamble_len = 15 * encoder.modulator.config().preamble_repeat * spc;
         let sync_len = 16 * 15 * spc;
 
-        assert!(frame.len() > preamble_len + sync_len,
-                "Frame should contain preamble + sync + payload");
+        assert!(
+            frame.len() > preamble_len + sync_len,
+            "Frame should contain preamble + sync + payload"
+        );
     }
 
     /// プリアンブルとSyncの分離検証
@@ -405,7 +456,10 @@ mod tests {
         assert!(frame.len() > preamble_len, "Frame should contain preamble");
 
         // Sync部分が存在する
-        assert!(frame.len() > preamble_len + sync_len, "Frame should contain sync");
+        assert!(
+            frame.len() > preamble_len + sync_len,
+            "Frame should contain sync"
+        );
 
         // 各部分のエネルギーを確認
         // 根拠：プリアンブルは15チップ × repeat回分で構成され、
@@ -414,10 +468,14 @@ mod tests {
         //       preamble_lenは数百サンプルなので、全エネルギー > 1.0が期待される
         //       0.1は非常に保守的な下限値（実際には10倍以上あるはず）
         let preamble_energy: f32 = frame[..preamble_len.min(frame.len())]
-            .iter().map(|&s| s * s).sum();
-        assert!(preamble_energy > 0.1,
-                "Preamble should have significant energy (got {}, expected > 1.0)",
-                preamble_energy);
+            .iter()
+            .map(|&s| s * s)
+            .sum();
+        assert!(
+            preamble_energy > 0.1,
+            "Preamble should have significant energy (got {}, expected > 1.0)",
+            preamble_energy
+        );
     }
 
     /// 複数パケットエンコードの連続性
@@ -438,8 +496,11 @@ mod tests {
 
         // 全てのフレームが有限値
         for (i, frame) in frames.iter().enumerate() {
-            assert!(frame.iter().all(|&s| s.is_finite()),
-                    "Frame {} should have all finite samples", i);
+            assert!(
+                frame.iter().all(|&s| s.is_finite()),
+                "Frame {} should have all finite samples",
+                i
+            );
         }
 
         // フレーム長が一貫している
@@ -472,11 +533,19 @@ mod tests {
 
         // DCオフセットチェック
         let dc_offset = frame.iter().sum::<f32>() / frame.len() as f32;
-        assert!(dc_offset.abs() < 1.0, "DC offset should be small, got {}", dc_offset);
+        assert!(
+            dc_offset.abs() < 1.0,
+            "DC offset should be small, got {}",
+            dc_offset
+        );
 
         // RMSレベルチェック
         let rms = (frame.iter().map(|&s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
-        assert!(rms > 0.001 && rms < 2.0, "RMS should be reasonable, got {}", rms);
+        assert!(
+            rms > 0.001 && rms < 2.0,
+            "RMS should be reasonable, got {}",
+            rms
+        );
     }
 
     /// 信号対ノイズ比の概算
@@ -502,18 +571,22 @@ mod tests {
         // - 実際には複数シンボルの蓄積とリサンプラの影響で3-5程度
         // - 10.0は非常に保守的な上限（正常な信号では5以下）
         let papr = peak_power / signal_power;
-        assert!(papr < 10.0,
-                "PAPR should be reasonable (theoretical ~1.44, typical 3-5), got {}",
-                papr);
+        assert!(
+            papr < 10.0,
+            "PAPR should be reasonable (theoretical ~1.44, typical 3-5), got {}",
+            papr
+        );
 
         // クリッピングチェック
         // 根拠：正常な信号の最大振幅は2.5以下（modulatorの振幅テスト参照）
         //       3.0を超えるサンプルは信号処理の異常を示す
         //       閾値3.0は安全余裕を含む保守的な値
         let clipped_count = frame.iter().filter(|&&s| s.abs() > 3.0).count();
-        assert!(clipped_count == 0,
-                "Signal should not clip (threshold 3.0, theoretical max ~2.5), {} samples exceeded",
-                clipped_count);
+        assert!(
+            clipped_count == 0,
+            "Signal should not clip (threshold 3.0, theoretical max ~2.5), {} samples exceeded",
+            clipped_count
+        );
     }
 
     /// Fountainエンコーダの状態管理
@@ -543,7 +616,11 @@ mod tests {
 
         // ビット列をエンコード
         let packet_data = vec![0xBBu8; crate::params::PAYLOAD_SIZE];
-        let packet = FountainPacket { seq: 0, coefficients: vec![1u8], data: packet_data };
+        let packet = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: packet_data,
+        };
         let bits = encoder.encode_packet_bits(&packet);
 
         // ビット数はインターリーブでrows*colsに調整される
@@ -556,7 +633,10 @@ mod tests {
 
         // 変調結果が妥当である
         assert!(!samples.is_empty(), "Modulator should produce samples");
-        assert!(samples.iter().all(|&s| s.is_finite()), "All modulated samples should be finite");
+        assert!(
+            samples.iter().all(|&s| s.is_finite()),
+            "All modulated samples should be finite"
+        );
     }
 
     /// encode_packet_bitsのビット数を検証
@@ -578,7 +658,11 @@ mod tests {
         // 2. fec::encode()で2倍化 = 336ビット
         // 3. インターリーバパディングでrows * colsに調整
         let packet_data = vec![0xDDu8; crate::params::PAYLOAD_SIZE];
-        let packet = FountainPacket { seq: 0, coefficients: vec![1u8], data: packet_data };
+        let packet = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: packet_data,
+        };
         let bits = encoder.encode_packet_bits(&packet);
 
         // インターリーバサイズ計算（既存DQPSKと同じ）
@@ -588,9 +672,13 @@ mod tests {
         let cols = fec_bits.div_ceil(rows); // 348 / 16 = 21.75 → 22
         let expected_bits = rows * cols; // 16 * 22 = 352
 
-        assert_eq!(bits.len(), expected_bits,
-                   "encode_packet_bits should produce {} bits (rows*cols), got {}",
-                   expected_bits, bits.len());
+        assert_eq!(
+            bits.len(),
+            expected_bits,
+            "encode_packet_bits should produce {} bits (rows*cols), got {}",
+            expected_bits,
+            bits.len()
+        );
 
         // MaryDQPSKシンボル数（6ビット/シンボル）
         // 352 / 6 = 58.66... → 58シンボル（348ビット）+ 4ビットパディング

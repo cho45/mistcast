@@ -57,8 +57,12 @@ impl Resampler {
 
                 // Blackman window
                 let w = 0.42
-                    - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (taps_per_phase - 1) as f64).cos()
-                    + 0.08 * (4.0 * std::f64::consts::PI * i as f64 / (taps_per_phase - 1) as f64).cos();
+                    - 0.5
+                        * (2.0 * std::f64::consts::PI * i as f64 / (taps_per_phase - 1) as f64)
+                            .cos()
+                    + 0.08
+                        * (4.0 * std::f64::consts::PI * i as f64 / (taps_per_phase - 1) as f64)
+                            .cos();
 
                 let h = 2.0 * cutoff * sinc * w;
                 *coeff = h as f32;
@@ -270,7 +274,11 @@ mod tests {
             / min_len as f32)
             .sqrt();
 
-        assert!(rmse < 1e-4, "Chunked output diverged from whole output: rmse={}", rmse);
+        assert!(
+            rmse < 1e-4,
+            "Chunked output diverged from whole output: rmse={}",
+            rmse
+        );
     }
 
     #[test]
@@ -295,11 +303,8 @@ mod tests {
 
         // FIR 過渡を除いてパワーを計算
         let skip = 100.min(output.len().saturating_sub(1));
-        let power = output[skip..]
-            .iter()
-            .map(|v| v * v)
-            .sum::<f32>()
-            / (output.len() - skip) as f32;
+        let power =
+            output[skip..].iter().map(|v| v * v).sum::<f32>() / (output.len() - skip) as f32;
 
         // 入力パワーは 0.5 (sin^2平均)。少なくとも -30dB (0.001) 以下に減衰。
         assert!(
@@ -335,7 +340,8 @@ mod tests {
             chunk_idx += 1;
         }
 
-        let expected = ((total_input as f64) * (target_rate as f64) / (source_rate as f64)).round() as isize;
+        let expected =
+            ((total_input as f64) * (target_rate as f64) / (source_rate as f64)).round() as isize;
         let actual = output.len() as isize;
         let err = (actual - expected).abs();
 
@@ -377,7 +383,8 @@ mod tests {
             chunk_idx += 1;
         }
 
-        let expected = ((total_input as f64) * (target_rate as f64) / (source_rate as f64)).round() as isize;
+        let expected =
+            ((total_input as f64) * (target_rate as f64) / (source_rate as f64)).round() as isize;
         let actual = output.len() as isize;
         let err = (actual - expected).abs();
 
@@ -421,10 +428,7 @@ mod tests {
             .sum::<f32>()
             / (out_default.len() - skip_default).max(1) as f32)
             .sqrt();
-        let rms_low_cut = (out_low_cut[skip_low..]
-            .iter()
-            .map(|v| v * v)
-            .sum::<f32>()
+        let rms_low_cut = (out_low_cut[skip_low..].iter().map(|v| v * v).sum::<f32>()
             / (out_low_cut.len() - skip_low).max(1) as f32)
             .sqrt();
 

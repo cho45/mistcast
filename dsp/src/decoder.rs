@@ -326,7 +326,8 @@ impl Decoder {
 
             if decoded_packets.is_empty() {
                 // 同期語一致後に payload が全滅したら境界ずれを疑う
-                self.last_search_idx = (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
+                self.last_search_idx =
+                    (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
                 self.current_sync = None;
                 continue;
             }
@@ -369,7 +370,9 @@ impl Decoder {
                 }
             }
             // 受信窓をバースト分前進させる
-            let actual_end = (payload_start + burst_data_bits_len / bits_per_symbol_payload * sf * spc).min(self.sample_buffer_i.len());
+            let actual_end = (payload_start
+                + burst_data_bits_len / bits_per_symbol_payload * sf * spc)
+                .min(self.sample_buffer_i.len());
             self.sample_buffer_i.drain(0..actual_end);
             self.sample_buffer_q.drain(0..actual_end);
             self.last_search_idx = 0;
@@ -394,7 +397,7 @@ impl Decoder {
                 + (chip_idx * spc + (spc / 2)) as f32
                 + timing_offset
                 + sample_shift;
-            
+
             let i_idx = p.round() as i32;
             if i_idx < 0 || i_idx >= self.sample_buffer_i.len() as i32 {
                 return None;
