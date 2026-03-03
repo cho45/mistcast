@@ -1,13 +1,10 @@
-//! 音響通信DSPシステム
+//! 音響通信DSP system
 
 pub mod coding;
 pub mod common;
+pub mod dsss;
 pub mod frame;
 pub mod mary;
-pub mod phy;
-
-pub mod decoder;
-pub mod encoder;
 
 use wasm_bindgen::prelude::*;
 
@@ -146,7 +143,7 @@ impl WasmDecodeProgress {
 
 #[wasm_bindgen]
 pub struct WasmDecoder {
-    inner: decoder::Decoder,
+    inner: dsss::decoder::Decoder,
 }
 
 #[wasm_bindgen]
@@ -156,7 +153,7 @@ impl WasmDecoder {
         console_error_panic_hook::set_once();
         let config = DspConfig::new(sample_rate);
         WasmDecoder {
-            inner: decoder::Decoder::new(
+            inner: dsss::decoder::Decoder::new(
                 params::FIXED_K * params::PAYLOAD_SIZE,
                 params::FIXED_K,
                 config,
@@ -192,7 +189,7 @@ impl WasmDecoder {
 
 #[wasm_bindgen]
 pub struct WasmEncoder {
-    inner: encoder::Encoder,
+    inner: dsss::encoder::Encoder,
     fountain_encoder: Option<coding::fountain::FountainEncoder>,
 }
 
@@ -201,9 +198,9 @@ impl WasmEncoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32) -> Self {
         let config = DspConfig::new(sample_rate);
-        let enc_config = encoder::EncoderConfig::new(config);
+        let enc_config = dsss::encoder::EncoderConfig::new(config);
         WasmEncoder {
-            inner: encoder::Encoder::new(enc_config),
+            inner: dsss::encoder::Encoder::new(enc_config),
             fountain_encoder: None,
         }
     }

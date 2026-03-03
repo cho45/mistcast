@@ -1,6 +1,6 @@
-use dsp::encoder::{Encoder, EncoderConfig};
+use dsp::dsss::encoder::{Encoder, EncoderConfig};
 use dsp::params::PAYLOAD_SIZE;
-use dsp::{decoder::Decoder, DspConfig};
+use dsp::{dsss::decoder::Decoder, DspConfig};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};

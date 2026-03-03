@@ -324,7 +324,7 @@ pub fn downconvert(
 mod tests {
     use super::*;
     use crate::common::rrc_filter::RrcFilter;
-    use crate::phy::modulator::Modulator;
+    use crate::dsss::modulator::Modulator;
     use rand::prelude::*;
     use rand_distr::Normal;
 

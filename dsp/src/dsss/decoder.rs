@@ -11,7 +11,7 @@ use crate::{
     common::rrc_filter::RrcFilter,
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
     params::{MODULATION, PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
-    phy::sync::{SyncDetector, SyncResult},
+    dsss::sync::{SyncDetector, SyncResult},
     DifferentialModulation, DspConfig,
 };
 use num_complex::Complex32;
@@ -907,7 +907,7 @@ mod tests {
     use crate::coding::fountain::{FountainEncoder, FountainParams};
     use crate::params::FIXED_K;
     use crate::{
-        encoder::{Encoder, EncoderConfig},
+        dsss::encoder::{Encoder, EncoderConfig},
         DspConfig,
     };
 

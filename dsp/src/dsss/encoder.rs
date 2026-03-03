@@ -6,7 +6,7 @@ use crate::{
     coding::interleaver::BlockInterleaver,
     frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX},
     params::{PACKETS_PER_SYNC_BURST, PAYLOAD_SIZE},
-    phy::modulator::Modulator,
+    dsss::modulator::Modulator,
     DspConfig,
 };
 

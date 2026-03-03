@@ -1,7 +1,7 @@
 //! encode_wav: 入力テキストを変調してWAVに保存する例
 
-use dsp::encoder::Encoder;
-use dsp::encoder::EncoderConfig;
+use dsp::dsss::encoder::Encoder;
+use dsp::dsss::encoder::EncoderConfig;
 use dsp::DspConfig;
 
 fn main() {

@@ -1,5 +1,5 @@
-use dsp::decoder::Decoder;
-use dsp::encoder::{Encoder, EncoderConfig};
+use dsp::dsss::decoder::Decoder;
+use dsp::dsss::encoder::{Encoder, EncoderConfig};
 use dsp::DspConfig;
 use rand::prelude::*;
 use rand::rngs::StdRng;
