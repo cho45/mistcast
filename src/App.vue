@@ -409,30 +409,6 @@ textarea {
   font-size: 1rem;
 }
 
-.spectrum-panel {
-  margin-top: 0.9rem;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #f8fbff;
-  padding: 0.55rem;
-}
-
-.spectrum-title {
-  margin: 0 0 0.45rem;
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 700;
-}
-
-.spectrum-canvas {
-  display: block;
-  width: 100%;
-  height: 190px;
-  border: 1px solid #d3e0ed;
-  border-radius: 8px;
-  background: #fdfefe;
-}
-
 .receiver-header {
   display: flex;
   flex-direction: column;
@@ -780,7 +756,7 @@ code {
   background: #fff;
   border: 1px solid #cbd5e1;
   image-rendering: pixelated;
-  max-width: 100%;
+  max-width: 50%;
   aspect-ratio: 1 / 1;
   height: auto;
 }

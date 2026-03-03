@@ -5,6 +5,7 @@ import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
 import { useDemoRuntime } from '../demo-runtime';
 import { extractImagePayload, type ImagePayload } from '../utils/image-detector';
+import SpectrumCanvas from './SpectrumCanvas.vue';
 
 const runtime = useDemoRuntime();
 
@@ -73,11 +74,15 @@ const inputMode = ref<InputMode>('loopback');
 const isMicActive = computed(() => inputMode.value === 'mic');
 
 const basisCanvas = ref<HTMLCanvasElement | null>(null);
+const rxSpectrumCanvas = ref<HTMLCanvasElement | null>(null);
 
 let receiverWorker: Worker | null = null;
 let receiverBackend: Comlink.Remote<MistcastBackend> | null = null;
 let decoderNode: AudioWorkletNode | null = null;
 let decoderStreamSink: MediaStreamAudioDestinationNode | null = null;
+let rxAnalyserNode: AnalyserNode | null = null;
+let rxFftData: Float32Array | null = null;
+let rxFftRafId: number | null = null;
 let rxInputGain: GainNode | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 let micStream: MediaStream | null = null;
@@ -345,14 +350,17 @@ async function teardownReceiverGraph() {
   safeDisconnect(demoAirGapNodeRef, rxInputGain);
   safeDisconnect(micSource, rxInputGain);
   safeDisconnect(micSource);
+  safeDisconnect(rxInputGain, rxAnalyserNode);
   safeDisconnect(rxInputGain, decoderNode);
   safeDisconnect(rxInputGain);
   safeDisconnect(decoderNode, decoderStreamSink);
   safeDisconnect(decoderNode);
+  safeDisconnect(rxAnalyserNode);
 
   micSource = null;
   rxInputGain = null;
   decoderNode = null;
+  rxAnalyserNode = null;
   decoderStreamSink = null;
   demoAirGapNodeRef = null;
 }
@@ -377,6 +385,14 @@ async function rebuildReceiverGraph() {
 
   rxInputGain = audioContext.createGain();
   rxInputGain.gain.value = 1.0;
+
+  rxAnalyserNode = audioContext.createAnalyser();
+  rxAnalyserNode.fftSize = 4096;
+  rxAnalyserNode.smoothingTimeConstant = 0.6;
+  rxAnalyserNode.minDecibels = -100;
+  rxAnalyserNode.maxDecibels = -20;
+
+  rxInputGain.connect(rxAnalyserNode);
   rxInputGain.connect(decoderNode);
 
   decoderStreamSink = audioContext.createMediaStreamDestination();
@@ -554,6 +570,11 @@ onBeforeUnmount(() => {
         <p v-else class="placeholder">No decoded data</p>
       </div>
     </div>
+
+    <SpectrumCanvas
+      :analyser-node="rxAnalyserNode"
+      title="Receiver FFT (Linear Frequency Axis)"
+    />
 
     <div class="metric-grid">
       <div class="metric" data-tooltip="正常に受信してシステムに受け入れられたパケットの総数"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
