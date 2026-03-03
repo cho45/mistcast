@@ -1,10 +1,11 @@
 import { h, ref } from 'vue';
-import { provideDemoRuntime } from '../demo-runtime';
+import { provideDemoRuntime, type ModemMode } from '../demo-runtime';
 
 export function createMockRuntime() {
   return {
     coreReady: ref(false),
-    modemMode: ref('dsss' as const),
+    modemMode: ref<ModemMode>('dsss'),
+    isBusy: ref(false),
     ensureAudioCore: async () => ({
       audioContext: {
         sampleRate: 48000,
