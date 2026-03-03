@@ -1,12 +1,12 @@
 import { expose } from "comlink";
-import initBase, { 
-  WasmDsssEncoder as WasmDsssEncoderBase, 
+import initBase, {
+  WasmDsssEncoder as WasmDsssEncoderBase,
   WasmDsssDecoder as WasmDsssDecoderBase,
   WasmMaryEncoder as WasmMaryEncoderBase,
   WasmMaryDecoder as WasmMaryDecoderBase
 } from "../pkg/dsp";
-import initSimd, { 
-  WasmDsssEncoder as WasmDsssEncoderSimd, 
+import initSimd, {
+  WasmDsssEncoder as WasmDsssEncoderSimd,
   WasmDsssDecoder as WasmDsssDecoderSimd,
   WasmMaryEncoder as WasmMaryEncoderSimd,
   WasmMaryDecoder as WasmMaryDecoderSimd
@@ -101,19 +101,19 @@ const SIMD_BINDINGS: WasmBindings = {
 
 export type ModemMode = "dsss" | "mary";
 
-type RecyclePortInboundMessage = 
+type RecyclePortInboundMessage =
   | { type: "recycle"; data: Float32Array }
   | { type: "input"; data: Float32Array }
   | {
-      type: "stats";
-      blocks: number;
-      avgProcessMs: number;
-      maxProcessMs: number;
-      lastProcessMs: number;
-      blockDurationMs: number;
-      overruns: number;
-      inputRms: number;
-    };
+    type: "stats";
+    blocks: number;
+    avgProcessMs: number;
+    maxProcessMs: number;
+    lastProcessMs: number;
+    blockDurationMs: number;
+    overruns: number;
+    inputRms: number;
+  };
 
 type DecoderProcessorStats = {
   blocks: number;
@@ -235,7 +235,7 @@ export class MistcastBackend {
       this.encoder.reset();
       this.encoder = null;
     }
-    
+
     if (mode === "mary") {
       this.encoder = new bindings.WasmMaryEncoder(sampleRate, MARY_PACKETS_PER_BURST);
     } else {
@@ -258,9 +258,9 @@ export class MistcastBackend {
 
     const dummyFrame = this.encoder.pull_frame();
     if (!dummyFrame) return;
-    
+
     if (!this.audioPacketSender || (this.audioPacketSender as any).packetSamples !== dummyFrame.length) {
-        this.audioPacketSender = new RecycleTransferSender(dummyFrame.length, 64);
+      this.audioPacketSender = new RecycleTransferSender(dummyFrame.length, 64);
     }
 
     this.isEncoding = true;
@@ -271,24 +271,24 @@ export class MistcastBackend {
     if (!this.isEncoding || !this.encoder || !this.audioPacketSender || !this.audioOutPort) return;
 
     while (this.isEncoding) {
-        let frame: Float32Array | null | undefined;
-        if (this.randomizeSeq) {
-            // seq は 0..65535 の範囲でランダムに選択（ヘッダが u16 なので）
-            const randomSeq = Math.floor(Math.random() * 65536);
-            frame = this.encoder.pull_frame_with_seq(randomSeq);
-        } else {
-            frame = this.encoder.pull_frame();
-        }
+      let frame: Float32Array | null | undefined;
+      if (this.randomizeSeq) {
+        // seq は 0..65535 の範囲でランダムに選択（ヘッダが u16 なので）
+        const randomSeq = Math.floor(Math.random() * 65536);
+        frame = this.encoder.pull_frame_with_seq(randomSeq);
+      } else {
+        frame = this.encoder.pull_frame();
+      }
 
-        if (!frame) break;
+      if (!frame) break;
 
-        const samples = new Float32Array(frame);
-        const prevDropped = this.audioPacketSender.getDroppedSamplesCount();
-        this.audioPacketSender.appendFrom(samples, samples.length, 1, this.audioOutPort);
+      const samples = new Float32Array(frame);
+      const prevDropped = this.audioPacketSender.getDroppedSamplesCount();
+      this.audioPacketSender.appendFrom(samples, samples.length, 1, this.audioOutPort);
 
-        if (this.audioPacketSender.getDroppedSamplesCount() > prevDropped) {
-            break; 
-        }
+      if (this.audioPacketSender.getDroppedSamplesCount() > prevDropped) {
+        break;
+      }
     }
   }
 
@@ -297,23 +297,23 @@ export class MistcastBackend {
     this.audioOutPort?.postMessage({ type: "reset" });
   }
 
-  async startDecoder(sampleRate: number, 
-                     onPacket: (data: Uint8Array) => void,
-                     onProgress: (p: any) => void,
-                     mode: ModemMode = "dsss") {
+  async startDecoder(sampleRate: number,
+    onPacket: (data: Uint8Array) => void,
+    onProgress: (p: any) => void,
+    mode: ModemMode = "dsss") {
     await this.init();
     const bindings = this.requireBindings();
     console.log(`[Worker] Decoder setup (${mode}, adaptive-k protocol, rate=${sampleRate})`);
-    
+
     if (this.decoder) {
-        this.decoder.reset();
-        this.decoder = null;
+      this.decoder.reset();
+      this.decoder = null;
     }
 
     if (mode === "mary") {
-        this.decoder = new bindings.WasmMaryDecoder(sampleRate, MARY_PACKETS_PER_BURST);
+      this.decoder = new bindings.WasmMaryDecoder(sampleRate, MARY_PACKETS_PER_BURST);
     } else {
-        this.decoder = new bindings.WasmDsssDecoder(sampleRate, DSSS_PACKETS_PER_BURST);
+      this.decoder = new bindings.WasmDsssDecoder(sampleRate, DSSS_PACKETS_PER_BURST);
     }
     this.decoderProcessorStats = {
       blocks: 0,
@@ -330,28 +330,28 @@ export class MistcastBackend {
 
   async processSamples(samples: Float32Array) {
     if (!this.decoder) return null;
-    
+
     const progress = this.decoder.process_samples(samples);
     const result = {
-        received: progress.received_packets,
-        needed: progress.needed_packets,
-        rank: progress.rank_packets,
-        stalled: progress.stalled_packets,
-        dependent: progress.dependent_packets,
-        duplicate: progress.duplicate_packets,
-        crcErrors: progress.crc_error_packets,
-        parseErrors: progress.parse_error_packets,
-        invalidNeighbors: progress.invalid_neighbor_packets,
-        lastPacketSeq: progress.last_packet_seq,
-        lastRankUpSeq: progress.last_rank_up_seq,
-        progress: progress.progress,
-        complete: progress.complete,
-        basisMatrix: progress.basis_matrix,
-        decoderProc: this.decoderProcessorStats,
+      received: progress.received_packets,
+      needed: progress.needed_packets,
+      rank: progress.rank_packets,
+      stalled: progress.stalled_packets,
+      dependent: progress.dependent_packets,
+      duplicate: progress.duplicate_packets,
+      crcErrors: progress.crc_error_packets,
+      parseErrors: progress.parse_error_packets,
+      invalidNeighbors: progress.invalid_neighbor_packets,
+      lastPacketSeq: progress.last_packet_seq,
+      lastRankUpSeq: progress.last_rank_up_seq,
+      progress: progress.progress,
+      complete: progress.complete,
+      basisMatrix: progress.basis_matrix,
+      decoderProc: this.decoderProcessorStats,
     };
 
     if (this.onProgress) {
-        this.onProgress(result);
+      this.onProgress(result);
     }
 
     if (progress.complete) {
@@ -373,7 +373,7 @@ export class MistcastBackend {
       }
       this.decoder = null;
     }
-    
+
     return result;
   }
 

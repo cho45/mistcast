@@ -379,8 +379,6 @@ impl Decoder {
                 self.current_sync = None;
                 self.tracking_state = None;
                 self.last_search_idx = 0;
-                self.sample_buffer_i.clear();
-                self.sample_buffer_q.clear();
             }
         }
 
@@ -1217,6 +1215,50 @@ mod tests {
         let recovered = decoder
             .recovered_data()
             .expect("Decoder should recover data under carrier offset (needs tracking)");
+        assert_eq!(&recovered[..data.len()], &data[..]);
+    }
+
+    #[test]
+    fn test_decoder_continuous_multiple_bursts() {
+        use crate::mary::encoder::Encoder;
+        let config = DspConfig::default_48k();
+        let mut encoder = Encoder::new(config.clone());
+        
+        let data_size = 160;
+        let fountain_k = 10;
+        let mut decoder = Decoder::new(data_size, fountain_k, config.clone());
+        decoder.packets_per_sync_burst = 1; // 1パケットごとに同期が必要な設定
+        
+        let data = vec![0x55u8; data_size];
+        encoder.set_data(&data);
+        
+        let mut total_signal = Vec::new();
+        // 20フレーム分生成（冗長性を持たせる）
+        for _ in 0..20 {
+            if let Some(frame) = encoder.encode_frame() {
+                total_signal.extend(frame);
+            }
+        }
+        total_signal.extend(encoder.flush());
+        total_signal.extend(vec![0.0; 1000]);
+
+        // 32768サンプルずつのチャンクで処理
+        // 1フレームが約7300サンプルのため、1つのチャンクに4〜5フレームが含まれる。
+        // バースト終了時の clear() により、チャンク内の後続フレームがすべて消失するはず。
+        for chunk in total_signal.chunks(32768) {
+            decoder.process_samples(chunk);
+            if decoder.recovered_data().is_some() {
+                break;
+            }
+        }
+
+        let progress = decoder.progress();
+        println!("Final received packets: {}", progress.received_packets);
+        
+        // 現状ではバッファクリアによりパケットがドロップされるため、
+        // 本来10パケット必要なところ、1パケット程度しか受信できず失敗することを期待する
+        assert!(progress.complete, "Should recover data from continuous bursts. Received {}/{} packets", progress.received_packets, fountain_k);
+        let recovered = decoder.recovered_data().expect("Should have recovered data");
         assert_eq!(&recovered[..data.len()], &data[..]);
     }
 }
