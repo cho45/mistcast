@@ -13,7 +13,13 @@
     "close": "Close",
     "error": "Error",
     "success": "Success",
-    "init_info": "Initialize the audio system to start broadcasting or receiving data.",
+    "init_info": "Initialize the audio context to start signal transmission and reception.",
+    "init_desc": "Mistcast is a tool for acoustic data communication, enabling network-independent data transfer.",
+    "init_features": {
+      "acoustic": "Packet transmission via acoustic physical layer",
+      "airgap": "Supports data exchange in air-gapped environments",
+      "browser": "Operates entirely within the browser using Web Audio API"
+    },
     "copy": "Copy",
     "copied": "Copied!"
   },
@@ -58,7 +64,7 @@
     },
     "guide": {
       "mic_error": "Microphone access failed. Check browser permissions and retry.",
-      "success": "Packet decoded successfully!",
+      "success": "Data decoding complete",
       "receiving": "Receiving packets... (Progress: {progress}%)",
       "signal_loss": "Signal lost. Data might be incomplete.",
       "high_error": "High error rate detected. Check volume or distance.",

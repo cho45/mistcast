@@ -168,12 +168,25 @@ defineExpose({
 
     <main class="content">
       <section v-if="!runtime.coreReady.value" class="panel init-panel">
-        <p>{{ $t('common.init_info') }}</p>
-        <button
-          @click="initialize"
-          class="btn btn-primary btn-large"
-          :disabled="isInitializing"
-        >{{ isInitializing ? $t('sender.status.preparing') : $t('common.start') }}</button>
+        <div class="init-content">
+          <p class="init-desc">{{ $t('common.init_desc') }}</p>
+          <ul class="init-features">
+            <li>{{ $t('common.init_features.acoustic') }}</li>
+            <li>{{ $t('common.init_features.airgap') }}</li>
+            <li>{{ $t('common.init_features.browser') }}</li>
+          </ul>
+        </div>
+
+        <div class="init-action">
+          <p class="init-hint">{{ $t('common.init_info') }}</p>
+          <button
+            @click="initialize"
+            class="btn btn-primary btn-large btn-init"
+            :disabled="isInitializing"
+          >
+            {{ isInitializing ? $t('sender.status.preparing') : $t('common.start') }}
+          </button>
+        </div>
       </section>
 
       <template v-else>
@@ -615,7 +628,60 @@ defineExpose({
 }
 
 .init-panel {
+  max-width: 560px;
+  margin: 3rem auto;
+  padding: 3rem 2rem;
   text-align: center;
+}
+
+.init-content {
+  margin-bottom: 2.5rem;
+}
+
+.init-desc {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: #1e293b;
+  line-height: 1.6;
+  margin-bottom: 1.5rem;
+}
+
+.init-features {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  text-align: center;
+}
+
+.init-features li {
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.init-features li::before {
+  content: '•';
+  margin-right: 0.5rem;
+  color: var(--primary);
+  font-weight: bold;
+}
+
+.init-action {
+  padding-top: 2rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.init-hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 1.25rem;
+}
+
+.btn-init {
+  padding: 1rem 3rem;
+  font-size: 1.1rem;
 }
 
 textarea {
