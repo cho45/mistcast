@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, onUnmounted, ref, useAttrs, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
@@ -56,12 +57,14 @@ const isDragging = ref(false);
 const toasts = ref<Toast[]>([]);
 let toastIdCounter = 0;
 
+const { t } = useI18n();
+
 const displayStatus = computed(() => {
   switch (senderStatus.value) {
-    case 'idle': return 'Idle';
-    case 'ready': return 'Ready';
-    case 'preparing': return 'Preparing...';
-    case 'transmitting': return 'Transmitting...';
+    case 'idle': return t('sender.status.idle');
+    case 'ready': return t('sender.status.ready');
+    case 'preparing': return t('sender.status.preparing');
+    case 'transmitting': return t('sender.status.broadcasting');
     default: return senderStatus.value;
   }
 });
@@ -396,12 +399,12 @@ defineExpose({
   >
     <div class="sender-header">
       <div class="sender-title-row">
-        <h2>Sender</h2>
+        <h2>{{ $t('common.sender') }}</h2>
         <div class="status-chip" :class="senderStatus">
           {{ displayStatus }}
         </div>
       </div>
-      <p class="panel-sub">Text / Image を音響フレームへ変調して送信</p>
+      <p class="panel-sub">{{ $t('settings.modem.label') }} / {{ $t('settings.transmission.randomize') }}</p>
     </div>
 
     <!-- 送信タイプ選択（セグメントコントロール風） -->
@@ -414,7 +417,7 @@ defineExpose({
         @click="sendMode = 'text'"
       >
         <span class="tab-icon">📝</span>
-        <span class="tab-text">Text</span>
+        <span class="tab-text">{{ $t('sender.mode.text') }}</span>
       </button>
       <button
         type="button"
@@ -424,7 +427,7 @@ defineExpose({
         @click="sendMode = 'sample'"
       >
         <span class="tab-icon">🖼️</span>
-        <span class="tab-text">Sample</span>
+        <span class="tab-text">{{ $t('sender.mode.sample') }}</span>
       </button>
       <button
         type="button"
@@ -434,7 +437,7 @@ defineExpose({
         @click="sendMode = 'file'"
       >
         <span class="tab-icon">📁</span>
-        <span class="tab-text">File</span>
+        <span class="tab-text">{{ $t('sender.mode.file') }}</span>
       </button>
     </div>
 
@@ -443,7 +446,7 @@ defineExpose({
       <textarea
         v-model="inputText"
         rows="4"
-        placeholder="Enter text to broadcast..."
+        :placeholder="$t('sender.input.placeholder')"
         :disabled="isTransmitting"
       />
     </div>
@@ -451,7 +454,7 @@ defineExpose({
     <!-- サンプル画像プレビュー（サンプルモード時のみ表示） -->
     <div v-if="sendMode === 'sample'" class="sample-preview">
       <img src="../assets/sample-files/test.png" alt="Sample Image" />
-      <div class="sample-info">test.png ({{ SAMPLE_FILE_SIZE }} bytes)</div>
+      <div class="sample-info">{{ $t('sender.sample.info') }}</div>
     </div>
 
     <!-- ファイル選択エリア（ファイルモード時のみ表示） -->
@@ -463,7 +466,7 @@ defineExpose({
           <div class="file-name">{{ selectedFile.name }}</div>
           <div class="file-size">{{ selectedFile.size }} bytes</div>
         </div>
-        <button class="remove-file-btn" @click="clearFile" title="ファイルをクリア">×</button>
+        <button class="remove-file-btn" @click="clearFile" :title="$t('common.clear')">×</button>
       </div>
 
       <!-- ドラッグ&ドロップエリア -->
@@ -478,8 +481,8 @@ defineExpose({
         @drop.prevent="handleDrop"
       >
         <div class="drop-content">
-          <div class="drop-text">ファイルをドロップ または クリックして選択</div>
-          <div class="drop-hint">最大4KBまで</div>
+          <div class="drop-text">{{ $t('sender.input.drop_hint') }}</div>
+          <div class="drop-hint">MAX 4KB</div>
         </div>
       </div>
     </div>
@@ -500,15 +503,15 @@ defineExpose({
           :disabled="!canSend || isPreparing || !runtime.coreReady.value"
           @click="handleSend"
         >
-          {{ isPreparing ? 'Preparing...' : sendButtonText }}
+          {{ isPreparing ? $t('sender.status.preparing') : $t('common.start') }}
         </button>
       </template>
-      <button v-else @click="stopSending" class="btn btn-danger btn-large">Stop Broadcasting</button>
+      <button v-else @click="stopSending" class="btn btn-danger btn-large">{{ $t('common.stop') }}</button>
     </div>
 
     <SpectrumCanvas
       :analyser-node="analyserNode"
-      title="Sender FFT (Linear Frequency Axis)"
+      title="Sender FFT"
     />
   </section>
 

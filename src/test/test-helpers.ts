@@ -1,6 +1,8 @@
-import { h, ref } from 'vue';
-import { provideDemoRuntime, type ModemMode, type SenderStatus, type ReceiverStatus } from '../demo-runtime';
-import { provideSettings } from '../composables/useSettings';
+import { ref } from 'vue';
+import { mount } from '@vue/test-utils';
+import { DemoRuntimeKey, type ModemMode, type SenderStatus, type ReceiverStatus } from '../demo-runtime';
+import { SettingsKey, type AppSettings } from '../composables/useSettings';
+import i18n from '../i18n';
 
 export function createMockRuntime() {
   return {
@@ -41,13 +43,34 @@ export function createMockRuntime() {
   };
 }
 
-export function mountWithRuntime(component: any) {
-  const TestWrapper = {
-    setup() {
-      provideDemoRuntime(createMockRuntime());
-      provideSettings();
-      return () => h(component);
-    },
+export function createMockSettings() {
+  const settings = ref<AppSettings>({
+    modemMode: 'mary',
+    debugMode: false,
+    randomizeSeq: false,
+    language: 'auto'
+  });
+  return {
+    settings,
+    saveSettings: () => {}
   };
-  return TestWrapper;
+}
+
+/**
+ * マウント対象コンポーネントにruntimeとsettingsを提供し、
+ * i18nプラグインをインストールしてマウントする。
+ */
+export function mountApp(component: any, options: any = {}) {
+  return mount(component, {
+    ...options,
+    global: {
+      ...options.global,
+      plugins: [i18n, ...(options.global?.plugins || [])],
+      provide: {
+        [DemoRuntimeKey as any]: createMockRuntime(),
+        [SettingsKey as any]: createMockSettings(),
+        ...options.global?.provide
+      }
+    }
+  });
 }

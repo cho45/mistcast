@@ -1,9 +1,12 @@
 import { inject, provide, ref, watch, type InjectionKey } from 'vue';
 
+export type AppLanguage = 'auto' | 'en' | 'ja';
+
 export interface AppSettings {
   modemMode: 'dsss' | 'mary';
   debugMode: boolean;
   randomizeSeq: boolean;
+  language: AppLanguage;
 }
 
 const STORAGE_KEY = 'mistcast_settings';
@@ -12,9 +15,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   modemMode: 'mary',
   debugMode: false,
   randomizeSeq: false,
+  language: 'auto',
 };
 
-const SettingsKey: InjectionKey<ReturnType<typeof useSettings>> = Symbol('Settings');
+export const SettingsKey: InjectionKey<ReturnType<typeof useSettings>> = Symbol('Settings');
 
 function loadSettings(): AppSettings {
   try {

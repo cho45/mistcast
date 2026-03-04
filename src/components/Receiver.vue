@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
@@ -90,29 +91,32 @@ onUnmounted(() => {
 
 const guideMessage = computed(() => {
   if (receiverStatus.value === 'mic-error') {
-    return { text: 'Microphone access failed. Check browser permissions and retry.', type: 'error' };
+    return { text: t('receiver.guide.mic_error'), type: 'error' };
   }
   if (progressPercent.value >= 1.0) {
-    return { text: 'Decoding complete! Successfully recovered the original data.', type: 'success' };
+    return { text: t('receiver.guide.success'), type: 'success' };
   }
 
   // 1. 信号中断の検知 (受信中なのに一定時間更新がない)
   if (receivedPackets.value > 0 && rxNoChangeTicks.value > 120) {
-    return { text: 'Signal lost or interrupted. Check the sender or increase volume.', type: 'warning' };
+    return { text: t('receiver.guide.signal_loss'), type: 'warning' };
   }
 
   // 2. 高エラー率の検知 (パケット破損が多い)
   const totalAttempts = receivedPackets.value + crcErrorPackets.value;
   if (totalAttempts > 10 && (crcErrorPackets.value / totalAttempts) > 0.4) {
-    return { text: 'High error rate detected. Try reducing noise or adjusting distance.', type: 'warning' };
+    return { text: t('receiver.guide.high_error'), type: 'warning' };
   }
 
   // 3. 正常受信中
   if (receivedPackets.value > 0) {
-    return { text: 'Receiving packets... Keep the environment quiet for better results.', type: 'active' };
+    return {
+      text: t('receiver.guide.receiving', { progress: Math.round(progressPercent.value * 100) }),
+      type: 'info'
+    };
   }
 
-  return { text: 'Waiting for signal. Start broadcasting from the sender.', type: 'info' };
+  return { text: t('receiver.guide.waiting'), type: 'info' };
 });
 
 const inputLevelPercent = computed(() => {
@@ -126,14 +130,17 @@ const inputLevelPercent = computed(() => {
   return Math.min(Math.max(percent, 0), 100);
 });
 
+const { t } = useI18n();
+
 const displayStatus = computed(() => {
   switch (receiverStatus.value) {
-    case 'idle': return 'Idle';
-    case 'ready-rx-standby': return 'Ready (Rx standby)';
-    case 'mic-active-rx': return 'Mic Active (Rx)';
-    case 'internal-loopback': return 'Internal Loopback';
-    case 'decoded': return 'Decoded!';
-    case 'mic-error': return 'Mic Error';
+    case 'idle': return t('receiver.status.idle');
+    case 'ready-rx-standby': return t('receiver.status.ready');
+    case 'mic-active-rx': return t('receiver.status.ready');
+    case 'internal-loopback': return t('receiver.status.ready');
+    case 'receiving': return t('receiver.status.receiving');
+    case 'decoded': return t('receiver.status.decoded');
+    case 'mic-error': return t('receiver.status.error');
     default: return receiverStatus.value;
   }
 });
@@ -324,6 +331,11 @@ function makeOnProgressCallback() {
     lastPacketSeq.value = p.lastPacketSeq ?? -1;
     lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
     progressPercent.value = p.progress;
+
+    // ステータス更新: パケットを受信し始めており、かつ未完了・未エラーの場合
+    if (receivedPackets.value > 0 && progressPercent.value < 1.0 && receiverStatus.value !== 'error' && receiverStatus.value !== 'mic-error') {
+      receiverStatus.value = 'receiving';
+    }
 
     if (p.basisMatrix && basisCanvas.value) {
       const matrix = p.basisMatrix as Uint8Array;
@@ -597,15 +609,15 @@ defineExpose({
   <section class="panel receiver-panel">
     <div class="receiver-header">
       <div class="receiver-title-row">
-        <h2>Receiver</h2>
+        <h2>{{ $t('common.receiver') }}</h2>
         <div class="status-chip" :class="receiverStatus">
           {{ displayStatus }}
         </div>
       </div>
       <div class="receiver-controls">
         <div class="mode-tabs">
-          <button @click="switchInputMode('loopback')" :class="{ active: inputMode === 'loopback' }" :disabled="isTogglingMic">Loopback</button>
-          <button @click="switchInputMode('mic')" :class="{ active: inputMode === 'mic' }" :disabled="isTogglingMic">Microphone</button>
+          <button @click="switchInputMode('loopback')" :class="{ active: inputMode === 'loopback' }" :disabled="isTogglingMic">{{ $t('receiver.input_mode.loopback') }}</button>
+          <button @click="switchInputMode('mic')" :class="{ active: inputMode === 'mic' }" :disabled="isTogglingMic">{{ $t('receiver.input_mode.mic') }}</button>
         </div>
       </div>
       <div class="path-banner">
@@ -639,12 +651,12 @@ defineExpose({
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" :style="{ width: `${progressPercent * 100}%` }" />
       </div>
-      <div class="basis-panel" v-if="progressPercent < 1.0 && receivedPackets > 0" data-tooltip="ガウスの消去法によるランク更新の可視化。各パケットは行ベクトルとして表現され、青いセルは非ゼロ要素を表します。左下三角領域（灰色）は、前進消去によって常にゼロに保たれる領域です。白色のセルはまだ処理されていない上三角部分のゼロ要素です。">
-        <p class="basis-title">Basis Matrix (Gaussian Elimination) ({{ basisMatrixK }}x{{ basisMatrixK }}, {{ basisMatrixK * 16 * 8 }}bits)</p>
+      <div class="basis-panel" v-if="progressPercent < 1.0 && receivedPackets > 0">
+        <p class="basis-title">{{ $t('receiver.basis.title', { k: basisMatrixK, bits: basisMatrixK * 16 * 8 }) }}</p>
         <canvas ref="basisCanvas" class="basis-canvas"></canvas>
       </div>
       <div class="display" v-if="progressPercent >= 1.0">
-        <p class="display-title">Decoded Result</p>
+        <p class="display-title">{{ $t('receiver.result.title') }}</p>
         <pre v-if="outputText">{{ outputText }}</pre>
         <div v-else-if="outputImageUrl" class="image-result">
           <img :src="outputImageUrl" :alt="`decoded image (${outputImageMime || 'unknown'})`" />
@@ -659,38 +671,38 @@ defineExpose({
       </div>
       <div class="progress-footer">
         <button @click="reset" class="btn btn-clear-action" :disabled="!runtime.coreReady.value || isTogglingMic">
-          Clear & Reset
+          {{ $t('common.clear') }} & {{ $t('common.reset') }}
         </button>
       </div>
     </div>
 
     <SpectrumCanvas
       :analyser-node="rxAnalyserNode"
-      title="Receiver FFT (Linear Frequency Axis)"
+      title="Receiver FFT"
     />
 
     <div class="metric-grid" v-if="settings.debugMode">
-      <div class="metric" data-tooltip="正常に受信してシステムに受け入れられたパケットの総数"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
-      <div class="metric" data-tooltip="受信したが、既存のパケットと線形従属の関係にあるため行列のランク上昇に寄与していないパケット数。GF(256) で必要なパケット数が k のとき、現在のランクが r だと次のパケットが従属になる確率は約 1/256^(k-r)"><span>Stall</span><strong>{{ stalledPackets }}</strong><small>(現在重複確率: {{ stallProbability }}%)</small></div>
-      <div class="metric" data-tooltip="他のパケットと線形従属の関係にあり、行列のランクを上げるためにまだ他のパケットの受信を待っているパケット数"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
-      <div class="metric" data-tooltip="以前に受信したパケットと同じシーケンス番号を持つ重複パケット数。シーケンス番号は16bit（0-65535）で、65536パケット送信すると一周して重複が発生する可能性あり"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
-      <div class="metric" data-tooltip="CRCチェックに失敗したパケット数（ノイズや伝送エラーでデータが破損）"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
-      <div class="metric" data-tooltip="パケットの解析に失敗したパケット数（フォーマット不正や構造エラー）"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
-      <div class="metric" data-tooltip="近隣パケット間の整合性チェックに失敗したパケット数"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
-      <div class="metric" data-tooltip="最後に受信したパケットのシーケンス番号（-1は未受信）"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
-      <div class="metric" data-tooltip="最後に行列のランクが上昇した際のパケットシーケンス番号（復号の進捗指標）"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.accepted')"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.stall')"><span>Stall</span><strong>{{ stalledPackets }}</strong><small>{{ $t('receiver.metrics.stall_probability', { prob: stallProbability }) }}</small></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.dep')"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.dup')"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.crc')"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.parse')"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.inv_nbr')"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_seq')"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_rank_up')"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
     </div>
 
     <div class="proc-stats" v-if="settings.debugMode">
-      <p class="proc-title">DecoderProcessor Timing</p>
+      <p class="proc-title">{{ $t('receiver.timing.title') }}</p>
       <div class="proc-grid">
-        <div data-tooltip="1ブロックあたりの平均処理時間（全ブロックの平均値）"><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
-        <div data-tooltip="1ブロックの処理時間の最大値（ピーク負荷時のパフォーマンス指標）"><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
-        <div data-tooltip="直近のブロック処理時間（最新の処理パフォーマンス）"><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
-        <div data-tooltip="1ブロックの処理に割り当てられた時間バジェット（サンプリングレートとバッファサイズから算出）"><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
-        <div data-tooltip="処理時間がバジェットを超過した回数（リアルタイム処理失敗の指標、超過するとパケット損失の原因）"><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
-        <div data-tooltip="入力信号の実効値（0に近いほど静寂、大きいほど信号あり）"><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
-        <div data-tooltip="処理したオーディオブロックの総数"><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.avg')"><span>avg</span><strong>{{ decoderProcAvgMs.toFixed(3) }} ms</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.max')"><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.last')"><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.budget')"><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.overrun')"><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.input_rms')"><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
+        <div :data-tooltip="$t('receiver.timing.tooltips.blocks')"><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
       </div>
     </div>
 

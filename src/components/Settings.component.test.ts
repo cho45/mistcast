@@ -1,61 +1,59 @@
-import { describe, it, expect, vi } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { describe, it, expect } from 'vitest';
 import Settings from './Settings.vue';
-import { mountWithRuntime } from '../test/test-helpers';
+import { mountApp } from '../test/test-helpers';
 
 describe('Settings.vue', () => {
-  const TestWrapper = mountWithRuntime(Settings);
-
   it('should mount without errors', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     expect(wrapper.exists()).toBe(true);
   });
 
   it('should render settings panel', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     expect(wrapper.find('.settings-panel').exists()).toBe(true);
-    expect(wrapper.find('h2').text()).toBe('Settings');
+    expect(wrapper.find('h2').text()).toBe('System Settings');
   });
 
   it('should render Common section with Modem Mode', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     expect(wrapper.find('.section-title').exists()).toBe(true);
-    expect(wrapper.findAll('.section-title')[0].text()).toBe('Common');
+    // 0: Language, 1: Modem Mode (Common), 2: Sender
+    expect(wrapper.findAll('.section-title')[1].text()).toBe('Modem Mode (PHY)');
 
     // Modem Mode セレクタが存在する
     expect(wrapper.find('.mode-selector').exists()).toBe(true);
   });
 
   it('should render two Modem Mode buttons', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     const modeButtons = wrapper.findAll('.mode-btn');
     expect(modeButtons.length).toBe(2);
-    expect(modeButtons[0].text()).toContain('DSSS (Slow)');
-    expect(modeButtons[1].text()).toContain('M-ARY (Fast)');
+    expect(modeButtons[0].text()).toContain('DSSS (Robust)');
+    expect(modeButtons[1].text()).toContain('M-ary (Fast)');
   });
 
   it('should render Debug Mode checkbox', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
-    // Debug Modeのチェックボックスを見つける
+    // checkboxを見つける
     const checkboxes = wrapper.findAll('input[type="checkbox"]');
     expect(checkboxes.length).toBeGreaterThan(0);
   });
 
   it('should render Sender section with Randomized Seq', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     const sectionTitles = wrapper.findAll('.section-title');
-    expect(sectionTitles.length).toBeGreaterThan(1);
-    expect(sectionTitles[1].text()).toBe('Sender');
+    expect(sectionTitles.length).toBeGreaterThan(2);
+    expect(sectionTitles[2].text()).toBe('Sender');
   });
 
   it('should render Randomized Seq checkbox in Sender section', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     // 2つのcheckboxがあるべき（Debug ModeとRandomized Seq）
     const checkboxes = wrapper.findAll('input[type="checkbox"]');
@@ -63,14 +61,14 @@ describe('Settings.vue', () => {
   });
 
   it('should have Mary mode active by default', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     const modeButtons = wrapper.findAll('.mode-btn');
     expect(modeButtons[1].classes()).toContain('active');
   });
 
   it('should enable Modem Mode buttons when runtime is not busy', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Settings);
 
     const modeButtons = wrapper.findAll('.mode-btn');
     modeButtons.forEach(btn => {

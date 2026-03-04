@@ -1,0 +1,127 @@
+{
+  "common": {
+    "sender": "Sender",
+    "receiver": "Receiver",
+    "settings": "Settings",
+    "start": "Start",
+    "stop": "Stop",
+    "reset": "Reset",
+    "clear": "Clear",
+    "done": "Done",
+    "close": "Close",
+    "error": "Error",
+    "success": "Success",
+    "init_info": "Initialize the audio system to start broadcasting or receiving data.",
+    "copy": "Copy",
+    "copied": "Copied!"
+  },
+  "sender": {
+    "mode": {
+      "text": "Text",
+      "file": "File",
+      "sample": "Sample"
+    },
+    "status": {
+      "idle": "Idle",
+      "ready": "Ready",
+      "preparing": "Preparing...",
+      "broadcasting": "Broadcasting"
+    },
+    "input": {
+      "placeholder": "Enter text to broadcast...",
+      "drop_hint": "Drop file here or click to browse",
+      "limit_exceeded": "Data exceeds maximum limit ({size} bytes)"
+    },
+    "sample": {
+      "info": "This is a built-in sample image (921 bytes)."
+    },
+    "toasts": {
+      "file_too_large": "File too large! Maximum is {max} KB.",
+      "text_too_large": "Text too large! Maximum is {max} bytes.",
+      "file_selected": "File selected: {name}",
+      "text_copied": "Decoded text copied to clipboard!"
+    }
+  },
+  "receiver": {
+    "input_mode": {
+      "loopback": "Loopback",
+      "mic": "Microphone"
+    },
+    "status": {
+      "idle": "Idle",
+      "ready": "Ready",
+      "receiving": "Receiving...",
+      "decoded": "Decoded!",
+      "error": "Error"
+    },
+    "guide": {
+      "mic_error": "Microphone access failed. Check browser permissions and retry.",
+      "success": "Packet decoded successfully!",
+      "receiving": "Receiving packets... (Progress: {progress}%)",
+      "signal_loss": "Signal lost. Data might be incomplete.",
+      "high_error": "High error rate detected. Check volume or distance.",
+      "waiting": "Waiting for signal..."
+    },
+    "basis": {
+      "title": "Basis Matrix (Gaussian Elimination) ({k}x{k}, {bits} bits)"
+    },
+    "metrics": {
+      "title": "Technical Metrics",
+      "throughput": "Throughput",
+      "error_rate": "Error Rate",
+      "snr": "SNR",
+      "packets": "Packets",
+      "stall_probability": "(Stall Prob: {prob}%)",
+      "tooltips": {
+        "accepted": "Total number of packets successfully received and accepted by the system.",
+        "stall": "Packets received but linearly dependent on existing ones, thus not contributing to rank increase. Probability of stall is 1/256^(k-r) in GF(256).",
+        "dep": "Linearly dependent packets waiting for other packets to increase the matrix rank.",
+        "dup": "Packets with duplicate sequence numbers. 16-bit sequence numbers (0-65535) may wrap around after 65,536 packets.",
+        "crc": "Packets that failed CRC check (data corruption due to noise or interference).",
+        "parse": "Packets that failed to parse (invalid format or structural error).",
+        "inv_nbr": "Packets that failed consistency check between neighboring packets.",
+        "last_seq": "Sequence number of the most recently received packet (-1 if none).",
+        "last_rank_up": "Sequence number of the packet that last increased the matrix rank (decoding progress indicator)."
+      }
+    },
+    "timing": {
+      "title": "DecoderProcessor Timing",
+      "tooltips": {
+        "avg": "Average processing time per audio block (mean of all processed blocks).",
+        "max": "Maximum processing time per block (bottleneck indicator under peak load).",
+        "last": "Processing time of the most recent audio block.",
+        "budget": "Time budget allocated for one block (calculated from sample rate and buffer size).",
+        "overrun": "Number of times processing exceeded the budget (causes real-time dropouts and packet loss).",
+        "input_rms": "Root Mean Square of the input signal (0 is silence, higher is active signal).",
+        "blocks": "Total number of audio blocks processed by the decoder."
+      }
+    },
+    "result": {
+      "title": "Decoded Result",
+      "size": "Size: {size} bytes",
+      "preview": "Image Preview"
+    }
+  },
+  "settings": {
+    "title": "System Settings",
+    "language": {
+      "label": "Language",
+      "auto": "Auto (Browser)",
+      "en": "English",
+      "ja": "日本語"
+    },
+    "modem": {
+      "label": "Modem Mode (PHY)",
+      "dsss": "DSSS (Robust)",
+      "mary": "M-ary (Fast)"
+    },
+    "debug": {
+      "label": "Debug Mode",
+      "desc": "Show technical metrics and detailed logs"
+    },
+    "transmission": {
+      "randomize": "Randomize Sequence",
+      "desc": "Randomizes packet sequence numbers to improve transmission robustness"
+    }
+  }
+}

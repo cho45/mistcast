@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue';
+import i18n, { resolveLanguage } from './i18n';
 import Sender from './components/Sender.vue';
 import Receiver from './components/Receiver.vue';
 import Settings from './components/Settings.vue';
@@ -42,7 +43,12 @@ async function ensureAudioCore(): Promise<AudioCore> {
 const runtime = createDemoRuntime(ensureAudioCore);
 provideDemoRuntime(runtime);
 
-const settings = provideSettings();
+const { settings } = provideSettings();
+
+// 言語設定の同期
+watch(() => settings.value.language, (lang) => {
+  (i18n.global.locale as any).value = resolveLanguage(lang);
+}, { immediate: true });
 
 const activeTab = ref<'sender' | 'receiver'>((localStorage.getItem('mistcast_active_tab') as any) || 'sender');
 const settingsDialog = ref<HTMLDialogElement | null>(null);
@@ -127,7 +133,7 @@ defineExpose({
                 @click.stop="runtime.senderStatus.value === 'transmitting' ? runtime.onStopSender.value?.() : runtime.onStartSender.value?.()"
               >
                 <span class="chip-icon" :class="{ pulse: runtime.senderStatus.value === 'transmitting' }">📡</span>
-                <span class="chip-action">{{ runtime.senderStatus.value === 'transmitting' ? 'Stop' : (runtime.senderStatus.value === 'preparing' ? '...' : 'Start') }}</span>
+                <span class="chip-action">{{ runtime.senderStatus.value === 'transmitting' ? $t('common.stop') : (runtime.senderStatus.value === 'preparing' ? '...' : $t('common.start')) }}</span>
               </button>
 
               <!-- Receiver Status Chip -->
@@ -142,19 +148,19 @@ defineExpose({
                 <span class="chip-label" v-if="runtime.receiverStatus.value !== 'decoded'">
                   {{ `${(runtime.receiverProgress.value * 100).toFixed(0)}%` }}
                 </span>
-                <span v-if="runtime.receiverStatus.value === 'decoded'" class="chip-action">Reset</span>
+                <span v-if="runtime.receiverStatus.value === 'decoded'" class="chip-action">{{ $t('common.reset') }}</span>
               </button>
             </TransitionGroup>
           </div>
         </div>
-        <button class="settings-trigger" @click="openSettings" aria-label="Open Settings">
-          <img src="./assets/settings.svg" alt="Settings" class="settings-icon" />
+        <button class="settings-trigger" @click="openSettings" :aria-label="$t('common.settings')">
+          <img src="./assets/settings.svg" :alt="$t('common.settings')" class="settings-icon" />
         </button>
       </div>
     </header>
 
     <dialog ref="settingsDialog" class="settings-dialog" @click="handleDialogClick">
-      <button class="dialog-close" @click="closeSettings" aria-label="Close Settings">×</button>
+      <button class="dialog-close" @click="closeSettings" :aria-label="$t('common.close')">×</button>
       <div class="dialog-content">
         <Settings />
       </div>
@@ -162,18 +168,18 @@ defineExpose({
 
     <main class="content">
       <section v-if="!runtime.coreReady.value" class="panel init-panel">
-        <p>まず Audio System を初期化して、送受信ノードを作成します。</p>
+        <p>{{ $t('common.init_info') }}</p>
         <button
           @click="initialize"
           class="btn btn-primary btn-large"
           :disabled="isInitializing"
-        >{{ isInitializing ? 'Initializing...' : 'Initialize Audio System' }}</button>
+        >{{ isInitializing ? $t('sender.status.preparing') : $t('common.start') }}</button>
       </section>
 
       <template v-else>
         <nav class="app-tabs">
-          <button @click="activeTab = 'sender'" class="tab-btn" :class="{ active: activeTab === 'sender' }">Sender</button>
-          <button @click="activeTab = 'receiver'" class="tab-btn" :class="{ active: activeTab === 'receiver' }">Receiver</button>
+          <button @click="activeTab = 'sender'" class="tab-btn" :class="{ active: activeTab === 'sender' }">{{ $t('common.sender') }}</button>
+          <button @click="activeTab = 'receiver'" class="tab-btn" :class="{ active: activeTab === 'receiver' }">{{ $t('common.receiver') }}</button>
         </nav>
         <div class="panel-container">
           <Sender class="panel-item" :class="{ 'is-active': activeTab === 'sender' }" />

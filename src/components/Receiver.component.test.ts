@@ -1,13 +1,25 @@
-import { describe, it, expect } from 'vitest';
-import { mount } from '@vue/test-utils';
+import { describe, it, expect, vi } from 'vitest';
 import Receiver from './Receiver.vue';
-import { mountWithRuntime } from '../test/test-helpers';
+import { mountApp } from '../test/test-helpers';
 
 describe('Receiver.vue', () => {
-  const TestWrapper = mountWithRuntime(Receiver);
+  it('should display correct localized status', async () => {
+    const wrapper = mountApp(Receiver);
+    const vm = wrapper.vm as any;
+
+    expect(wrapper.find('.status-chip').text()).toBe('Idle');
+
+    vm.receiverStatus = 'mic-active-rx';
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.status-chip').text()).toBe('Ready');
+
+    vm.receiverStatus = 'receiving';
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.status-chip').text()).toBe('Receiving...');
+  });
 
   it('should mount without errors', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Receiver);
 
     expect(wrapper.exists()).toBe(true);
     expect(wrapper.find('.receiver-panel').exists()).toBe(true);
@@ -15,7 +27,7 @@ describe('Receiver.vue', () => {
   });
 
   it('should have initial state', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Receiver);
 
     // デフォルト（Debug Mode: false）では metric-grid は表示されない
     expect(wrapper.find('.metric-grid').exists()).toBe(false);
@@ -26,7 +38,7 @@ describe('Receiver.vue', () => {
   });
 
   it('should render input mode tabs and clear button', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Receiver);
 
     // 入力モードのタブボタンを確認
     const loopbackTab = wrapper.findAll('.mode-tabs button').find(btn => btn.text().includes('Loopback'));
@@ -42,21 +54,21 @@ describe('Receiver.vue', () => {
 
   describe('Debug Mode', () => {
     it('should not show proc-stats when debugMode is false', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Receiver);
 
       // debugModeがfalseの場合、proc-statsは表示されない
       expect(wrapper.find('.proc-stats').exists()).toBe(false);
     });
 
     it('should not show rx-log when debugMode is false', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Receiver);
 
       // debugModeがfalseの場合、rx-logは表示されない
       expect(wrapper.find('.rx-log').exists()).toBe(false);
     });
 
     it('should show metric-grid and proc-stats when debugMode is true', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Receiver);
       const receiver = wrapper.findComponent(Receiver);
 
       // debugModeをtrueに設定
@@ -70,7 +82,7 @@ describe('Receiver.vue', () => {
     });
 
     it('should show rx-log when debugMode is true and logs exist', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Receiver);
       const receiver = wrapper.findComponent(Receiver);
 
       // debugModeをtrueに設定

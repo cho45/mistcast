@@ -24,7 +24,7 @@ export type DemoRuntime = {
   ensureAudioCore: () => Promise<AudioCore>;
 };
 
-const DemoRuntimeKey: InjectionKey<DemoRuntime> = Symbol('DemoRuntime');
+export const DemoRuntimeKey: InjectionKey<DemoRuntime> = Symbol('DemoRuntime');
 
 export function createDemoRuntime(ensureAudioCore: () => Promise<AudioCore>): DemoRuntime {
   const coreReady = ref(false);

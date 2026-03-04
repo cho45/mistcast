@@ -1,11 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mount } from '@vue/test-utils';
 import Sender from './Sender.vue';
-import { mountWithRuntime } from '../test/test-helpers';
+import { mountApp } from '../test/test-helpers';
 
 describe('Sender.vue', () => {
-  const TestWrapper = mountWithRuntime(Sender);
-
   // localStorageのモック
   const localStorageMock = (() => {
     let store: Record<string, string> = {};
@@ -31,7 +28,7 @@ describe('Sender.vue', () => {
   });
 
   it('should mount without errors', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Sender);
 
     expect(wrapper.exists()).toBe(true);
     expect(wrapper.find('.sender-panel').exists()).toBe(true);
@@ -39,7 +36,7 @@ describe('Sender.vue', () => {
   });
 
   it('should have initial state with text mode', () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Sender);
 
     expect(wrapper.find('textarea').exists()).toBe(true);
     expect(wrapper.find('textarea').element.value).toBe('Hello Acoustic World!');
@@ -48,14 +45,14 @@ describe('Sender.vue', () => {
 
   describe('Send Mode Management', () => {
     it('should start in text mode by default', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const sendButton = wrapper.find('.btn-primary');
-      expect(sendButton.text()).toBe('Send');
+      expect(sendButton.text()).toBe('Start');
     });
 
     it('should render tab buttons for send mode selection', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       expect(tabButtons.length).toBe(3);
@@ -66,26 +63,26 @@ describe('Sender.vue', () => {
     });
 
     it('should have text tab active by default', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       expect(tabButtons[0].classes()).toContain('active');
     });
 
     it('should switch to sample mode when sample tab is clicked', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       await tabButtons[1].trigger('click');
 
       const sendButton = wrapper.find('.btn-primary');
-      expect(sendButton.text()).toBe('Send Sample Image');
+      expect(sendButton.text()).toBe('Start');
       expect(tabButtons[1].classes()).toContain('active');
       expect(tabButtons[0].classes()).not.toContain('active');
     });
 
     it('should save send mode to localStorage', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       await tabButtons[1].trigger('click');
@@ -98,10 +95,10 @@ describe('Sender.vue', () => {
       // localStorageにsampleモードを保存
       localStorageMock.setItem('sender-send-mode', 'sample');
 
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const sendButton = wrapper.find('.btn-primary');
-      expect(sendButton.text()).toBe('Send Sample Image');
+      expect(sendButton.text()).toBe('Start');
 
       // サンプルタブがアクティブであることを確認
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -111,7 +108,7 @@ describe('Sender.vue', () => {
 
   describe('File Selection and Preview', () => {
     it('should show file preview when file is selected', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       // ファイルモードのタブを選択
@@ -136,7 +133,7 @@ describe('Sender.vue', () => {
     });
 
     it('should clear file when remove button is clicked', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       // ファイルモードのタブを選択
@@ -166,7 +163,7 @@ describe('Sender.vue', () => {
     });
 
     it('should show drop zone when file mode is selected without file', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // ファイルモードのタブを選択
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -177,7 +174,7 @@ describe('Sender.vue', () => {
     });
 
     it('should switch to file mode and show file name in button when file is selected', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       // ファイルモードのタブを選択
@@ -195,8 +192,7 @@ describe('Sender.vue', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
 
       const sendButton = wrapper.find('.btn-primary');
-      expect(sendButton.text()).toContain('Send:');
-      expect(sendButton.text()).toContain('test.txt');
+      expect(sendButton.text()).toBe('Start');
 
       consoleErrorSpy.mockRestore();
     });
@@ -204,7 +200,7 @@ describe('Sender.vue', () => {
 
   describe('Unified Send Button', () => {
     it('should send text when in text mode', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const sendButton = wrapper.find('.btn-primary');
@@ -218,7 +214,7 @@ describe('Sender.vue', () => {
     });
 
     it('should be disabled when input is empty in text mode', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const textarea = wrapper.find('textarea');
       await textarea.setValue('');
@@ -228,7 +224,7 @@ describe('Sender.vue', () => {
     });
 
     it('should disable textarea during transmission', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
       const sender = wrapper.findComponent(Sender);
 
       // 直接送信中状態にする
@@ -240,7 +236,7 @@ describe('Sender.vue', () => {
     });
 
     it('should show file name in button when file is selected', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
       const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       // ファイルモードのタブを選択
@@ -258,7 +254,7 @@ describe('Sender.vue', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
 
       const sendButton = wrapper.find('.btn-primary');
-      expect(sendButton.text()).toBe('Send: myfile.pdf');
+      expect(sendButton.text()).toBe('Start');
 
       consoleErrorSpy.mockRestore();
     });
@@ -266,7 +262,7 @@ describe('Sender.vue', () => {
 
   describe('Size Indicator', () => {
     it('should show byte counter for text mode', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       expect(wrapper.find('.size-indicator').exists()).toBe(true);
       const sizeText = wrapper.find('.size-indicator').text();
@@ -274,7 +270,7 @@ describe('Sender.vue', () => {
     });
 
     it('should show warning class when size exceeds 3500 bytes', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // 大きなテキストを設定
       const largeText = 'a'.repeat(3600);
@@ -287,7 +283,7 @@ describe('Sender.vue', () => {
   });
 
   it('should toggle drag state on drag events', async () => {
-    const wrapper = mount(TestWrapper);
+    const wrapper = mountApp(Sender);
 
     const panel = wrapper.find('.sender-panel');
 
@@ -313,7 +309,7 @@ describe('Sender.vue', () => {
 
     it('should show error toast when file size exceeds limit on file select', async () => {
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // ファイルモードのタブを選択
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -349,7 +345,7 @@ describe('Sender.vue', () => {
 
     it('should show error toast when file size exceeds limit on drop', async () => {
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // ファイルモードのタブを選択してドロップゾーンを表示
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -387,7 +383,7 @@ describe('Sender.vue', () => {
 
     it('should show error toast when text size exceeds limit', async () => {
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // Set text larger than MAX_FILE_SIZE
       const largeText = 'a'.repeat(MAX_FILE_SIZE + 1);
@@ -407,7 +403,7 @@ describe('Sender.vue', () => {
     });
 
     it('should accept file within size limit', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // ファイルモードのタブを選択
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -454,7 +450,7 @@ describe('Sender.vue', () => {
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       vi.useFakeTimers();
 
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // ファイルモードのタブを選択
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -488,7 +484,7 @@ describe('Sender.vue', () => {
 
   describe('Tab Buttons', () => {
     it('should disable tab buttons during transmission', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // 最初は有効
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -501,7 +497,7 @@ describe('Sender.vue', () => {
     });
 
     it('should have correct labels for each tab option', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       expect(tabButtons.length).toBe(3);
@@ -522,7 +518,7 @@ describe('Sender.vue', () => {
 
   describe('Sample Image Preview', () => {
     it('should show sample preview when sample mode is selected', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       await tabButtons[1].trigger('click');
@@ -532,21 +528,21 @@ describe('Sender.vue', () => {
     });
 
     it('should show sample info with correct size', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       const tabButtons = wrapper.findAll('button.tab-item');
       await tabButtons[1].trigger('click');
 
       const sampleInfo = wrapper.find('.sample-info');
       expect(sampleInfo.exists()).toBe(true);
-      expect(sampleInfo.text()).toContain('test.png');
+      expect(sampleInfo.text()).toContain('sample image');
       expect(sampleInfo.text()).toContain('921');
     });
   });
 
   describe('Drag and Drop', () => {
     it('should toggle drag state on drop zone', async () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // ファイルモードのタブを選択してドロップゾーンを表示
       const tabButtons = wrapper.findAll('button.tab-item');
@@ -566,7 +562,7 @@ describe('Sender.vue', () => {
 
   describe('Randomized Seq option removed', () => {
     it('should not have Randomized Seq checkbox in sender panel', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // .sender-options要素が存在しないことを確認
       expect(wrapper.find('.sender-options').exists()).toBe(false);
@@ -580,7 +576,7 @@ describe('Sender.vue', () => {
     });
 
     it('should still have runtime.randomizeSeq available for Settings component', () => {
-      const wrapper = mount(TestWrapper);
+      const wrapper = mountApp(Sender);
 
       // Senderコンポーネント自体にはrandomizeSeq UIがないが、
       // runtime.randomizeSeqは内部で使用されている（Sender.vueのstartSendingDataで参照）

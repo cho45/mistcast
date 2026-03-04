@@ -2,9 +2,11 @@
 import { injectSettings } from '../composables/useSettings';
 import { useDemoRuntime } from '../demo-runtime';
 import { watch, onMounted } from 'vue';
+import { useI18n } from 'vue-i18n';
 
 const { settings } = injectSettings();
 const runtime = useDemoRuntime();
+const { t } = useI18n();
 
 // settings.modemMode の変更を runtime.modemMode に同期
 watch(() => settings.value.modemMode, (newMode) => {
@@ -26,19 +28,27 @@ onMounted(() => {
 <template>
   <section class="panel settings-panel">
     <div class="settings-header">
-      <h2>Settings</h2>
+      <h2>{{ $t('settings.title') }}</h2>
+    </div>
+    <!-- Language Selection Section -->
+    <div class="setting-section">
+      <h3 class="section-title">{{ $t('settings.language.label') }}</h3>
+      <div class="setting-group">
+        <div class="language-selector">
+          <select v-model="settings.language" class="form-select">
+            <option value="auto">{{ $t('settings.language.auto') }}</option>
+            <option value="en">{{ $t('settings.language.en') }}</option>
+            <option value="ja">{{ $t('settings.language.ja') }}</option>
+          </select>
+        </div>
+      </div>
     </div>
 
     <!-- Common Section -->
     <div class="setting-section">
-      <h3 class="section-title">Common</h3>
+      <h3 class="section-title">{{ $t('settings.modem.label') }}</h3>
 
       <div class="setting-group">
-        <h4>Modem Mode</h4>
-        <p class="setting-description">
-          Select the modulation scheme for acoustic data transmission.
-        </p>
-
         <div class="mode-selector">
           <button
             class="mode-btn"
@@ -47,8 +57,8 @@ onMounted(() => {
             @click="settings.modemMode = 'dsss'"
           >
             <div class="mode-content">
-              <span class="mode-name">DSSS (Slow)</span>
-              <span class="mode-desc">Direct Sequence Spread Spectrum - Robust but slower</span>
+              <span class="mode-name">{{ $t('settings.modem.dsss') }}</span>
+              <span class="mode-desc">Direct Sequence Spread Spectrum</span>
             </div>
           </button>
           <button
@@ -58,37 +68,37 @@ onMounted(() => {
             @click="settings.modemMode = 'mary'"
           >
             <div class="mode-content">
-              <span class="mode-name">M-ARY (Fast)</span>
-              <span class="mode-desc">M-ary Modulation - Faster transmission</span>
+              <span class="mode-name">{{ $t('settings.modem.mary') }}</span>
+              <span class="mode-desc">M-ary Modulation (Quadrature)</span>
             </div>
           </button>
         </div>
       </div>
 
       <div class="setting-group">
-        <h4>Debug</h4>
+        <h4>{{ $t('settings.debug.label') }}</h4>
         <label class="checkbox-label">
           <input type="checkbox" v-model="settings.debugMode">
-          <span>Debug Mode</span>
+          <span>{{ $t('settings.debug.label') }}</span>
         </label>
         <p class="setting-hint">
-          Enable verbose logging and debug information
+          {{ $t('settings.debug.desc') }}
         </p>
       </div>
     </div>
 
     <!-- Sender Section -->
     <div class="setting-section">
-      <h3 class="section-title">Sender</h3>
+      <h3 class="section-title">{{ $t('common.sender') }}</h3>
 
       <div class="setting-group">
-        <h4>Transmission Options</h4>
+        <h4>{{ $t('settings.transmission.randomize') }}</h4>
         <label class="checkbox-label">
           <input type="checkbox" v-model="settings.randomizeSeq">
-          <span>Randomized Sequence</span>
+          <span>{{ $t('settings.transmission.randomize') }}</span>
         </label>
         <p class="setting-hint">
-          より堅牢な伝送のためにランダム化する (重複パケット回避)
+          {{ $t('settings.transmission.desc') }}
         </p>
       </div>
     </div>
@@ -157,6 +167,30 @@ onMounted(() => {
   color: var(--muted);
   font-size: 0.9rem;
   line-height: 1.5;
+}
+
+.form-select {
+  width: 100%;
+  padding: 0.75rem;
+  padding-right: 2.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 0.95rem;
+  color: var(--ink);
+  cursor: pointer;
+  transition: all 0.2s;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1.25rem;
+}
+
+.form-select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 .setting-hint {
