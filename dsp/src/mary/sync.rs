@@ -935,7 +935,7 @@ mod tests {
             }
         }
         let signal_power = if active_count > 0 {
-            energy_sum / (2.0 * active_count as f32)
+            energy_sum / active_count as f32
         } else {
             1.0 // Fallback
         };
