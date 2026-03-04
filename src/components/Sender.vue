@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, useAttrs, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, useAttrs, watch } from 'vue';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
@@ -17,6 +17,8 @@ const attrs = useAttrs();
 
 const MAX_FILE_SIZE = 255 * 16; // 4080 bytes
 const TOAST_DURATION_MS = 5000;
+const STORAGE_KEY = 'sender-send-mode';
+const SAMPLE_FILE_SIZE = 921; // test.pngの実際のサイズ
 
 type ToastType = 'error' | 'warning' | 'success';
 
@@ -26,14 +28,30 @@ interface Toast {
   type: ToastType;
 }
 
+type SendMode = 'text' | 'sample' | 'file';
+
 const inputText = ref('Hello Acoustic World!');
 const fileInput = ref<HTMLInputElement | null>(null);
 const isTransmitting = ref(false);
 const isPreparing = ref(false);
-const senderStatus = ref('Idle');
+const senderStatus = ref('idle');
 const isDragging = ref(false);
 const toasts = ref<Toast[]>([]);
 let toastIdCounter = 0;
+
+const displayStatus = computed(() => {
+  switch (senderStatus.value) {
+    case 'idle': return 'Idle';
+    case 'ready': return 'Ready';
+    case 'preparing': return 'Preparing...';
+    case 'transmitting': return 'Transmitting...';
+    default: return senderStatus.value;
+  }
+});
+
+// 送信モード管理
+const sendMode = ref<SendMode>('text');
+const selectedFile = ref<File | null>(null);
 
 let senderWorker: Worker | null = null;
 let senderBackend: Comlink.Remote<MistcastBackend> | null = null;
@@ -46,6 +64,36 @@ function validateFileSize(size: number): boolean {
   return size <= MAX_FILE_SIZE;
 }
 
+// localStorageから送信モードを復元
+function loadSendMode(): SendMode {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === 'text' || stored === 'sample' || stored === 'file') {
+      return stored;
+    }
+  } catch (e) {
+    // localStorageアクセスエラーは無視
+  }
+  return 'text';
+}
+
+// 送信モードをlocalStorageに保存
+function saveSendMode(mode: SendMode) {
+  try {
+    localStorage.setItem(STORAGE_KEY, mode);
+  } catch (e) {
+    // localStorageアクセスエラーは無視
+  }
+}
+
+// 初期化: localStorageから送信モードを復元
+sendMode.value = loadSendMode();
+
+// 送信モードを監視してlocalStorageに保存
+watch(sendMode, (newMode) => {
+  saveSendMode(newMode);
+}, { immediate: false });
+
 function showToast(message: string, type: ToastType = 'error') {
   const id = toastIdCounter++;
   toasts.value.push({ id, message, type });
@@ -54,8 +102,54 @@ function showToast(message: string, type: ToastType = 'error') {
   }, TOAST_DURATION_MS);
 }
 
+// Computed properties
+const textByteSize = computed(() => {
+  return new TextEncoder().encode(inputText.value).length;
+});
+
+const contentBytes = computed(() => {
+  switch (sendMode.value) {
+    case 'text':
+      return textByteSize.value;
+    case 'sample':
+      return SAMPLE_FILE_SIZE;
+    case 'file':
+      return selectedFile.value?.size || 0;
+  }
+});
+
+const sendButtonText = computed(() => {
+  switch (sendMode.value) {
+    case 'text':
+      return inputText.value.trim() ? 'Send' : 'Send Text';
+    case 'sample':
+      return 'Send Sample Image';
+    case 'file':
+      return selectedFile.value ? `Send: ${selectedFile.value.name}` : 'Select File';
+  }
+});
+
+const canSend = computed(() => {
+  switch (sendMode.value) {
+    case 'text':
+      return inputText.value.trim().length > 0;
+    case 'sample':
+      return true;
+    case 'file':
+      return selectedFile.value !== null;
+  }
+});
+
+// Handlers
 function triggerFileSelect() {
   fileInput.value?.click();
+}
+
+function clearFile() {
+  selectedFile.value = null;
+  if (fileInput.value) {
+    fileInput.value.value = '';
+  }
 }
 
 async function startSendingFile(file: File) {
@@ -73,7 +167,8 @@ async function handleFileSelect(event: Event) {
       target.value = '';
       return;
     }
-    await startSendingFile(file);
+    selectedFile.value = file;
+    sendMode.value = 'file';
   }
   // input要素の値をリセットして同じファイルを再度選択可能にする
   target.value = '';
@@ -110,7 +205,8 @@ async function handleDrop(event: DragEvent) {
       showToast(`ファイルサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
       return;
     }
-    await startSendingFile(file);
+    selectedFile.value = file;
+    sendMode.value = 'file';
   }
 }
 
@@ -194,11 +290,11 @@ async function startSendingData(data: Uint8Array) {
         await audioContext.resume();
       }
 
-      senderStatus.value = 'Preparing...';
+      senderStatus.value = 'preparing';
       await rebuildSenderGraph();
       if (!senderBackend) return;
 
-      senderStatus.value = 'Transmitting...';
+      senderStatus.value = 'transmitting';
       isTransmitting.value = true;
       await senderBackend.startEncoder(data, audioContext.sampleRate, runtime.modemMode.value, runtime.randomizeSeq.value);
     } finally {
@@ -221,11 +317,28 @@ async function startSendingSampleImage() {
   await startSendingData(data);
 }
 
+// 統一送信ハンドラ
+async function handleSend() {
+  switch (sendMode.value) {
+    case 'text':
+      await startSendingText();
+      break;
+    case 'sample':
+      await startSendingSampleImage();
+      break;
+    case 'file':
+      if (selectedFile.value) {
+        await startSendingFile(selectedFile.value);
+      }
+      break;
+  }
+}
+
 async function stopSending() {
   await runExclusive(async () => {
     await senderBackend?.stopEncoder();
     isTransmitting.value = false;
-    senderStatus.value = runtime.coreReady.value ? 'Ready' : 'Idle';
+    senderStatus.value = runtime.coreReady.value ? 'ready' : 'idle';
   });
 }
 
@@ -235,7 +348,7 @@ watch(
     if (!ready) return;
     await runExclusive(async () => {
       await rebuildSenderGraph();
-      senderStatus.value = 'Ready';
+      senderStatus.value = 'ready';
     });
   },
   { immediate: true }
@@ -264,23 +377,118 @@ defineExpose({
     @dragover="handleDragOver"
     @drop="handleDrop"
   >
-    <h2>Sender</h2>
-    <p class="panel-sub">Text / Image を音響フレームへ変調して送信</p>
-    <div class="status-chip" :class="senderStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
-      {{ senderStatus }}
+    <div class="sender-header">
+      <div class="sender-title-row">
+        <h2>Sender</h2>
+        <div class="status-chip" :class="senderStatus">
+          {{ displayStatus }}
+        </div>
+      </div>
+      <p class="panel-sub">Text / Image を音響フレームへ変調して送信</p>
     </div>
-    <textarea v-model="inputText" rows="4" placeholder="Enter text to broadcast..." />
-    <div class="button-row">
+
+    <!-- 送信タイプ選択（セグメントコントロール風） -->
+    <div class="send-type-tabs">
+      <button
+        type="button"
+        class="tab-item"
+        :class="{ active: sendMode === 'text' }"
+        :disabled="isTransmitting"
+        @click="sendMode = 'text'"
+      >
+        <span class="tab-icon">📝</span>
+        <span class="tab-text">Text</span>
+      </button>
+      <button
+        type="button"
+        class="tab-item"
+        :class="{ active: sendMode === 'sample' }"
+        :disabled="isTransmitting"
+        @click="sendMode = 'sample'"
+      >
+        <span class="tab-icon">🖼️</span>
+        <span class="tab-text">Sample</span>
+      </button>
+      <button
+        type="button"
+        class="tab-item"
+        :class="{ active: sendMode === 'file' }"
+        :disabled="isTransmitting"
+        @click="sendMode = 'file'"
+      >
+        <span class="tab-icon">📁</span>
+        <span class="tab-text">File</span>
+      </button>
+    </div>
+
+    <!-- テキスト入力エリア（テキストモード時のみ表示） -->
+    <div v-if="sendMode === 'text'" class="input-area">
+      <textarea
+        v-model="inputText"
+        rows="4"
+        placeholder="Enter text to broadcast..."
+        :disabled="isTransmitting"
+      />
+    </div>
+
+    <!-- サンプル画像プレビュー（サンプルモード時のみ表示） -->
+    <div v-if="sendMode === 'sample'" class="sample-preview">
+      <img src="../assets/sample-files/test.png" alt="Sample Image" />
+      <div class="sample-info">test.png ({{ SAMPLE_FILE_SIZE }} bytes)</div>
+    </div>
+
+    <!-- ファイル選択エリア（ファイルモード時のみ表示） -->
+    <div v-if="sendMode === 'file'">
+      <!-- ファイルプレビュー -->
+      <div v-if="selectedFile" class="file-preview">
+        <div class="file-icon">📄</div>
+        <div class="file-details">
+          <div class="file-name">{{ selectedFile.name }}</div>
+          <div class="file-size">{{ selectedFile.size }} bytes</div>
+        </div>
+        <button class="remove-file-btn" @click="clearFile" title="ファイルをクリア">×</button>
+      </div>
+
+      <!-- ドラッグ&ドロップエリア -->
+      <div
+        v-else
+        class="drop-zone"
+        :class="{ 'is-dragging': isDragging }"
+        @click="triggerFileSelect"
+        @dragenter.prevent="handleDragEnter"
+        @dragover.prevent
+        @dragleave.prevent="handleDragLeave"
+        @drop.prevent="handleDrop"
+      >
+        <div class="drop-content">
+          <div class="drop-text">ファイルをドロップ または クリックして選択</div>
+          <div class="drop-hint">最大4KBまで</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 隠しファイル入力 -->
+    <input ref="fileInput" type="file" class="file-input-hidden" @change="handleFileSelect" />
+
+    <!-- 統一送信ボタン -->
+    <div class="send-footer">
+      <div class="footer-meta">
+        <div class="size-indicator" :class="{ warning: contentBytes > 3500 }">
+          {{ contentBytes }} / 4080 bytes
+        </div>
+      </div>
       <template v-if="!isTransmitting">
-        <button @click="startSendingText" class="btn btn-primary" :disabled="!runtime.coreReady.value || isPreparing">
-          {{ isPreparing ? 'Preparing...' : 'Send' }}
+        <button
+          class="btn btn-primary btn-large"
+          :disabled="!canSend || isPreparing || !runtime.coreReady.value"
+          @click="handleSend"
+        >
+          {{ isPreparing ? 'Preparing...' : sendButtonText }}
         </button>
-        <button @click="startSendingSampleImage" class="btn" :disabled="!runtime.coreReady.value || isPreparing">Send Sample Image</button>
-        <button @click="triggerFileSelect" class="btn" :disabled="!runtime.coreReady.value || isPreparing">Send File (max 4KB)</button>
-        <input type="file" ref="fileInput" style="display: none" @change="handleFileSelect" />
       </template>
-      <button v-else @click="stopSending" class="btn btn-danger" :disabled="!runtime.coreReady.value">Stop</button>
+      <button v-else @click="stopSending" class="btn btn-danger btn-large">Stop Broadcasting</button>
     </div>
+
     <SpectrumCanvas
       :analyser-node="analyserNode"
       title="Sender FFT (Linear Frequency Axis)"
@@ -362,5 +570,265 @@ section.sender-panel.is-dragging {
   background-color: #f0f9ff;
   border: 2px dashed #0f6bd7;
   transform: scale(1.01);
+}
+
+.sender-header {
+  margin-bottom: 0.8rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.sender-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.sender-title-row h2 {
+  margin: 0;
+}
+
+.sender-title-row .status-chip {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* 送信タイプ選択（セグメントコントロール） */
+.send-type-tabs {
+  display: flex;
+  background: #f1f5f9;
+  padding: 4px;
+  border-radius: 12px;
+  margin-bottom: 1.25rem;
+  border: 1px solid var(--line);
+}
+
+.tab-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.6rem 0.2rem;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.tab-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--ink);
+}
+
+.tab-item.active {
+  background: #fff;
+  color: var(--primary);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.tab-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tab-icon {
+  font-size: 1.1rem;
+}
+
+/* 入力エリア */
+.input-area {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 1rem;
+}
+
+textarea:disabled {
+  background-color: #f1f5f9;
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.8;
+}
+
+/* サンプルプレビュー */
+.sample-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: #f6f9fc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 1rem;
+}
+
+.sample-preview img {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  image-rendering: pixelated;
+}
+
+.sample-info {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+/* ファイルプレビュー */
+.file-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: #f6f9fc;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 1rem;
+}
+
+.file-icon {
+  font-size: 1.5rem;
+}
+
+.file-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.remove-file-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.remove-file-btn:hover {
+  background: #fee2e2;
+  color: #b94731;
+}
+
+/* ドロップゾーン */
+.drop-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
+  padding: 1.5rem;
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+  background: #fbfdff;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 1rem;
+}
+
+.drop-zone:hover {
+  border-color: var(--primary);
+  background: #f0f9ff;
+}
+
+.drop-zone.is-dragging {
+  border-color: var(--primary);
+  background: #f0f9ff;
+  transform: scale(1.02);
+}
+
+.drop-content {
+  text-align: center;
+}
+
+.drop-text {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 0.95rem;
+  margin-bottom: 0.25rem;
+}
+
+.drop-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* 隠しファイル入力 */
+.file-input-hidden {
+  display: none;
+}
+
+/* 送信フッター */
+.send-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.footer-meta {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.size-indicator {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.size-indicator.warning {
+  color: #d97706;
+  font-weight: 600;
+}
+
+/* モバイルファースト */
+@media (max-width: 779px) {
+  .sender-panel h2,
+  .sender-panel .panel-sub {
+    display: none;
+  }
+
+  .sender-header {
+    margin-bottom: 0.5rem;
+  }
+
+  .sender-title-row {
+    justify-content: flex-end;
+  }
+
+  .size-indicator {
+    text-align: center;
+  }
 }
 </style>

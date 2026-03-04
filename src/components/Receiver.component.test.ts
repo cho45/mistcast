@@ -17,19 +17,27 @@ describe('Receiver.vue', () => {
   it('should have initial state', () => {
     const wrapper = mount(TestWrapper);
 
-    // 初期状態ではmetric-gridが表示される
-    expect(wrapper.find('.metric-grid').exists()).toBe(true);
+    // デフォルト（Debug Mode: false）では metric-grid は表示されない
+    expect(wrapper.find('.metric-grid').exists()).toBe(false);
 
-    // .display要素はprogressPercent >= 1.0の場合のみ表示される
+    // .display要素は progressPercent >= 1.0 の場合のみ表示される
     // 初期状態では表示されない
     expect(wrapper.find('.display').exists()).toBe(false);
   });
 
-  it('should render mic toggle button', () => {
+  it('should render input mode tabs and clear button', () => {
     const wrapper = mount(TestWrapper);
 
-    const micButton = wrapper.findAll('button').find(btn => btn.text().includes('Enable Mic'));
-    expect(micButton).toBeDefined();
+    // 入力モードのタブボタンを確認
+    const loopbackTab = wrapper.findAll('.mode-tabs button').find(btn => btn.text().includes('Loopback'));
+    const micTab = wrapper.findAll('.mode-tabs button').find(btn => btn.text().includes('Microphone'));
+    expect(loopbackTab).toBeDefined();
+    expect(micTab).toBeDefined();
+
+    // クリアボタンを確認
+    const clearButton = wrapper.find('.btn-clear-action');
+    expect(clearButton.exists()).toBe(true);
+    expect(clearButton.text()).includes('Clear & Reset');
   });
 
   describe('Debug Mode', () => {
@@ -47,15 +55,17 @@ describe('Receiver.vue', () => {
       expect(wrapper.find('.rx-log').exists()).toBe(false);
     });
 
-    it('should show proc-stats when debugMode is true', async () => {
+    it('should show metric-grid and proc-stats when debugMode is true', async () => {
       const wrapper = mount(TestWrapper);
       const receiver = wrapper.findComponent(Receiver);
 
       // debugModeをtrueに設定
-      receiver.vm.settings.debugMode = true;
+      const vm = receiver.vm as { settings: { debugMode: boolean } };
+      vm.settings.debugMode = true;
       await receiver.vm.$nextTick();
 
-      // proc-statsが表示されることを確認
+      // metric-grid と proc-stats が表示されることを確認
+      expect(wrapper.find('.metric-grid').exists()).toBe(true);
       expect(wrapper.find('.proc-stats').exists()).toBe(true);
     });
 
@@ -64,10 +74,11 @@ describe('Receiver.vue', () => {
       const receiver = wrapper.findComponent(Receiver);
 
       // debugModeをtrueに設定
-      receiver.vm.settings.debugMode = true;
+      const vm = receiver.vm as { settings: { debugMode: boolean }; rxLogs: string[] };
+      vm.settings.debugMode = true;
 
       // rxLogsを追加
-      receiver.vm.rxLogs = ['test log'];
+      vm.rxLogs = ['test log'];
       await receiver.vm.$nextTick();
 
       // rx-logが表示されることを確認

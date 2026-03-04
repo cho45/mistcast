@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue';
+import { onBeforeUnmount, ref, watch } from 'vue';
 import Sender from './components/Sender.vue';
 import Receiver from './components/Receiver.vue';
 import Settings from './components/Settings.vue';
@@ -44,8 +44,12 @@ provideDemoRuntime(runtime);
 
 const settings = provideSettings();
 
-const activeTab = ref<'sender' | 'receiver'>('receiver');
+const activeTab = ref<'sender' | 'receiver'>((localStorage.getItem('mistcast_active_tab') as any) || 'sender');
 const settingsDialog = ref<HTMLDialogElement | null>(null);
+
+watch(activeTab, (newTab) => {
+  localStorage.setItem('mistcast_active_tab', newTab);
+});
 
 function openSettings() {
   settingsDialog.value?.showModal();
@@ -95,6 +99,12 @@ onBeforeUnmount(() => {
     void audioContext.close();
   }
   audioContext = null;
+});
+
+defineExpose({
+  activeTab,
+  runtime,
+  settingsDialog
 });
 </script>
 
@@ -341,10 +351,30 @@ onBeforeUnmount(() => {
 }
 
 .status-chip.ready-rx-standby,
-.status-chip.ready {
+.status-chip.ready,
+.status-chip.mic-active-rx,
+.status-chip.internal-loopback {
   color: #0a557f;
   background: #e4f2fb;
   border-color: #a9cfe6;
+}
+
+.status-chip.preparing {
+  color: #0f6bd7;
+  background: #f0f7ff;
+  border-color: #cce3ff;
+}
+
+.status-chip.mic-error {
+  color: #7e2d1f;
+  background: #fdebe7;
+  border-color: #d8b2a9;
+}
+
+.status-chip.idle {
+  color: #5a6470;
+  background: #f1f5f9;
+  border-color: #d8dee8;
 }
 
 .content {
@@ -513,76 +543,6 @@ textarea {
 .receiver-title-row .status-chip {
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
-}
-
-.path-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-}
-
-.path-banner code {
-  font-size: 0.7em;
-  padding: 0.1rem 0.35rem;
-}
-
-.path-label {
-  color: var(--muted);
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-code {
-  font-family: var(--mono);
-  background: #eef3f8;
-  color: #24455e;
-  border: 1px solid #d6e1ea;
-  border-radius: 6px;
-  padding: 0.15rem 0.4rem;
-  display: inline-block;
-  max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  font-size: 0.85em;
-  line-height: 1.3;
-}
-
-.progress-block {
-  margin-top: 0.9rem;
-}
-
-.progress-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.84rem;
-  color: var(--muted);
-  margin-bottom: 0.35rem;
-  min-width: 0;
-}
-
-.progress-head span {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.progress-bar-bg {
-  width: 100%;
-  height: 10px;
-  background: #e8edf3;
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.progress-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #2ba463, var(--good));
-  transition: width 0.2s ease-out;
 }
 
 .metric-grid {
@@ -798,12 +758,6 @@ code {
 
   .panel-item {
     display: block !important;
-  }
-
-  .receiver-header {
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: flex-start;
   }
 
   .button-row {

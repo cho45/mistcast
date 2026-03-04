@@ -38,6 +38,7 @@ function drawFrame() {
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+  // @ts-expect-error - Float32Array<ArrayBufferLike> vs Float32Array<ArrayBuffer> type mismatch in TS versions
   props.analyserNode.getFloatFrequencyData(fftData);
   const nyquist = props.analyserNode.context.sampleRate / 2;
   const fMax = Math.max(1, Math.min(20000, nyquist));

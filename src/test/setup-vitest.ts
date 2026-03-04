@@ -1,3 +1,5 @@
+import { vi } from 'vitest';
+
 const hasOwn = (obj: object, key: PropertyKey) =>
   Object.prototype.hasOwnProperty.call(obj, key);
 

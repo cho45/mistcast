@@ -47,7 +47,8 @@ describe('App.vue - 2 Tab Structure', () => {
     const wrapper = mount(App);
 
     // activeTabが'sender' | 'receiver'型であることを確認
-    expect(['sender', 'receiver']).toContain(wrapper.vm.activeTab);
+    const vm = wrapper.vm as { activeTab: string };
+    expect(['sender', 'receiver']).toContain(vm.activeTab);
   });
 
   it('should render app correctly', () => {
@@ -81,7 +82,8 @@ describe('App.vue - 2 Tab Structure', () => {
     await wrapper.vm.$nextTick();
 
     // coreReadyがtrueになっていることを確認
-    expect(wrapper.vm.runtime.coreReady.value).toBe(true);
+    const vm = wrapper.vm as { runtime: { coreReady: { value: boolean } } };
+    expect(vm.runtime.coreReady.value).toBe(true);
 
     // タブが表示されることを確認
     const tabBtns = wrapper.findAll('.tab-btn');
@@ -101,16 +103,17 @@ describe('App.vue - 2 Tab Structure', () => {
 
     const tabBtns = wrapper.findAll('.tab-btn');
 
-    // 初期状態はreceiver
-    expect(wrapper.vm.activeTab).toBe('receiver');
+    // 初期状態はsender
+    const vm = wrapper.vm as { activeTab: string };
+    expect(vm.activeTab).toBe('sender');
 
-    // Senderタブをクリック
-    await tabBtns[0].trigger('click');
-    expect(wrapper.vm.activeTab).toBe('sender');
-
-    // Receiverタブをクリック
+    // Receiverタブをクリック (index 1)
     await tabBtns[1].trigger('click');
-    expect(wrapper.vm.activeTab).toBe('receiver');
+    expect(vm.activeTab).toBe('receiver');
+
+    // Senderタブをクリック (index 0)
+    await tabBtns[0].trigger('click');
+    expect(vm.activeTab).toBe('sender');
   });
 });
 
@@ -119,7 +122,8 @@ describe('App.vue - Dialog Interaction', () => {
     const wrapper = mount(App);
     const showModalSpy = vi.fn();
 
-    wrapper.vm.settingsDialog = {
+    const vm = wrapper.vm as { settingsDialog: HTMLDialogElement };
+    vm.settingsDialog = {
       showModal: showModalSpy,
       close: vi.fn(),
       getBoundingClientRect: vi.fn(() => ({ left: 0, right: 100, top: 0, bottom: 100 }))
@@ -135,7 +139,8 @@ describe('App.vue - Dialog Interaction', () => {
     const wrapper = mount(App);
     const closeSpy = vi.fn();
 
-    wrapper.vm.settingsDialog = {
+    const vm = wrapper.vm as { settingsDialog: HTMLDialogElement };
+    vm.settingsDialog = {
       showModal: vi.fn(),
       close: closeSpy,
       getBoundingClientRect: vi.fn(() => ({ left: 0, right: 100, top: 0, bottom: 100 }))

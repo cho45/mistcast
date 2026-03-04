@@ -69,8 +69,58 @@ const stallProbability = computed(() => {
   return exp;
 });
 
-const receiverStatus = ref('Idle');
+const receiverStatus = ref('idle');
 const isTogglingMic = ref(false);
+
+const guideMessage = computed(() => {
+  if (receiverStatus.value === 'mic-error') {
+    return { text: 'Microphone access failed. Check browser permissions and retry.', type: 'error' };
+  }
+  if (progressPercent.value >= 1.0) {
+    return { text: 'Decoding complete! Successfully recovered the original data.', type: 'success' };
+  }
+
+  // 1. 信号中断の検知 (受信中なのに一定時間更新がない)
+  if (receivedPackets.value > 0 && rxNoChangeTicks.value > 120) {
+    return { text: 'Signal lost or interrupted. Check the sender or increase volume.', type: 'warning' };
+  }
+
+  // 2. 高エラー率の検知 (パケット破損が多い)
+  const totalAttempts = receivedPackets.value + crcErrorPackets.value;
+  if (totalAttempts > 10 && (crcErrorPackets.value / totalAttempts) > 0.4) {
+    return { text: 'High error rate detected. Try reducing noise or adjusting distance.', type: 'warning' };
+  }
+
+  // 3. 正常受信中
+  if (receivedPackets.value > 0) {
+    return { text: 'Receiving packets... Keep the environment quiet for better results.', type: 'active' };
+  }
+
+  return { text: 'Waiting for signal. Start broadcasting from the sender.', type: 'info' };
+});
+
+const inputLevelPercent = computed(() => {
+  const rms = decoderProcInputRms.value;
+  if (rms <= 0.000001) return 0; // -120dB以下は0とする
+  const db = 20 * Math.log10(rms);
+  // -60dB (0%) 〜 0dB (100%) にマッピング
+  const minDb = -60;
+  const maxDb = 0;
+  const percent = ((db - minDb) / (maxDb - minDb)) * 100;
+  return Math.min(Math.max(percent, 0), 100);
+});
+
+const displayStatus = computed(() => {
+  switch (receiverStatus.value) {
+    case 'idle': return 'Idle';
+    case 'ready-rx-standby': return 'Ready (Rx standby)';
+    case 'mic-active-rx': return 'Mic Active (Rx)';
+    case 'internal-loopback': return 'Internal Loopback';
+    case 'decoded': return 'Decoded!';
+    case 'mic-error': return 'Mic Error';
+    default: return receiverStatus.value;
+  }
+});
 
 const inputMode = ref<InputMode>('loopback');
 const isMicActive = computed(() => inputMode.value === 'mic');
@@ -237,7 +287,7 @@ function resetDecoderProcessorStats() {
 function makeOnPacketCallback() {
   return Comlink.proxy((recovered: Uint8Array) => {
     setDecodedOutput(recovered);
-    receiverStatus.value = 'Decoded!';
+    receiverStatus.value = 'decoded';
   });
 }
 
@@ -408,10 +458,10 @@ async function rebuildReceiverGraph() {
     }
     micSource = audioContext.createMediaStreamSource(micStream);
     micSource.connect(rxInputGain);
-    receiverStatus.value = 'Mic Active (Rx)';
+    receiverStatus.value = 'mic-active-rx';
   } else {
     demoAirGapNode.connect(rxInputGain);
-    receiverStatus.value = 'Internal Loopback';
+    receiverStatus.value = 'internal-loopback';
   }
 
   await receiverBackend.startDecoder(
@@ -422,7 +472,8 @@ async function rebuildReceiverGraph() {
   );
 }
 
-async function toggleMic() {
+async function switchInputMode(mode: InputMode) {
+  if (mode === inputMode.value) return;
   await runExclusive(async () => {
     if (!runtime.coreReady.value) return;
     isTogglingMic.value = true;
@@ -432,7 +483,7 @@ async function toggleMic() {
         await audioContext.resume();
       }
 
-      if (inputMode.value === 'loopback') {
+      if (mode === 'mic') {
         try {
           micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -446,7 +497,7 @@ async function toggleMic() {
           inputMode.value = 'mic';
         } catch (e) {
           console.error(e);
-          receiverStatus.value = 'Mic Error';
+          receiverStatus.value = 'mic-error';
           return;
         }
       } else {
@@ -470,7 +521,7 @@ async function reset() {
     resetDecoderProgressState(true);
     resetDecoderProcessorStats();
     await rebuildReceiverGraph();
-    receiverStatus.value = inputMode.value === 'mic' ? 'Mic Active (Rx)' : 'Ready (Rx standby)';
+    receiverStatus.value = inputMode.value === 'mic' ? 'mic-active-rx' : 'ready-rx-standby';
   });
 }
 
@@ -481,7 +532,7 @@ watch(
     await runExclusive(async () => {
       if (!receiverBackend) {
         await rebuildReceiverGraph();
-        receiverStatus.value = inputMode.value === 'mic' ? 'Mic Active (Rx)' : 'Ready (Rx standby)';
+        receiverStatus.value = inputMode.value === 'mic' ? 'mic-active-rx' : 'ready-rx-standby';
       }
     });
   },
@@ -519,35 +570,54 @@ onBeforeUnmount(() => {
   void teardownReceiverGraph();
   clearOutput();
 });
+
+defineExpose({
+  settings,
+  rxLogs
+});
 </script>
 
 <template>
   <section class="panel receiver-panel">
     <div class="receiver-header">
-      <div>
-        <div class="receiver-title-row">
-          <h2>Receiver</h2>
-          <div class="status-chip" :class="receiverStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')">
-            {{ receiverStatus }}
-          </div>
-        </div>
-        <div class="path-banner">
-          <span class="path-label">Input Path</span>
-          <code v-if="!isMicActive">[demoAirGapNode] -digital- [Receiver]</code>
-          <code v-else>[Mic] -acoustic- [Receiver]</code>
+      <div class="receiver-title-row">
+        <h2>Receiver</h2>
+        <div class="status-chip" :class="receiverStatus">
+          {{ displayStatus }}
         </div>
       </div>
-      <div class="button-row compact button-row-2col">
-        <button @click="toggleMic" :class="{ 'btn-active': isMicActive }" class="btn" :disabled="!runtime.coreReady.value || isTogglingMic">
-          {{ isTogglingMic ? 'Switching...' : (isMicActive ? 'Disable Mic' : 'Enable Mic') }}
-        </button>
-        <button @click="reset" class="btn" :disabled="!runtime.coreReady.value || isTogglingMic">Clear</button>
+      <div class="receiver-controls">
+        <div class="mode-tabs">
+          <button @click="switchInputMode('loopback')" :class="{ active: inputMode === 'loopback' }" :disabled="isTogglingMic">Loopback</button>
+          <button @click="switchInputMode('mic')" :class="{ active: inputMode === 'mic' }" :disabled="isTogglingMic">Microphone</button>
+        </div>
+      </div>
+      <div class="path-banner">
+        <span class="path-label">Path</span>
+        <div class="path-info">
+          <code v-if="!isMicActive">[demoAirGapNode] -digital- [Receiver]</code>
+          <code v-else>[Mic] -acoustic- [Receiver]</code>
+          <div class="level-meter" :title="`Input Level: ${(20 * Math.log10(decoderProcInputRms || 1e-9)).toFixed(1)} dB`" :class="{ active: inputLevelPercent > 10 }">
+            <div class="level-meter-fill" :style="{ width: `${inputLevelPercent}%` }"></div>
+          </div>
+        </div>
       </div>
     </div>
 
-    <div class="progress-block">
+    <div class="progress-block" :class="{ 'is-complete': progressPercent >= 1.0 }">
+      <div class="guide-banner" :class="guideMessage.type">
+        <span class="guide-icon">
+          <template v-if="guideMessage.type === 'info'">📡</template>
+          <template v-else-if="guideMessage.type === 'active'">📥</template>
+          <template v-else-if="guideMessage.type === 'warning'">⚠️</template>
+          <template v-else-if="guideMessage.type === 'success'">✅</template>
+          <template v-else-if="guideMessage.type === 'error'">❌</template>
+        </span>
+        <p class="guide-text">{{ guideMessage.text }}</p>
+      </div>
+
       <div class="progress-head">
-        <span>Rank {{ rankPackets }} / {{ totalNeededPackets || '?' }}</span>
+        <span>Progress {{ rankPackets }} / {{ totalNeededPackets || '?' }}</span>
         <span>{{ (progressPercent * 100).toFixed(1) }}%</span>
       </div>
       <div class="progress-bar-bg">
@@ -571,6 +641,11 @@ onBeforeUnmount(() => {
         </div>
         <p v-else class="placeholder">No decoded data</p>
       </div>
+      <div class="progress-footer">
+        <button @click="reset" class="btn btn-clear-action" :disabled="!runtime.coreReady.value || isTogglingMic">
+          Clear & Reset
+        </button>
+      </div>
     </div>
 
     <SpectrumCanvas
@@ -578,7 +653,7 @@ onBeforeUnmount(() => {
       title="Receiver FFT (Linear Frequency Axis)"
     />
 
-    <div class="metric-grid">
+    <div class="metric-grid" v-if="settings.debugMode">
       <div class="metric" data-tooltip="正常に受信してシステムに受け入れられたパケットの総数"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
       <div class="metric" data-tooltip="受信したが、既存のパケットと線形従属の関係にあるため行列のランク上昇に寄与していないパケット数。GF(256) で必要なパケット数が k のとき、現在のランクが r だと次のパケットが従属になる確率は約 1/256^(k-r)"><span>Stall</span><strong>{{ stalledPackets }}</strong><small>(現在重複確率: {{ stallProbability }}%)</small></div>
       <div class="metric" data-tooltip="他のパケットと線形従属の関係にあり、行列のランクを上げるためにまだ他のパケットの受信を待っているパケット数"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
@@ -612,3 +687,301 @@ onBeforeUnmount(() => {
     </div>
   </section>
 </template>
+
+<style scoped>
+.receiver-header {
+  margin-bottom: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.receiver-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.receiver-title-row .status-chip {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.receiver-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.mode-tabs {
+  display: flex;
+  flex: 1;
+  background: #f1f5f9;
+  padding: 0.25rem;
+  border-radius: 12px;
+  gap: 0.25rem;
+}
+
+.mode-tabs button {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 0.5rem 0.75rem;
+  border-radius: 9px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-tabs button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--ink);
+}
+
+.mode-tabs button.active {
+  background: #fff;
+  color: var(--primary);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.mode-tabs button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-clear {
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  border-color: #d1d9e2;
+  color: #5a6b7d;
+  background: #fff;
+  white-space: nowrap;
+}
+
+.btn-clear:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: #b8c4d1;
+  color: var(--ink);
+}
+
+.path-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  background: #f8fbff;
+  border: 1px solid #e2eaf3;
+  border-radius: 8px;
+}
+
+.path-info {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
+.path-info code {
+  font-size: 0.75em;
+  padding: 0.1rem 0.4rem;
+  background: #fff;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.level-meter {
+  flex: 0 0 40px;
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+  border: 1px solid #cbd5e1;
+}
+
+.level-meter-fill {
+  height: 100%;
+  background: #94a3b8;
+  transition: width 0.1s ease-out;
+}
+
+.level-meter.active .level-meter-fill {
+  background: #10b981;
+}
+
+.progress-block {
+  margin-top: 1.2rem;
+  padding: 1rem;
+  border-radius: 12px;
+  background: #fbfcfe;
+  border: 1px solid #e2eaf3;
+  transition: all 0.3s ease;
+}
+
+.progress-block.is-complete {
+  border-color: var(--good);
+  background: #f0fdf4;
+  box-shadow: 0 4px 12px rgba(22, 163, 74, 0.1);
+}
+
+.guide-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid #e2eaf3;
+  transition: all 0.2s ease;
+}
+
+.guide-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.guide-text {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.guide-banner.active {
+  border-color: var(--primary);
+  background: #f0f7ff;
+}
+.guide-banner.active .guide-text { color: var(--primary); }
+
+.guide-banner.success {
+  border-color: var(--good);
+  background: #f0fdf4;
+}
+.guide-banner.success .guide-text { color: var(--good); font-weight: 700; }
+
+.guide-banner.warning {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+.guide-banner.warning .guide-text { color: #b45309; }
+
+.guide-banner.error {
+  border-color: var(--danger);
+  background: #fef2f2;
+}
+.guide-banner.error .guide-text { color: var(--danger); }
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.progress-bar-bg {
+  width: 100%;
+  height: 10px;
+  background: #e8edf3;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2ba463, var(--good));
+  transition: width 0.2s ease-out;
+}
+
+.path-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+code {
+  font-family: var(--mono);
+  background: #eef3f8;
+  color: #24455e;
+  border: 1px solid #d6e1ea;
+  border-radius: 6px;
+  padding: 0.15rem 0.4rem;
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-size: 0.85em;
+  line-height: 1.3;
+}
+
+.progress-footer {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: center;
+}
+
+.btn-clear-action {
+  width: 100%;
+  padding: 0.6rem 1rem;
+  font-size: 0.88rem;
+  border: 1px dashed #cbd5e1;
+  color: #64748b;
+  background: #f8fafc;
+  transition: all 0.2s ease;
+}
+
+.btn-clear-action:hover:not(:disabled) {
+  border-style: solid;
+  border-color: #b94731;
+  color: #b94731;
+  background: #fef2f2;
+}
+
+.btn-clear-action:disabled {
+  border-color: #e2e8f0;
+  color: #cbd5e1;
+  background: transparent;
+}
+
+@media (max-width: 779px) {
+  .receiver-panel h2 {
+    display: none;
+  }
+
+  .receiver-header {
+    margin-bottom: 0.5rem;
+  }
+
+  .receiver-title-row {
+    justify-content: flex-end;
+    margin-bottom: 0.25rem;
+  }
+
+  .receiver-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mode-tabs {
+    order: 1;
+  }
+}
+</style>
