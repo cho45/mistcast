@@ -93,7 +93,7 @@ impl Modulator {
     ///
     /// 最後のシンボルを反転させることで同期の曖昧さを排除する。
     pub fn generate_preamble(&mut self) -> Vec<f32> {
-        let sf = 13; // プリアンブルは Zadoff-Chu SF=13
+        let sf = self.config.preamble_sf; // DspConfig の設定を使用
         let repeat = self.config.preamble_repeat;
         let mut chips_i = Vec::with_capacity(sf * repeat);
         let mut chips_q = Vec::with_capacity(sf * repeat);

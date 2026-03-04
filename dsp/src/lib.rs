@@ -57,6 +57,7 @@ pub struct DspConfig {
     pub preamble_repeat: usize,
     pub sync_word_bits: usize,
     pub packets_per_burst: usize,
+    pub preamble_sf: usize,
 }
 
 impl DspConfig {
@@ -71,6 +72,7 @@ impl DspConfig {
             preamble_repeat: params::PREAMBLE_REPEAT,
             sync_word_bits: params::SYNC_WORD_BITS,
             packets_per_burst: params::PACKETS_PER_SYNC_BURST,
+            preamble_sf: 13,
         }
     }
 
