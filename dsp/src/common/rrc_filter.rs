@@ -95,7 +95,7 @@ impl RrcFilter {
             config.rrc_num_taps(),
             config.rrc_alpha,
             config.chip_rate,
-            config.sample_rate,
+            config.proc_sample_rate(),
         );
         let num_taps = coeffs.len();
         RrcFilter {
@@ -158,7 +158,7 @@ impl DecimatingRrcFilter {
             config.rrc_num_taps(),
             config.rrc_alpha,
             config.chip_rate,
-            config.sample_rate,
+            config.proc_sample_rate(),
         );
         let taps = coeffs.len();
         Self {

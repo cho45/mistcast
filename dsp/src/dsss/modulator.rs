@@ -45,8 +45,7 @@ fn dqpsk_delta(b0: u8, b1: u8) -> u8 {
 
 /// 変調器
 pub struct Modulator {
-    config: DspConfig,
-    proc_config: DspConfig,
+    pub config: DspConfig,
     mseq: MSequence,
     resampler_i: Resampler,
     resampler_q: Resampler,
@@ -61,23 +60,22 @@ pub struct Modulator {
 impl Modulator {
     /// `DspConfig` を指定して変調器を作成する
     pub fn new(config: DspConfig) -> Self {
-        let proc_config = DspConfig::new_for_processing_from(&config);
-        let rrc_i = RrcFilter::from_config(&proc_config);
-        let rrc_q = RrcFilter::from_config(&proc_config);
+        let rrc_i = RrcFilter::from_config(&config);
+        let rrc_q = RrcFilter::from_config(&config);
         let nco = Nco::new(config.carrier_freq, config.sample_rate);
 
         // リサンプラのカットオフ設定: 送信側RRCの全帯域を通過させる
-        let rrc_bw = proc_config.chip_rate * (1.0 + proc_config.rrc_alpha) * 0.5;
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
         let cutoff = Some(rrc_bw);
 
         Modulator {
             resampler_i: Resampler::new_with_cutoff(
-                proc_config.sample_rate as u32,
+                config.proc_sample_rate() as u32,
                 config.sample_rate as u32,
                 cutoff,
             ),
             resampler_q: Resampler::new_with_cutoff(
-                proc_config.sample_rate as u32,
+                config.proc_sample_rate() as u32,
                 config.sample_rate as u32,
                 cutoff,
             ),
@@ -85,7 +83,6 @@ impl Modulator {
             rrc_i,
             rrc_q,
             config,
-            proc_config,
             prev_phase: 0,
             nco,
         }
@@ -219,7 +216,7 @@ impl Modulator {
         // RRCフィルタの応答全体（全タップ分）を押し出すために必要な無音サンプルを計算。
         // delay() ではなく num_taps() を使うのが物理的に正しい（テールの終わりまで出すため）。
         let rrc_taps_bb = self.rrc_i.num_taps().max(self.rrc_q.num_taps());
-        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let rrc_push_out = (rrc_taps_bb as f32 * ratio).ceil() as usize;
 
         let mut out = self.modulate_silence(rrc_push_out);
@@ -245,7 +242,7 @@ impl Modulator {
 
         // 出力サンプル数が samples に達するまで内部レートで無音を生成し、
         // リサンプルとミキシングを行う。
-        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let needed_bb = (samples as f32 / ratio).ceil() as usize + 1;
 
         for _ in 0..needed_bb {
@@ -327,14 +324,15 @@ impl Modulator {
         self.mseq.reset();
         self.rrc_i.reset();
         self.rrc_q.reset();
-        let rrc_bw = self.proc_config.chip_rate * (1.0 + self.proc_config.rrc_alpha) * 0.5;
+        let rrc_bw = self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5;
+        let proc_sample_rate = self.config.proc_sample_rate();
         self.resampler_i.reconfigure(
-            self.proc_config.sample_rate as u32,
+            proc_sample_rate as u32,
             self.config.sample_rate as u32,
             Some(rrc_bw),
         );
         self.resampler_q.reconfigure(
-            self.proc_config.sample_rate as u32,
+            proc_sample_rate as u32,
             self.config.sample_rate as u32,
             Some(rrc_bw),
         );
@@ -350,10 +348,10 @@ impl Modulator {
         let rrc_delay_bb = self.rrc_i.delay(); // (num_taps - 1) / 2
                                                // 2. リサンプラの群遅延 (ベースバンドレート)
         let resampler_delay_bb = self.resampler_i.delay() as f64
-            / (self.config.sample_rate as f64 / self.proc_config.sample_rate as f64);
+            / (self.config.sample_rate as f64 / self.config.proc_sample_rate() as f64);
 
         // 合計遅延をターゲットレートへ換算
-        let ratio = self.config.sample_rate as f64 / self.proc_config.sample_rate as f64;
+        let ratio = self.config.sample_rate as f64 / self.config.proc_sample_rate() as f64;
         ((rrc_delay_bb as f64 + resampler_delay_bb) * ratio).round() as usize
     }
 }
@@ -687,21 +685,52 @@ mod tests {
         let fs = config.sample_rate;
         let fc = config.carrier_freq;
         let two_pi = 2.0 * std::f32::consts::PI;
-        let mut rrc_i = RrcFilter::from_config(&config);
-        let mut rrc_q = RrcFilter::from_config(&config);
-        let mut i_ch = Vec::with_capacity(frame.len());
-        let mut q_ch = Vec::with_capacity(frame.len());
+
+        // downconvert (48kHz)
+        let mut i_raw = Vec::with_capacity(frame.len());
+        let mut q_raw = Vec::with_capacity(frame.len());
         for (idx, &s) in frame.iter().enumerate() {
             let t = idx as f32 / fs;
             let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
-            i_ch.push(rrc_i.process(s * cos_v * 2.0));
-            q_ch.push(rrc_q.process(s * (-sin_v) * 2.0));
+            i_raw.push(s * cos_v * 2.0);
+            q_raw.push(s * (-sin_v) * 2.0);
         }
 
+        // Resampler (48k→24k)
+        use crate::common::resample::Resampler;
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+        let mut resampler_i = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+        );
+        let mut resampler_q = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+        );
+        let mut i_resampled = Vec::new();
+        let mut q_resampled = Vec::new();
+        resampler_i.process(&i_raw, &mut i_resampled);
+        resampler_i.flush(&mut i_resampled);
+        resampler_q.process(&q_raw, &mut q_resampled);
+        resampler_q.flush(&mut q_resampled);
+
+        // RRC (24kHz)
+        let mut rrc_i = RrcFilter::from_config(&config);
+        let mut rrc_q = RrcFilter::from_config(&config);
+        let mut i_ch: Vec<f32> = i_resampled.iter().map(|&s| rrc_i.process(s)).collect();
+        let mut q_ch: Vec<f32> = q_resampled.iter().map(|&s| rrc_q.process(s)).collect();
+        // RRC flush 分を追加
+        let rrc_flush: Vec<f32> = (0..rrc_i.delay()).map(|_| rrc_i.process(0.0)).collect();
+        let rrc_flush_q: Vec<f32> = (0..rrc_q.delay()).map(|_| rrc_q.process(0.0)).collect();
+        i_ch.extend(rrc_flush);
+        q_ch.extend(rrc_flush_q);
+
         let sf = config.spread_factor();
-        let spc = config.samples_per_chip();
+        let spc = config.proc_samples_per_chip();
         let sym_len = sf * spc;
-        let total_delay = mod_.rrc_i.delay() + rrc_i.delay();
+        let total_delay = mod_.rrc_i.delay() + resampler_i.delay() + rrc_i.delay();
 
         let mut mseq = MSequence::new(config.mseq_order);
         let pn = mseq.generate(sf);

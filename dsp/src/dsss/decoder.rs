@@ -59,8 +59,7 @@ pub struct DecodeProgress {
 }
 
 pub struct Decoder {
-    config: DspConfig,
-    proc_config: DspConfig,
+    pub config: DspConfig,
     resampler_i: Resampler,
     resampler_q: Resampler,
     rrc_filter_i: RrcFilter,
@@ -73,7 +72,6 @@ pub struct Decoder {
     recovered_data: Option<Vec<u8>>,
     pub agc_peak_fast: f32,
     pub agc_peak_slow: f32,
-    packets_per_sync_burst: usize,
     lo_nco: Nco,
 
     // --- 同期状態 ---
@@ -117,7 +115,7 @@ struct SymbolSoftDecision {
 
 impl Decoder {
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
-        let proc_config = DspConfig::new_for_processing_from(&dsp_config);
+        let proc_sample_rate = dsp_config.proc_sample_rate();
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         let raw_bits = PACKET_BYTES * 8 + 6;
         let fec_bits = raw_bits * 2;
@@ -127,14 +125,14 @@ impl Decoder {
 
         // リサンプラのカットオフ設定:
         // RRCのロールオフを含めた帯域 Rc*(1+alpha)/2 を保護しつつ、
-        // エイリアシングを防ぐために proc_config.sample_rate / 2 以下に設定する。
+        // エイリアシングを防ぐために proc_sample_rate / 2 以下に設定する。
         let rrc_bw = dsp_config.chip_rate * (1.0 + dsp_config.rrc_alpha) * 0.5;
         let cutoff = Some(rrc_bw);
 
         // 拡散率に応じて同期しきい値をスケールさせる。
         // 処理利得 (Processing Gain) によりノイズフロアが 1/sf に比例して下がるため、
         // しきい値もそれに合わせて引き下げることで感度を維持する。
-        let sf = proc_config.spread_factor();
+        let sf = dsp_config.spread_factor();
         let scale = 15.0 / sf as f32;
         let tc = SyncDetector::THRESHOLD_COARSE_DEFAULT * scale;
         let tf = SyncDetector::THRESHOLD_FINE_DEFAULT * scale;
@@ -142,27 +140,25 @@ impl Decoder {
         Decoder {
             resampler_i: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
-                proc_config.sample_rate as u32,
+                proc_sample_rate as u32,
                 cutoff,
             ),
             resampler_q: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
-                proc_config.sample_rate as u32,
+                proc_sample_rate as u32,
                 cutoff,
             ),
-            rrc_filter_i: RrcFilter::from_config(&proc_config),
-            rrc_filter_q: RrcFilter::from_config(&proc_config),
+            rrc_filter_i: RrcFilter::from_config(&dsp_config),
+            rrc_filter_q: RrcFilter::from_config(&dsp_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
-            sync_detector: SyncDetector::new(proc_config.clone(), tc, tf),
+            sync_detector: SyncDetector::new(dsp_config.clone(), tc, tf),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
-            config: dsp_config.clone(),
-            proc_config,
+            config: dsp_config,
             agc_peak_fast: 0.5,
             agc_peak_slow: 0.5,
-            packets_per_sync_burst: dsp_config.packets_per_burst,
             lo_nco,
             last_search_idx: 0,
             current_sync: None,
@@ -185,7 +181,7 @@ impl Decoder {
         }
         self.stats_total_samples += samples.len();
 
-        let spc = self.proc_config.samples_per_chip();
+        let spc = self.config.proc_samples_per_chip();
         let sf = self.config.spread_factor();
         // 処理レート基準でバッファ制限を計算
         let max_buffer_len = 100_000;
@@ -214,7 +210,7 @@ impl Decoder {
         let sync_symbol_len = sync_bits_len;
         let bits_per_symbol_payload = MODULATION.bits_per_symbol();
         let fec_bits_len = self.interleaver.rows() * self.interleaver.cols();
-        let burst_data_bits_len = fec_bits_len * self.packets_per_sync_burst.max(1);
+        let burst_data_bits_len = fec_bits_len * self.config.packets_per_burst.max(1);
         let payload_symbols = burst_data_bits_len.div_ceil(bits_per_symbol_payload);
         let total_symbols = sync_symbol_len + payload_symbols;
         let symbol_len = sf * spc;
@@ -389,7 +385,7 @@ impl Decoder {
         timing_offset: f32,
         sample_shift: f32,
     ) -> Option<Complex32> {
-        let spc = self.proc_config.samples_per_chip().max(1);
+        let spc = self.config.proc_samples_per_chip().max(1);
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         for (chip_idx, &pn_val) in pn.iter().enumerate() {
@@ -419,7 +415,7 @@ impl Decoder {
         pn: &[f32],
     ) -> Option<DecodedSoftBits> {
         let sf = self.config.spread_factor();
-        let spc = self.proc_config.samples_per_chip().max(1);
+        let spc = self.config.proc_samples_per_chip().max(1);
         let symbol_len = sf * spc;
         let bits_per_symbol = MODULATION.bits_per_symbol();
         let symbols_needed = num_bits.div_ceil(bits_per_symbol);
@@ -508,7 +504,7 @@ impl Decoder {
         fec_bits_len: usize,
         p_bits_len: usize,
     ) -> Option<(Vec<Packet>, usize, usize)> {
-        let spc = self.proc_config.samples_per_chip().max(1) as f32;
+        let spc = self.config.proc_samples_per_chip().max(1) as f32;
         let timing_limit = spc * TRACKING_TIMING_LIMIT_CHIP;
         let timing_biases = [-0.75f32 * spc, 0.0, 0.75f32 * spc];
 
@@ -709,12 +705,12 @@ impl Decoder {
         self.interleaver.reset();
         self.resampler_i.reconfigure(
             self.config.sample_rate as u32,
-            self.proc_config.sample_rate as u32,
+            self.config.proc_sample_rate() as u32,
             Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
         );
         self.resampler_q.reconfigure(
             self.config.sample_rate as u32,
-            self.proc_config.sample_rate as u32,
+            self.config.proc_sample_rate() as u32,
             Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
         );
         self.rrc_filter_i.reset();
@@ -737,10 +733,6 @@ impl Decoder {
 
     pub fn recovered_data(&self) -> Option<&[u8]> {
         self.recovered_data.as_deref()
-    }
-
-    pub fn set_packets_per_sync_burst(&mut self, n: usize) {
-        self.packets_per_sync_burst = n;
     }
 }
 
@@ -1273,7 +1265,7 @@ mod tests {
 
         let mut encoder = Encoder::new(enc_cfg);
         let mut decoder = Decoder::new(data.len(), 10, config);
-        decoder.set_packets_per_sync_burst(2);
+        decoder.config.packets_per_burst = 2;
 
         // ウォームアップ
         decoder.process_samples(&vec![0.0f32; 4096]);

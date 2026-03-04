@@ -74,35 +74,24 @@ impl DspConfig {
         }
     }
 
-    /// 指定された設定を基に、内部処理用の設定を生成する。
-    /// サンプルレートは chip_rate * INTERNAL_SPC に固定され、
-    /// ベースバンド処理を前提とするため carrier_freq は 0 となる。
-    pub fn new_for_processing(chip_rate: f32) -> Self {
-        let mut config = DspConfig::new(params::DEFAULT_SAMPLE_RATE);
-        config.chip_rate = chip_rate;
-        Self::new_for_processing_from(&config)
-    }
-
-    pub fn new_for_processing_from(base: &DspConfig) -> Self {
-        let sample_rate = base.chip_rate * (params::INTERNAL_SPC as f32);
-        DspConfig {
-            sample_rate,
-            carrier_freq: 0.0, // ベースバンド
-            mseq_order: base.mseq_order,
-            chip_rate: base.chip_rate,
-            rrc_alpha: base.rrc_alpha,
-            rrc_taps_per_symbol: base.rrc_taps_per_symbol,
-            preamble_repeat: base.preamble_repeat,
-            sync_word_bits: base.sync_word_bits,
-            packets_per_burst: base.packets_per_burst,
-        }
-    }
     pub fn default_48k() -> Self {
         Self::new(params::DEFAULT_SAMPLE_RATE)
     }
+    
     pub fn default_44k() -> Self {
         Self::new(44100.0)
     }
+
+    /// 内部ベースバンド処理のサンプリングレート
+    pub fn proc_sample_rate(&self) -> f32 {
+        self.chip_rate * (params::INTERNAL_SPC as f32)
+    }
+
+    /// 内部処理における1チップあたりのサンプル数
+    pub fn proc_samples_per_chip(&self) -> usize {
+        params::INTERNAL_SPC
+    }
+
     pub fn samples_per_chip(&self) -> usize {
         (self.sample_rate / self.chip_rate) as usize
     }
@@ -113,7 +102,7 @@ impl DspConfig {
         self.samples_per_chip() * self.spread_factor()
     }
     pub fn rrc_num_taps(&self) -> usize {
-        self.rrc_taps_per_symbol * self.samples_per_chip() + 1
+        self.rrc_taps_per_symbol * self.proc_samples_per_chip() + 1
     }
 }
 

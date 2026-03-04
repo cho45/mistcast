@@ -42,8 +42,7 @@ fn phase_to_iq(phase: u8) -> (f32, f32) {
 
 /// MaryDQPSK変調器
 pub struct Modulator {
-    config: DspConfig,
-    proc_config: DspConfig,
+    pub config: DspConfig,
     wdict: WalshDictionary,
     resampler_i: Resampler,
     resampler_q: Resampler,
@@ -56,24 +55,23 @@ pub struct Modulator {
 impl Modulator {
     /// `DspConfig` を指定して変調器を作成する
     pub fn new(config: DspConfig) -> Self {
-        let proc_config = DspConfig::new_for_processing_from(&config);
-        let rrc_i = RrcFilter::from_config(&proc_config);
-        let rrc_q = RrcFilter::from_config(&proc_config);
+        let rrc_i = RrcFilter::from_config(&config);
+        let rrc_q = RrcFilter::from_config(&config);
         let nco = Nco::new(config.carrier_freq, config.sample_rate);
         let wdict = WalshDictionary::default_w16();
 
         // リサンプラのカットオフ設定: 送信側RRCの全帯域を通過させる
-        let rrc_bw = proc_config.chip_rate * (1.0 + proc_config.rrc_alpha) * 0.5;
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
         let cutoff = Some(rrc_bw);
 
         Modulator {
             resampler_i: Resampler::new_with_cutoff(
-                proc_config.sample_rate as u32,
+                config.proc_sample_rate() as u32,
                 config.sample_rate as u32,
                 cutoff,
             ),
             resampler_q: Resampler::new_with_cutoff(
-                proc_config.sample_rate as u32,
+                config.proc_sample_rate() as u32,
                 config.sample_rate as u32,
                 cutoff,
             ),
@@ -81,7 +79,6 @@ impl Modulator {
             rrc_i,
             rrc_q,
             config,
-            proc_config,
             prev_phase: 0,
             nco,
         }
@@ -209,7 +206,7 @@ impl Modulator {
     pub fn flush(&mut self) -> Vec<f32> {
         // RRCフィルタの応答全体（全タップ分）を押し出すために必要な無音サンプルを計算。
         let rrc_taps_bb = self.rrc_i.num_taps().max(self.rrc_q.num_taps());
-        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let rrc_push_out = (rrc_taps_bb as f32 * ratio).ceil() as usize;
 
         let mut out = self.modulate_silence(rrc_push_out);
@@ -233,7 +230,7 @@ impl Modulator {
             return Vec::new();
         }
 
-        let ratio = self.config.sample_rate / self.proc_config.sample_rate;
+        let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let needed_bb = (samples as f32 / ratio).ceil() as usize + 1;
 
         // ベースバンド側で無音を生成
@@ -310,14 +307,15 @@ impl Modulator {
         self.nco.reset();
         self.rrc_i.reset();
         self.rrc_q.reset();
-        let rrc_bw = self.proc_config.chip_rate * (1.0 + self.proc_config.rrc_alpha) * 0.5;
+        let rrc_bw = self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5;
+        let proc_sample_rate = self.config.proc_sample_rate();
         self.resampler_i.reconfigure(
-            self.proc_config.sample_rate as u32,
+            proc_sample_rate as u32,
             self.config.sample_rate as u32,
             Some(rrc_bw),
         );
         self.resampler_q.reconfigure(
-            self.proc_config.sample_rate as u32,
+            proc_sample_rate as u32,
             self.config.sample_rate as u32,
             Some(rrc_bw),
         );
@@ -333,10 +331,10 @@ impl Modulator {
         let rrc_delay_bb = self.rrc_i.delay(); // (num_taps - 1) / 2
                                                // 2. リサンプラの群遅延 (ベースバンドレート)
         let resampler_delay_bb = self.resampler_i.delay() as f64
-            / (self.config.sample_rate as f64 / self.proc_config.sample_rate as f64);
+            / (self.config.sample_rate as f64 / self.config.proc_sample_rate() as f64);
 
         // 合計遅延をターゲットレートへ換算
-        let ratio = self.config.sample_rate as f64 / self.proc_config.sample_rate as f64;
+        let ratio = self.config.sample_rate as f64 / self.config.proc_sample_rate() as f64;
         ((rrc_delay_bb as f64 + resampler_delay_bb) * ratio).round() as usize
     }
 

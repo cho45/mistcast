@@ -55,8 +55,7 @@ pub type LlrCallback = Box<dyn FnMut(&[f32]) + Send>;
 
 /// MaryDQPSKデコーダ
 pub struct Decoder {
-    config: DspConfig,
-    proc_config: DspConfig,
+    pub config: DspConfig,
     resampler_i: Resampler,
     resampler_q: Resampler,
     rrc_filter_i: RrcFilter,
@@ -68,7 +67,6 @@ pub struct Decoder {
     pub recovered_data: Option<Vec<u8>>,
     lo_nco: Nco,
     sync_detector: MarySyncDetector,
-    pub packets_per_sync_burst: usize,
 
     // 同期・追従状態
     last_search_idx: usize,
@@ -103,8 +101,7 @@ struct TrackingState {
 impl Decoder {
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
-        let proc_config = DspConfig::new_for_processing_from(&dsp_config);
-        let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
+        let proc_sample_rate = dsp_config.proc_sample_rate();
         let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
 
         let rrc_bw = dsp_config.chip_rate * (1.0 + dsp_config.rrc_alpha) * 0.5;
@@ -116,26 +113,24 @@ impl Decoder {
         Decoder {
             resampler_i: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
-                proc_config.sample_rate as u32,
+                proc_sample_rate as u32,
                 cutoff,
             ),
             resampler_q: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
-                proc_config.sample_rate as u32,
+                proc_sample_rate as u32,
                 cutoff,
             ),
-            rrc_filter_i: RrcFilter::from_config(&proc_config),
-            rrc_filter_q: RrcFilter::from_config(&proc_config),
+            rrc_filter_i: RrcFilter::from_config(&dsp_config),
+            rrc_filter_q: RrcFilter::from_config(&dsp_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
             demodulator: Demodulator::new(),
-            fountain_decoder: FountainDecoder::new(params),
+            fountain_decoder: FountainDecoder::new(FountainParams::new(fountain_k, PAYLOAD_SIZE)),
             recovered_data: None,
-            config: dsp_config.clone(),
-            sync_detector: MarySyncDetector::new(proc_config.clone(), tc, tf),
-            proc_config,
+            sync_detector: MarySyncDetector::new(dsp_config.clone(), tc, tf),
+            config: dsp_config,
             lo_nco,
-            packets_per_sync_burst: dsp_config.packets_per_burst,
             last_search_idx: 0,
             current_sync: None,
             tracking_state: None,
@@ -187,7 +182,7 @@ impl Decoder {
     }
 
     fn detect_and_process_frames(&mut self) -> DecodeProgress {
-        let spc = self.proc_config.samples_per_chip().max(1);
+        let spc = self.config.proc_samples_per_chip().max(1);
         let sf_preamble = 15;
         let sf_payload = 16;
 
@@ -375,7 +370,7 @@ impl Decoder {
             self.sample_buffer_i.drain(0..packet_samples);
             self.sample_buffer_q.drain(0..packet_samples);
 
-            if self.packets_processed_in_burst >= self.packets_per_sync_burst {
+            if self.packets_processed_in_burst >= self.config.packets_per_burst {
                 self.current_sync = None;
                 self.tracking_state = None;
                 self.last_search_idx = 0;
@@ -523,7 +518,7 @@ impl Decoder {
         timing_offset: f32,
         sample_shift: f32,
     ) -> Option<[Complex32; 16]> {
-        let spc = self.proc_config.samples_per_chip().max(1);
+        let spc = self.config.proc_samples_per_chip().max(1);
         let sf = 16;
         let mut results = [Complex32::new(0.0, 0.0); 16];
 
@@ -1050,7 +1045,7 @@ mod tests {
         let config = DspConfig::default_48k();
         let mut encoder = Encoder::new(config.clone());
         let mut decoder = Decoder::new(160, 10, config);
-        decoder.packets_per_sync_burst = 5;
+        decoder.config.packets_per_burst = 5;
         let data = vec![0x12u8; 80];
         encoder.set_data(&data);
         let mut signal = Vec::new();
@@ -1081,7 +1076,7 @@ mod tests {
         let config = DspConfig::default_48k();
         let mut encoder = Encoder::new(config.clone());
         let mut decoder = Decoder::new(640, 40, config);
-        decoder.packets_per_sync_burst = 40;
+        decoder.config.packets_per_burst = 40;
         let data = vec![0x55u8; 640];
         encoder.set_data(&data);
         let mut signal = Vec::new();
@@ -1155,7 +1150,7 @@ mod tests {
         let mut rx_config = config.clone();
         rx_config.carrier_freq += 20.0;
         let mut decoder = Decoder::new(640, 40, rx_config);
-        decoder.packets_per_sync_burst = 40;
+        decoder.config.packets_per_burst = 40;
         let data = vec![0xAAu8; 640];
         encoder.set_data(&data);
         let mut signal = Vec::new();
@@ -1227,7 +1222,7 @@ mod tests {
         let data_size = 160;
         let fountain_k = 10;
         let mut decoder = Decoder::new(data_size, fountain_k, config.clone());
-        decoder.packets_per_sync_burst = 1; // 1パケットごとに同期が必要な設定
+        decoder.config.packets_per_burst = 1; // 1パケットごとに同期が必要な設定
         
         let data = vec![0x55u8; data_size];
         encoder.set_data(&data);

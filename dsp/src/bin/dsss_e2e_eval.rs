@@ -627,7 +627,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let mut encoder = DsssEncoder::new(enc_cfg);
     let mut stream = encoder.encode_stream(&payload);
     let mut decoder = DsssDecoder::new(payload.len(), k, rx_cfg);
-    decoder.set_packets_per_sync_burst(cli.packets_per_burst);
+    decoder.config.packets_per_burst = cli.packets_per_burst;
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;
@@ -752,7 +752,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     encoder.set_data(&payload);
 
     let mut decoder = MaryDecoder::new(payload.len(), k, rx_cfg);
-    decoder.packets_per_sync_burst = cli.packets_per_burst;
+    decoder.config.packets_per_burst = cli.packets_per_burst;
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;
