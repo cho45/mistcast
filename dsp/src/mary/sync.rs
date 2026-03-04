@@ -35,7 +35,7 @@ impl MarySyncDetector {
     pub const THRESHOLD_FINE_DEFAULT: f32 = 0.23;
 
     pub fn new(config: DspConfig, threshold_coarse: f32, threshold_fine: f32) -> Self {
-        let preamble_sf = 13;
+        let preamble_sf = config.preamble_sf;
         let sync_sf = 15;
         let spc = config.proc_samples_per_chip().max(1);
 
@@ -107,7 +107,7 @@ impl MarySyncDetector {
         let sync_part_len = self.sync_sym_len * self.config.sync_word_bits;
         let required_len = preamble_len + sync_part_len;
         let spc = self.spc;
-        let coarse_step = spc.max(1);
+        let coarse_step = 1;
 
         // プリアンブル + SYNC_WORD 分まで見えてから同期確定する。
         if i_ch.len() < start_offset + required_len {
@@ -254,8 +254,9 @@ impl MarySyncDetector {
             };
             total_rho_p += rho_p_sym;
 
-            min_power = min_power.min(mag2);
-            max_power = max_power.max(mag2);
+            let norm_pow = en / sf as f32;
+            min_power = min_power.min(norm_pow);
+            max_power = max_power.max(norm_pow);
 
             if rep > 0 && last_mag > 1e-9 && mag > 1e-9 {
                 let re = last_ci * ci + last_cq * cq;
@@ -293,6 +294,24 @@ impl MarySyncDetector {
 
         (score.max(0.0), (last_ci, last_cq))
     }
+
+    /// プリアンブル相関を用いてチャネルインパルス応答 (CIR) を推定し、提供されたバッファに書き込む。
+    /// 同期開始位置 `n` (チップ同期済み想定) において、複素ベースバンド相関を行う。
+    pub fn estimate_cir(&self, i_ch: &[f32], q_ch: &[f32], n: usize, out: &mut [Complex32]) {
+        if out.is_empty() {
+            return;
+        }
+        let sf = self.preamble_sf;
+        // バッファ長が sf 未満の場合はその分だけ、sf 以上の場合は sf 分までを基本とするが、
+        // 呼び出し側がマルチパスの最大遅延を考慮して sf 以上を要求する場合もあり得る。
+        for d in 0..out.len() {
+            if n + d * self.spc >= i_ch.len() {
+                break;
+            }
+            let (ci, cq, _) = self.correlate_one_symbol(i_ch, q_ch, n + d * self.spc, true);
+            out[d] = Complex32::new(ci, cq) / sf as f32;
+        }
+    }
 }
 
 pub fn downconvert(
@@ -300,16 +319,15 @@ pub fn downconvert(
     sample_offset: usize,
     config: &DspConfig,
 ) -> (Vec<f32>, Vec<f32>) {
-    let two_pi = 2.0 * std::f32::consts::PI;
-    let fs = config.sample_rate;
-    let fc = config.carrier_freq;
+    use crate::common::nco::Nco;
+    let mut nco = Nco::new(-config.carrier_freq, config.sample_rate);
+    nco.skip(sample_offset);
     let mut i_ch = Vec::with_capacity(samples.len());
     let mut q_ch = Vec::with_capacity(samples.len());
-    for (k, &s) in samples.iter().enumerate() {
-        let t = (sample_offset + k) as f32 / fs;
-        let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
-        i_ch.push(s * cos_v * 2.0);
-        q_ch.push(s * (-sin_v) * 2.0);
+    for &s in samples {
+        let lo = nco.step();
+        i_ch.push(s * lo.re * 2.0);
+        q_ch.push(s * lo.im * 2.0);
     }
     (i_ch, q_ch)
 }
@@ -955,5 +973,127 @@ mod tests {
         }
 
         (i_ch, q_ch)
+    }
+
+    fn simulate_rx_frontend(samples: &[f32], config: &DspConfig) -> (Vec<f32>, Vec<f32>) {
+        let (i_raw, q_raw) = downconvert(samples, 0, config);
+
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+        let mut resampler_i = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+        );
+        let mut resampler_q = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+        );
+        let mut i_res = Vec::new();
+        let mut q_res = Vec::new();
+        resampler_i.process(&i_raw, &mut i_res);
+        resampler_q.process(&q_raw, &mut q_res);
+
+        let mut rrc_i = RrcFilter::from_config(config);
+        let mut rrc_q = RrcFilter::from_config(config);
+        let i_ch: Vec<f32> = i_res.iter().map(|&s| rrc_i.process(s)).collect();
+        let q_ch: Vec<f32> = q_res.iter().map(|&s| rrc_q.process(s)).collect();
+
+        (i_ch, q_ch)
+    }
+
+    #[test]
+    fn test_sync_sf_sweep() {
+        for sf in [13, 31, 63, 127] {
+            let mut config = DspConfig::default_48k();
+            // test downsampling behavior 
+            config.preamble_sf = sf;
+            
+            let mut modulator = Modulator::new(config.clone());
+            let mut frame = modulator.encode_frame(&[]);
+            // フィルタ遅延によって波形が後ろにズレるため、受信十分なマージン（無音）を追加する
+            frame.extend(vec![0.0; 4000]);
+            let (i_ch, q_ch) = simulate_rx_frontend(&frame, &config);
+            
+            let detector = MarySyncDetector::new(config.clone(), 0.15, 0.18);
+            
+            let required_len = (sf * config.preamble_repeat + 15 * config.sync_word_bits) * config.proc_samples_per_chip();
+            assert!(i_ch.len() > required_len, "i_ch not large enough");
+            let mut sync_found = None;
+            for offset in 0..(i_ch.len() - required_len) {
+                let (res, _) = detector.detect(&i_ch, &q_ch, offset);
+                if res.is_some() {
+                    sync_found = res;
+                    break;
+                }
+            }
+            
+            if sync_found.is_none() {
+                // 最大スコアを全範囲で探してデバッグ出力
+                let mut max_score = 0.0f32;
+                let mut max_idx = 0;
+                for offset in 0..(i_ch.len() - required_len) {
+                    let (score, _) = detector.score_candidate(&i_ch, &q_ch, offset, config.preamble_repeat + config.sync_word_bits);
+                    if score > max_score {
+                        max_score = score;
+                        max_idx = offset;
+                    }
+                }
+                println!("  SF={} sync failed. Max manual score was {:.4} at offset {}", sf, max_score, max_idx);
+            }
+
+            assert!(sync_found.is_some(), "Sync failed for SF={}", sf);
+            let result = sync_found.unwrap();
+            println!("SF={}: score={:.4}, idx={}", sf, result.score, result.peak_sample_idx);
+            assert!(result.score > 0.8, "Score too low for SF={}: {}", sf, result.score);
+        }
+    }
+
+
+    #[test]
+    fn test_estimate_cir_simple_multipath() {
+        let sf = 31;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = sf;
+        
+        let mut modulator = Modulator::new(config.clone());
+        let mut frame = modulator.encode_frame(&[]);
+        frame.extend(vec![0.0; 4000]);
+
+        // まずマルチパスをパスバンドでかける（本当はベースバンドでも良いが、モジュレータ出力はパスバンド）
+        let mut multipath_frame = frame.clone();
+        let delay_samples = 5 * config.proc_samples_per_chip() * (config.sample_rate / config.proc_sample_rate()) as usize;
+        // 位相がどう回るかは複雑なのでここでは単純なゲイン減衰だけにする
+        let gain = 0.5f32;
+        for t in delay_samples..frame.len() {
+            multipath_frame[t] += frame[t - delay_samples] * gain;
+        }
+
+        let (i_ch, q_ch) = simulate_rx_frontend(&multipath_frame, &config);
+
+        let detector = MarySyncDetector::new(config.clone(), 0.15, 0.18); // 少し低めに設定
+        let (res, _) = detector.detect(&i_ch, &q_ch, 0);
+        assert!(res.is_some(), "Sync failed in multipath");
+        let sync_res = res.unwrap();
+
+        let spc = config.proc_samples_per_chip();
+        let sync_idx = sync_res.peak_sample_idx.saturating_sub(sf * config.preamble_repeat * spc).saturating_sub(spc / 2);
+        let mut est_cir = vec![Complex32::new(0.0, 0.0); sf];
+        detector.estimate_cir(&i_ch, &q_ch, sync_idx, &mut est_cir);
+
+        // 第0タップで正規化（位相回転も補正）
+        let ref_val = est_cir[0];
+        for val in est_cir.iter_mut() {
+            *val /= ref_val;
+        }
+
+        println!("Estimated CIR (normalized by Tap 0):");
+        for (i, val) in est_cir.iter().enumerate().take(10) {
+            println!("  [{}] {:.4} + {:.4}j (mag={:.4})", i, val.re, val.im, val.norm());
+        }
+
+        assert!((est_cir[0].re - 1.0).abs() < 0.1);
+        assert!((est_cir[0].im).abs() < 0.1);
+        assert!((est_cir[5].norm() - 0.5).abs() < 0.1, "Failed to estimate 0.5 magnitude tap at index 5");
     }
 }
