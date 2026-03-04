@@ -36,6 +36,8 @@ const SAMPLE_FILES: SampleFile[] = [
 
 const selectedSample = ref<SampleFile>(SAMPLE_FILES[0]);
 
+type ToastType = 'error' | 'warning' | 'success';
+
 interface Toast {
   id: number;
   message: string;
