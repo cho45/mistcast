@@ -6,6 +6,8 @@
     "start": "Start",
     "stop": "Stop",
     "reset": "Reset",
+    "reset_restart": "Reset & Restart",
+    "receive_next": "Receive Next Data",
     "clear": "Clear",
     "done": "Done",
     "close": "Close",

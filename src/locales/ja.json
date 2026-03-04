@@ -6,6 +6,8 @@
     "start": "スタート",
     "stop": "停止",
     "reset": "リセット",
+    "reset_restart": "リセットして再試行",
+    "receive_next": "次のデータを受信",
     "clear": "クリア",
     "done": "完了",
     "close": "閉じる",

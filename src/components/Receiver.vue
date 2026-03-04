@@ -33,6 +33,9 @@ const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
 
+// 直近のパケット成否履歴 (true: 成功, false: CRCエラー)
+const recentPacketHistory = ref<boolean[]>([]);
+
 const basisMatrixK = ref(0);
 
 const decoderProcAvgMs = ref(0);
@@ -89,6 +92,10 @@ onUnmounted(() => {
   runtime.onResetReceiver.value = null;
 });
 
+// 信号中断とみなすティック数。
+// 1tick ≈ 85.3ms (4096 samples / 48000Hz) なので、35 ticks ≈ 3.0s。
+const SIGNAL_LOSS_THRESHOLD_TICKS = 35;
+
 const guideMessage = computed(() => {
   if (receiverStatus.value === 'mic-error') {
     return { text: t('receiver.guide.mic_error'), type: 'error' };
@@ -98,13 +105,13 @@ const guideMessage = computed(() => {
   }
 
   // 1. 信号中断の検知 (受信中なのに一定時間更新がない)
-  if (receivedPackets.value > 0 && rxNoChangeTicks.value > 120) {
+  if (receivedPackets.value > 0 && rxNoChangeTicks.value > SIGNAL_LOSS_THRESHOLD_TICKS) {
     return { text: t('receiver.guide.signal_loss'), type: 'warning' };
   }
 
-  // 2. 高エラー率の検知 (パケット破損が多い)
-  const totalAttempts = receivedPackets.value + crcErrorPackets.value;
-  if (totalAttempts > 10 && (crcErrorPackets.value / totalAttempts) > 0.4) {
+  // 2. 高エラー率の検知 (直近10件のうち40%以上がエラーであれば警告)
+  const recentErrors = recentPacketHistory.value.filter(v => !v).length;
+  if (recentPacketHistory.value.length >= 5 && (recentErrors / recentPacketHistory.value.length) >= 0.4) {
     return { text: t('receiver.guide.high_error'), type: 'warning' };
   }
 
@@ -143,6 +150,12 @@ const displayStatus = computed(() => {
     case 'mic-error': return t('receiver.status.error');
     default: return receiverStatus.value;
   }
+});
+
+const resetButtonLabel = computed(() => {
+  return progressPercent.value >= 1.0 
+    ? t('common.receive_next') 
+    : t('common.reset_restart');
 });
 
 const inputMode = ref<InputMode>('loopback');
@@ -290,6 +303,7 @@ function resetDecoderProgressState(clearLogs: boolean) {
   lastPacketSeq.value = -1;
   lastRankUpSeq.value = -1;
   progressPercent.value = 0;
+  recentPacketHistory.value = [];
   if (clearLogs) {
     rxLogs.value = [];
     rxTick.value = 0;
@@ -317,6 +331,7 @@ function makeOnPacketCallback() {
 function makeOnProgressCallback() {
   return Comlink.proxy((p: any) => {
     const prevReceived = receivedPackets.value;
+    const prevCrcErrors = crcErrorPackets.value;
     const prevRank = rankPackets.value;
 
     receivedPackets.value = p.received;
@@ -331,6 +346,22 @@ function makeOnProgressCallback() {
     lastPacketSeq.value = p.lastPacketSeq ?? -1;
     lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
     progressPercent.value = p.progress;
+
+    // 直近の履歴を更新 (差分があった場合)
+    if (p.received > prevReceived) {
+      for (let i = 0; i < (p.received - prevReceived); i++) {
+        recentPacketHistory.value.push(true);
+      }
+    }
+    if (p.crcErrors > prevCrcErrors) {
+      for (let i = 0; i < (p.crcErrors - prevCrcErrors); i++) {
+        recentPacketHistory.value.push(false);
+      }
+    }
+    // 直近10件に制限
+    if (recentPacketHistory.value.length > 10) {
+      recentPacketHistory.value.splice(0, recentPacketHistory.value.length - 10);
+    }
 
     // ステータス更新: パケットを受信し始めており、かつ未完了・未エラーの場合
     if (receivedPackets.value > 0 && progressPercent.value < 1.0 && receiverStatus.value !== 'error' && receiverStatus.value !== 'mic-error') {
@@ -670,8 +701,14 @@ defineExpose({
         <p v-else class="placeholder">No decoded data</p>
       </div>
       <div class="progress-footer">
-        <button @click="reset" class="btn btn-clear-action" :disabled="!runtime.coreReady.value || isTogglingMic">
-          {{ $t('common.clear') }} & {{ $t('common.reset') }}
+        <button 
+          @click="reset" 
+          class="btn btn-restart" 
+          :class="{ 'btn-primary': progressPercent >= 1.0 }"
+          :disabled="!runtime.coreReady.value || isTogglingMic"
+        >
+          <span class="icon">{{ progressPercent >= 1.0 ? '📥' : '🔄' }}</span>
+          {{ resetButtonLabel }}
         </button>
       </div>
     </div>
@@ -961,32 +998,57 @@ code {
 }
 
 .progress-footer {
-  margin-top: 1rem;
+  margin-top: 1.2rem;
   display: flex;
   justify-content: center;
 }
 
-.btn-clear-action {
+.btn-restart {
   width: 100%;
-  padding: 0.6rem 1rem;
-  font-size: 0.88rem;
-  border: 1px dashed #cbd5e1;
-  color: #64748b;
-  background: #f8fafc;
-  transition: all 0.2s ease;
+  padding: 0.75rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  border: 2px solid #e2eaf3;
+  color: var(--muted);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
-.btn-clear-action:hover:not(:disabled) {
-  border-style: solid;
-  border-color: #b94731;
-  color: #b94731;
-  background: #fef2f2;
+.btn-restart .icon {
+  font-size: 1.1rem;
 }
 
-.btn-clear-action:disabled {
-  border-color: #e2e8f0;
-  color: #cbd5e1;
-  background: transparent;
+.btn-restart:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: #f0f7ff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 107, 215, 0.12);
+}
+
+.btn-restart.btn-primary {
+  border-color: var(--primary-strong);
+  box-shadow: 0 4px 14px rgba(15, 107, 215, 0.3);
+}
+
+.btn-restart.btn-primary:hover:not(:disabled) {
+  background: var(--primary-strong);
+  color: #fff;
+}
+
+.btn-restart:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-restart:disabled {
+  opacity: 0.5;
+  border-color: #f1f5f9;
+  box-shadow: none;
 }
 
 @media (max-width: 779px) {

@@ -47,9 +47,9 @@ describe('Receiver.vue', () => {
     expect(micTab).toBeDefined();
 
     // クリアボタンを確認
-    const clearButton = wrapper.find('.btn-clear-action');
+    const clearButton = wrapper.find('.btn-restart');
     expect(clearButton.exists()).toBe(true);
-    expect(clearButton.text()).includes('Clear & Reset');
+    expect(clearButton.text()).includes('Reset & Restart');
   });
 
   describe('Debug Mode', () => {
