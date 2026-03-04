@@ -176,4 +176,66 @@ describe('extractImagePayload', () => {
       expect(result?.bytes).toEqual(new Uint8Array(gifData.slice(8)));
     });
   });
+
+  describe('AVIF detection', () => {
+    it('should detect AVIF with avif brand', () => {
+      // AVIF structure (ISOBMFF):
+      // offset 0-3: box size (big-endian)
+      // offset 4-7: "ftyp" box type
+      // offset 8-11: brand ("avif" or "avis")
+      const avifData = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, // box size: 32 bytes
+        0x66, 0x74, 0x79, 0x70, // "ftyp"
+        0x61, 0x76, 0x69, 0x66, // "avif" brand
+        0x00, 0x00, 0x00, 0x00, // version/flags
+        // ... rest of AVIF data
+      ]);
+
+      const result = extractImagePayload(avifData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/avif');
+      expect(result?.bytes).toStrictEqual(avifData);
+    });
+
+    it('should detect AVIF with avis brand', () => {
+      // AVIF with "avis" brand (AVIF image sequence)
+      const avifData = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, // box size
+        0x66, 0x74, 0x79, 0x70, // "ftyp"
+        0x61, 0x76, 0x69, 0x73, // "avis" brand
+        0x00, 0x00, 0x00, 0x00, // version/flags
+        // ... rest of AVIF data
+      ]);
+
+      const result = extractImagePayload(avifData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/avif');
+      expect(result?.bytes).toStrictEqual(avifData);
+    });
+
+    it('should not detect ftyp with non-AVIF brand', () => {
+      // ISOBMFF file with different brand (e.g., MP4)
+      const mp4Data = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, // box size
+        0x66, 0x74, 0x79, 0x70, // "ftyp"
+        0x6d, 0x70, 0x34, 0x32, // "mp42" brand (not AVIF)
+        0x00, 0x00, 0x00, 0x00, // version/flags
+      ]);
+
+      const result = extractImagePayload(mp4Data);
+      expect(result).toBeNull();
+    });
+
+    it('should require at least 12 bytes for AVIF detection', () => {
+      // Too short to be valid AVIF
+      const shortData = new Uint8Array([
+        0x00, 0x00, 0x00, 0x20, // box size
+        0x66, 0x74, 0x79, 0x70, // "ftyp"
+        0x61, 0x76, 0x69, // incomplete "avif" brand
+      ]);
+
+      const result = extractImagePayload(shortData);
+      expect(result).toBeNull();
+    });
+  });
 });

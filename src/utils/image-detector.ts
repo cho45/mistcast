@@ -5,7 +5,7 @@ export interface ImagePayload {
 
 /**
  * Detect if the given data contains an image payload.
- * Supports PNG, JPEG, GIF, and WebP formats.
+ * Supports PNG, JPEG, GIF, WebP, and AVIF formats.
  * Returns the image MIME type and the image bytes, or null if no image is detected.
  */
 export function extractImagePayload(data: Uint8Array): ImagePayload | null {
@@ -32,6 +32,21 @@ export function extractImagePayload(data: Uint8Array): ImagePayload | null {
 
   const GIF_MAGIC = [0x47, 0x49, 0x46, 0x38];
   const WEBP_MAGIC = [0x52, 0x49, 0x46, 0x46];
+
+  // AVIF detection (ISOBMFF-based format)
+  // offset 4-7: "ftyp" box type
+  // offset 8-11: brand ("avif" or "avis")
+  if (data.length >= 12) {
+    const FTYP_MAGIC = [0x66, 0x74, 0x79, 0x70]; // "ftyp"
+    const AVIF_BRAND = [0x61, 0x76, 0x69, 0x66]; // "avif"
+    const AVIS_BRAND = [0x61, 0x76, 0x69, 0x73]; // "avis"
+
+    if (checkHeader(4, FTYP_MAGIC)) {
+      if (checkHeader(8, AVIF_BRAND) || checkHeader(8, AVIS_BRAND)) {
+        return { mime: 'image/avif', bytes: data };
+      }
+    }
+  }
 
   for (let offset = 0; offset <= Math.min(16, data.length - 4); offset++) {
     if (checkHeader(offset, GIF_MAGIC) && data.length > offset + 4) {
