@@ -89,26 +89,25 @@ impl Modulator {
         Self::new(DspConfig::default_48k())
     }
 
-    /// プリアンブル (Walsh[0]の [W, W, W, -W] パターン) を生成する
+    /// プリアンブル (Zadoff-Chu系列 SF=13) を生成する
     ///
     /// 最後のシンボルを反転させることで同期の曖昧さを排除する。
     pub fn generate_preamble(&mut self) -> Vec<f32> {
-        let sf = 15; // プリアンブルはsf=15
+        let sf = 13; // プリアンブルは Zadoff-Chu SF=13
         let repeat = self.config.preamble_repeat;
         let mut chips_i = Vec::with_capacity(sf * repeat);
         let mut chips_q = Vec::with_capacity(sf * repeat);
 
-        for i in 0..repeat {
-            // 最後のシンボルのみ反転 (DBPSK delta=2)、それ以外はそのまま (delta=0)
-            let delta = if i == repeat - 1 { 2 } else { 0 };
-            self.prev_phase = (self.prev_phase + delta) & 0x03;
-            let (si, sq) = phase_to_iq(self.prev_phase);
+        let zc = crate::common::zadoff_chu::ZadoffChu::new(sf, 1);
+        let zc_seq = zc.generate_sequence();
 
-            let walsh_seq = &self.wdict.w16[0]; // Walsh[0]
-            for &w in walsh_seq.iter().take(sf) {
-                let w_val = w as f32;
-                chips_i.push(si * w_val);
-                chips_q.push(sq * w_val);
+        for i in 0..repeat {
+            // 最後のシンボルのみ反転
+            let sign = if i == repeat - 1 { -1.0 } else { 1.0 };
+
+            for val in &zc_seq {
+                chips_i.push(sign * val.re);
+                chips_q.push(sign * val.im);
             }
         }
 
@@ -366,7 +365,7 @@ mod tests {
         preamble.extend(mod_.flush());
 
         let config = DspConfig::default_48k();
-        let expected_base = 15 * config.preamble_repeat * config.samples_per_chip();
+        let expected_base = 13 * config.preamble_repeat * config.samples_per_chip();
 
         // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
         // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
@@ -654,15 +653,15 @@ mod tests {
         assert!(frame.iter().all(|&s| s.is_finite()));
 
         // フレーム長の妥当性計算:
-        // 1. プリアンブル: sf=15, repeat=2, spc=6 -> 180
+        // 1. プリアンブル: sf=13, repeat=2, spc=6 -> 156
         // 2. 同期ワード: sf=15, bits=16, spc=6 -> 1440
         // 3. ペイロード: sf=16, symbols=1, spc=6 -> 96
         // 4. マージン: sf=16, symbols=1, spc=6 -> 96
-        let preamble_len = 15 * 2 * 6;
+        let preamble_len = 13 * 2 * 6;
         let sync_len = 15 * 16 * 6;
         let payload_len = 96;
         let margin_len = 96;
-        let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1812
+        let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1788
 
         // 物理的テール (32サンプル) を加算
         // encode_frame() 内部ですでに flush() が呼ばれており、RRCのテールは押し出されている。
@@ -686,10 +685,10 @@ mod tests {
         let mut preamble = mod_.generate_preamble();
         preamble.extend(mod_.flush());
 
-        // プリアンブルはWalsh[0]で構成される
-        let sf = 15;
+        // プリアンブルはZadoff-Chu SF=13で構成される
+        let sf = 13;
         let repeat = mod_.config.preamble_repeat;
-        let expected_base = sf * repeat * mod_.config.samples_per_chip(); // 180
+        let expected_base = sf * repeat * mod_.config.samples_per_chip(); // 156
 
         // 物理的テール (130サンプル) を加算
         let expected_total = expected_base + 130;
@@ -763,14 +762,14 @@ mod tests {
 
     // ========== 厳密な信号処理テスト ==========
 
-    /// プリアンブルの数学的正しさ：sf=15, Walsh[0], 符号反転パターン
+    /// プリアンブルの数学的正しさ：sf=13, Zadoff-Chu, 符号反転パターン
     #[test]
     fn test_preamble_math_rigor() {
         let mut mod_ = make_modulator();
         mod_.reset();
 
         let preamble = mod_.generate_preamble();
-        let sf = 15;
+        let sf = 13;
         let repeat = mod_.config.preamble_repeat;
 
         // 根拠1: RRCフィルタの群遅延 (L-1)/2サンプル + リサンプラの補間遅延
@@ -1204,7 +1203,7 @@ mod tests {
 
         let repeat = mod_.config.preamble_repeat;
         let spc = mod_.config.samples_per_chip();
-        let symbol_len = 15 * spc;
+        let symbol_len = 13 * spc;
         let delay = mod_.delay();
 
         // 各シンボルのエネルギーを、物理的な遅延を考慮した窓で計算

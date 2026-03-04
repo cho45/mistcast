@@ -3,8 +3,9 @@
 //! 1シンボルごとに相関電力を計算し、それらを足し合わせることで、
 //! 位相回転やクロックズレに強い同期捕捉を実現する。
 
-use crate::common::walsh::WalshDictionary;
+// use crate::common::walsh::WalshDictionary; // unused in current file
 use crate::DspConfig;
+use num_complex::Complex32;
 
 #[derive(Debug, Clone)]
 pub struct SyncResult {
@@ -15,34 +16,44 @@ pub struct SyncResult {
 
 pub struct MarySyncDetector {
     config: DspConfig,
-    pn: Vec<f32>,
-    sync_symbols: Vec<f32>, // プリアンブル構造 + SYNC_WORD
-    sf: usize,
+    preamble_pn: Vec<Complex32>,  // Zadoff-Chu SF=13
+    sync_pn: Vec<f32>,            // Walsh[0] SF=15
+    sync_symbols: Vec<f32>,       // プリアンブル構造 + SYNC_WORD
+    preamble_sf: usize,
+    sync_sf: usize,
     spc: usize,
-    sym_len: usize,
+    preamble_sym_len: usize,
+    sync_sym_len: usize,
     pub threshold_coarse: f32,
     pub threshold_fine: f32,
 }
 
 impl MarySyncDetector {
-    /// 基準となるデフォルトのしきい値 (SF=15 用に最適化)
-    pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.10;
-    pub const THRESHOLD_FINE_DEFAULT: f32 = 0.14;
+    /// デフォルトのしきい値 (ZC SF=13 プリアンブル + Walsh SF=15 同期ワード用)
+    /// ROC分析に基づく: ノイズ FAR 1% → 0.23, FAR 0.1% → 0.30
+    pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.20;
+    pub const THRESHOLD_FINE_DEFAULT: f32 = 0.23;
 
     pub fn new(config: DspConfig, threshold_coarse: f32, threshold_fine: f32) -> Self {
-        let sf = 15; // M-aryのプリアンブル/Syncは常にSF=15
+        let preamble_sf = 13;
+        let sync_sf = 15;
         let spc = config.proc_samples_per_chip().max(1);
 
-        let wdict = WalshDictionary::default_w16();
-        let pn: Vec<f32> = wdict.w16[0].iter().take(sf).map(|&x| x as f32).collect();
+        let zc = crate::common::zadoff_chu::ZadoffChu::new(preamble_sf, 1);
+        let preamble_pn = zc.generate_sequence();
 
-        let sym_len = sf * spc;
+        let wdict = crate::common::walsh::WalshDictionary::default_w16();
+        let sync_pn: Vec<f32> = wdict.w16[0].iter().take(sync_sf).map(|&x| x as f32).collect();
 
-        // 36シンボルの期待される符号系列 (BPSK) を構築
-        // Preamble: [1, 1, 1, -1] (repeat=4の場合)
-        // SYNC_WORD: 32 bits (デフォルト設定)
+        let preamble_sym_len = preamble_sf * spc;
+        let sync_sym_len = sync_sf * spc;
+
+        // 18シンボルの期待される符号系列 (BPSK/DQPSK) を構築
+        // Preamble: [1, -1] (repeat=2の場合)
+        // SYNC_WORD: 16 bits (デフォルト設定)
         let mut sync_symbols = Vec::with_capacity(config.preamble_repeat + config.sync_word_bits);
         for rep in 0..config.preamble_repeat {
+            // Modulator.generate_preamble: last one is inverted
             let sign = if rep == config.preamble_repeat - 1 {
                 -1.0
             } else {
@@ -51,28 +62,37 @@ impl MarySyncDetector {
             sync_symbols.push(sign);
         }
 
+        // Sync Word bits (16 bits)
+        // Modulator.encode_frame: uses prev_phase (starts at 0) and DBPSK delta
+        let mut current_phase_factor = 1.0f32; // prev_phase = 0 -> factor 1.0
         let word = crate::params::SYNC_WORD;
         for i in 0..config.sync_word_bits {
             let bit = (word >> (config.sync_word_bits - 1 - i)) & 1;
-            // DBPSK: bit=0 -> 位相維持(0), bit=1 -> 位相遷移(π)
-            // 期待される位相遷移(乗算)は、bit=0なら1.0、bit=1なら-1.0
-            sync_symbols.push(if bit == 0 { 1.0 } else { -1.0 });
+            // DBPSK: bit=0 -> delta=0 (0 deg), bit=1 -> delta=2 (180 deg)
+            if bit != 0 {
+                current_phase_factor *= -1.0;
+            }
+            sync_symbols.push(current_phase_factor);
         }
 
         MarySyncDetector {
             config,
-            pn,
+            preamble_pn,
+            sync_pn,
             sync_symbols,
-            sf,
+            preamble_sf,
+            sync_sf,
             spc,
-            sym_len,
+            preamble_sym_len,
+            sync_sym_len,
             threshold_coarse,
             threshold_fine,
         }
     }
 
     pub fn filter_delay(&self) -> usize {
-        self.config.rrc_num_taps() - 1
+        // RRCフィルタの群遅延 (L-1)/2
+        (self.config.rrc_num_taps() - 1) / 2
     }
 
     pub fn detect(
@@ -81,11 +101,11 @@ impl MarySyncDetector {
         q_ch: &[f32],
         start_offset: usize,
     ) -> (Option<SyncResult>, usize) {
-        let sym_len = self.sym_len;
         let repeat = self.config.preamble_repeat;
         let unified_len = self.sync_symbols.len();
-        let preamble_len = sym_len * repeat;
-        let required_len = unified_len * sym_len;
+        let preamble_len = self.preamble_sym_len * repeat;
+        let sync_part_len = self.sync_sym_len * self.config.sync_word_bits;
+        let required_len = preamble_len + sync_part_len;
         let spc = self.spc;
         let coarse_step = spc.max(1);
 
@@ -98,7 +118,7 @@ impl MarySyncDetector {
 
             // --- 1. 粗同期 & 精密同期 ---
             for n in (start_offset..=search_range_end).step_by(coarse_step) {
-                let (score, _) = self.score_candidate(i_ch, q_ch, n, repeat, sym_len);
+                let (score, _) = self.score_candidate(i_ch, q_ch, n, repeat);
 
                 if score > self.threshold_coarse || provisional_best.is_some() {
                     // --- 2. 精密同期 (ピーク周辺を1サンプル刻みで) ---
@@ -111,7 +131,7 @@ impl MarySyncDetector {
                     let mut last_sym_iq = (0.0, 0.0);
                     for fn_idx in f_start..=f_end {
                         let (f_score, f_iq) =
-                            self.score_candidate(i_ch, q_ch, fn_idx, unified_len, sym_len);
+                            self.score_candidate(i_ch, q_ch, fn_idx, unified_len);
                         if f_score >= fine_best_score {
                             fine_best_score = f_score;
                             fine_best_idx = fn_idx;
@@ -159,7 +179,7 @@ impl MarySyncDetector {
             if let Some((res, idx)) = provisional_best {
                 (Some(res), idx)
             } else {
-                let keep_tail = sym_len * 2 + spc;
+                let keep_tail = required_len * 2 + spc;
                 let next_idx = (search_range_end + 1).saturating_sub(keep_tail);
                 (None, next_idx)
             }
@@ -167,20 +187,34 @@ impl MarySyncDetector {
     }
 
     /// 1シンボル分だけの相関を計算
-    fn correlate_one_symbol(&self, i_ch: &[f32], q_ch: &[f32], offset: usize) -> (f32, f32, f32) {
+    fn correlate_one_symbol(&self, i_ch: &[f32], q_ch: &[f32], offset: usize, is_preamble: bool) -> (f32, f32, f32) {
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         let mut sum_en = 0.0f32;
 
         let mut p = offset + (self.spc / 2);
-        for &rv in &self.pn {
-            debug_assert!(p < i_ch.len() && p < q_ch.len());
-            let si = i_ch[p];
-            let sq = q_ch[p];
-            sum_i += si * rv;
-            sum_q += sq * rv;
-            sum_en += si * si + sq * sq;
-            p += self.spc;
+        
+        if is_preamble {
+            for val in &self.preamble_pn {
+                debug_assert!(p < i_ch.len() && p < q_ch.len());
+                let si = i_ch[p];
+                let sq = q_ch[p];
+                // 複素共役との積和 (si + j sq) * (re - j im)
+                sum_i += si * val.re + sq * val.im; // (実部)
+                sum_q += sq * val.re - si * val.im; // (虚部)
+                sum_en += si * si + sq * sq;
+                p += self.spc;
+            }
+        } else {
+            for &rv in &self.sync_pn {
+                debug_assert!(p < i_ch.len() && p < q_ch.len());
+                let si = i_ch[p];
+                let sq = q_ch[p];
+                sum_i += si * rv;
+                sum_q += sq * rv;
+                sum_en += si * si + sq * sq;
+                p += self.spc;
+            }
         }
         (sum_i, sum_q, sum_en)
     }
@@ -191,7 +225,6 @@ impl MarySyncDetector {
         q_ch: &[f32],
         n: usize,
         num_symbols: usize,
-        sym_len: usize,
     ) -> (f32, (f32, f32)) {
         let mut total_rho_p = 0.0f32;
         let mut min_power = f32::INFINITY;
@@ -204,14 +237,18 @@ impl MarySyncDetector {
         let mut last_ci = 0.0f32;
         let mut last_cq = 0.0f32;
         let mut last_mag = 0.0f32;
+        
+        let mut current_offset = n;
 
         for rep in 0..num_symbols {
-            let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, n + rep * sym_len);
+            let is_preamble = rep < self.config.preamble_repeat;
+            let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, current_offset, is_preamble);
             let mag2 = ci * ci + cq * cq;
             let mag = mag2.sqrt();
+            let sf = if is_preamble { self.preamble_sf } else { self.sync_sf };
 
             let rho_p_sym = if en > 1e-9 {
-                mag2 / (self.sf as f32 * en)
+                mag2 / (sf as f32 * en)
             } else {
                 0.0
             };
@@ -234,6 +271,9 @@ impl MarySyncDetector {
             last_ci = ci;
             last_cq = cq;
             last_mag = mag;
+            
+            let sym_len = if is_preamble { self.preamble_sym_len } else { self.sync_sym_len };
+            current_offset += sym_len;
         }
 
         let rho_p = total_rho_p / num_symbols as f32;
@@ -371,7 +411,7 @@ mod tests {
                 return (0.0, 0);
             }
             for n in 0..=(i.len() - required_len) {
-                let (score, _) = detector.score_candidate(i, q, n, unified_len, sym_len);
+                let (score, _) = detector.score_candidate(i, q, n, unified_len);
                 if score > best_score {
                     best_score = score;
                     best_idx = n;
@@ -386,12 +426,15 @@ mod tests {
                 let mut last_ci = 0.0;
                 let mut last_cq = 0.0;
                 let mut last_mag = 0.0;
+                let mut current_offset = best_idx;
                 for rep in 0..unified_len {
+                    let is_preamble = rep < config.preamble_repeat;
                     let (ci, cq, en) =
-                        detector.correlate_one_symbol(i, q, best_idx + rep * sym_len);
+                        detector.correlate_one_symbol(i, q, current_offset, is_preamble);
                     let mag2 = ci * ci + cq * cq;
                     let mag = mag2.sqrt();
-                    total_rho_p += if en > 1e-9 { mag2 / (15.0 * en) } else { 0.0 };
+                    let sf = if is_preamble { detector.preamble_sf } else { detector.sync_sf };
+                    total_rho_p += if en > 1e-9 { mag2 / (sf as f32 * en) } else { 0.0 };
                     if rep > 0 && last_mag > 1e-9 && mag > 1e-9 {
                         let re = last_ci * ci + last_cq * cq;
                         let im = last_ci * cq - last_cq * ci;
@@ -403,6 +446,8 @@ mod tests {
                     last_ci = ci;
                     last_cq = cq;
                     last_mag = mag;
+                    let sym_len = if is_preamble { detector.preamble_sym_len } else { detector.sync_sym_len };
+                    current_offset += sym_len;
                 }
                 let rho_p = total_rho_p / unified_len as f32;
                 let rho_phi = if sum_mag > 1e-9 {
@@ -427,7 +472,7 @@ mod tests {
             let (res, _) = detector.detect(&i, &q, 0);
             let sync = res.expect("Should find strong peak");
             assert!(sync.score > detector.threshold_fine);
-            let detected_idx = sync.peak_sample_idx - (sym_len * repeat);
+            let detected_idx = sync.peak_sample_idx - (detector.preamble_sym_len * repeat);
             // Rc=8000 (spc=6) ではピークが平坦になりやすいため、spc/2 程度の誤差を許容する
             assert!((detected_idx as i32 - gt_idx as i32).abs() <= (detector.spc / 2) as i32);
         }
@@ -468,7 +513,7 @@ mod tests {
 
             let (res, _) = detector.detect(&i_combined, &q_combined, 0);
             let sync = res.expect("Should find the first valid peak");
-            let detected_idx = sync.peak_sample_idx - (sym_len * repeat);
+            let detected_idx = sync.peak_sample_idx - (detector.preamble_sym_len * repeat);
 
             // First Peak Match は後方の強ピークを待たず、前方の弱ピークを返すのが正しい。
             assert!((detected_idx as i32 - weak_gt_idx as i32).abs() <= (detector.spc / 2) as i32);
@@ -479,7 +524,7 @@ mod tests {
     fn test_sync_boundary_conditions() {
         let config = DspConfig::default_48k();
         let detector = new_detector_default(config.clone());
-        let sym_len = 15 * config.proc_samples_per_chip();
+        let sym_len = 13 * config.proc_samples_per_chip(); // preamble is SF=13
         let preamble_len = sym_len * config.preamble_repeat;
 
         // 境界1: バッファ長が足りない
@@ -543,147 +588,194 @@ mod tests {
     #[test]
     fn test_roc_curve_analysis() {
         let config = DspConfig::default_48k();
-        let detector = new_detector_default(config.clone());
-        let snr_db_list = [-10.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0];
-        const NUM_TRIALS: usize = 50;
+        let snr_db_list: &[f32] = &[-10.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0];
+        const NUM_TRIALS: usize = 100;
+        const NUM_NOISE_TRIALS: usize = 200;
 
-        // --- 1. ノイズ分布の精密測定 (しきい値決定のため) ---
-        let noise_trials = 200;
-        let mut noise_scores = Vec::with_capacity(noise_trials * 100);
-
-        for trial in 0..noise_trials {
-            let mut rng = StdRng::seed_from_u64(trial as u64 + 5000);
-            let dist = Normal::new(0.0, 0.1).unwrap();
-            // 実際の探索に近い状況を作るため、少し長めのノイズを生成
-            let i: Vec<f32> = (0..2000).map(|_| dist.sample(&mut rng)).collect();
-            let q: Vec<f32> = (0..2000).map(|_| dist.sample(&mut rng)).collect();
-
-            // 10サンプルおきにスコアを収集 (スライディング窓の近似)
-            let sym_len = 15 * config.proc_samples_per_chip();
-            for n in (0..=(i.len() - sym_len * (config.preamble_repeat + 1))).step_by(10) {
-                let (score, _) =
-                    detector.score_candidate(&i, &q, n, config.preamble_repeat, sym_len);
-                noise_scores.push(score);
-            }
-        }
-        noise_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        // 目標誤検知率 (False Alarm Rate) ごとの推奨しきい値を計算
-        let get_threshold = |target_far: f64| {
-            let idx = ((1.0 - target_far) * noise_scores.len() as f64) as usize;
-            noise_scores[idx.min(noise_scores.len() - 1)]
+        // --- ステップ1: 信号パワーの測定 (ノイズスケールのキャリブレーション) ---
+        // 受信パイプライン通過後の信号 RMS を測定し、ノイズ sigma の基準とする
+        let ref_signal_power: f32 = {
+            let (i, q) = generate_signal_with_awgn_seeded(&config, 0, 60.0, 0); // SNR=60dBは実質ノイズなし
+            let n = i.len().min(200);
+            (i[..n].iter().map(|&x| x * x).sum::<f32>()
+                + q[..n].iter().map(|&x| x * x).sum::<f32>())
+                / (2.0 * n as f32)
         };
+        let signal_rms = ref_signal_power.sqrt();
+        // 0dB SNR のノイズ sigma (IとQそれぞれ)
+        let noise_sigma_0db = signal_rms / 2.0_f32.sqrt();
 
-        let target_far_1pct = get_threshold(0.01);
-        let target_far_01pct = get_threshold(0.001);
-
-        println!("=== Threshold Analysis (based on Noise Distribution) ===");
-        println!(
-            "  Target FAR 1.0%: Recommended Threshold = {:.4}",
-            target_far_1pct
-        );
-        println!(
-            "  Target FAR 0.1%: Recommended Threshold = {:.4}",
-            target_far_01pct
-        );
-        println!(
-            "  Max Noise Score Observed: {:.4}",
-            noise_scores.last().unwrap()
-        );
+        println!("=== ROC Analysis: ZC SF=13 preamble + Walsh SF=15 sync ===");
+        println!("  Signal RMS (after pipeline): {:.4}", signal_rms);
+        println!("  Noise sigma at 0dB SNR:      {:.4}", noise_sigma_0db);
         println!();
 
-        // 現在のしきい値 (threshold_fine) での性能評価
-
-        println!(
-            "=== ROC Curve Analysis (Threshold = {:.4}) ===",
-            detector.threshold_fine
-        );
-        println!(
-            "{:>8} | {:>13} | {:>13}",
-            "SNR(dB)", "Detection Rate", "Score (avg)"
-        );
-        println!("---------|---------------|-------------");
-
-        for &snr_db in &snr_db_list {
-            let mut num_detected = 0;
-            let mut total_score = 0.0f32;
-
-            for trial in 0..NUM_TRIALS {
-                let (i, q) = generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64);
-                let (res, _) = detector.detect(&i, &q, 0);
-                if let Some(ref sync) = res {
-                    num_detected += 1;
-                    total_score += sync.score;
-                }
-            }
-
-            let detection_rate = num_detected as f64 / NUM_TRIALS as f64;
-            let avg_score = if num_detected > 0 {
-                total_score / num_detected as f32
-            } else {
-                0.0
-            };
-            println!(
-                "{:>8.1} | {:>13} | {:>13.4}",
-                snr_db,
-                format!("{}%", (detection_rate * 100.0) as i32),
-                avg_score
+        // --- ステップ2: H0 スコア収集 (ノイズのみ・全位置) ---
+        // ノイズ sigma は 0dB SNR 相当 (信号と同スケール) にキャリブレーション
+        let mut h0_scores: Vec<f32> = Vec::new();
+        let required_len = {
+            let det = MarySyncDetector::new(
+                config.clone(),
+                MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+                MarySyncDetector::THRESHOLD_FINE_DEFAULT,
             );
-        }
+            det.preamble_sym_len * config.preamble_repeat + det.sync_sym_len
+        };
 
-        // --- 2. 推奨しきい値での検出率シミュレーション ---
-        println!(
-            "
-=== Detection Performance at Recommended Threshold ({:.4}) ===",
-            target_far_1pct
+        for trial in 0..NUM_NOISE_TRIALS {
+            let mut rng = StdRng::seed_from_u64(trial as u64 + 9000);
+            let dist = Normal::new(0.0, noise_sigma_0db as f64).unwrap();
+            let buf_len = required_len + 200;
+            let i: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
+            let q: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
+
+            let det = MarySyncDetector::new(
+                config.clone(),
+                MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+                MarySyncDetector::THRESHOLD_FINE_DEFAULT,
+            );
+            for n in (0..=(i.len() - required_len)).step_by(1) {
+                let (score, _) = det.score_candidate(&i, &q, n, config.preamble_repeat + 1);
+                h0_scores.push(score);
+            }
+        }
+        h0_scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        // FPR(τ) = P(H0スコア > τ) の計算
+        let fpr_at = |tau: f32| -> f64 {
+            let above = h0_scores.partition_point(|&s| s <= tau);
+            (h0_scores.len() - above) as f64 / h0_scores.len() as f64
+        };
+
+        // 真の同期位置を計算：
+        //   offset_48k=500 → proc_offset = 500/2 = 250 (ダウンサンプル比2)
+        //   合計遅延 (Mod + Rec) = 64 samples (at 24k)
+        //   実際のプリアンブル先頭位置 = 250 + 64 = 314
+        let det_ref = MarySyncDetector::new(
+            config.clone(),
+            MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT,
         );
-        for &snr_db in &[-3.0, 0.0, 3.0] {
-            let mut num_detected = 0;
+        let signal_start_in_proc: usize = 314;
+        let total_symbols_for_fine = config.preamble_repeat + config.sync_word_bits;
+
+        let mut h1_scores_by_snr: Vec<Vec<f32>> = Vec::new();
+        for &snr_db in snr_db_list {
+            let mut scores = Vec::new();
             for trial in 0..NUM_TRIALS {
                 let (i, q) =
-                    generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 2000);
-                // detect() の代わりに直接しきい値判定を行う (簡易評価)
-                let peak_n =
-                    (config.rrc_num_taps() - 1).saturating_sub(config.proc_samples_per_chip() / 2);
-                let mut found = false;
-                let sym_len = 15 * config.proc_samples_per_chip();
+                    generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 100);
 
-                for n in (peak_n.saturating_sub(5))..=(peak_n + 5) {
-                    let (score, _) =
-                        detector.score_candidate(&i, &q, n, config.preamble_repeat, sym_len);
-                    if score > target_far_1pct {
-                        found = true;
-                        break;
+                // ピーク周辺(-20..+20)を探して最大スコアを取る
+                let mut best_score = 0.0f32;
+                for offset in (signal_start_in_proc.saturating_sub(20))..=(signal_start_in_proc + 20) {
+                    if offset + required_len <= i.len() {
+                        let (score, _) =
+                            det_ref.score_candidate(&i, &q, offset, total_symbols_for_fine);
+                        if score > best_score {
+                            best_score = score;
+                        }
                     }
                 }
-                if found {
-                    num_detected += 1;
-                }
+                scores.push(best_score);
             }
-            println!(
-                "  SNR {:>5.1} dB: Detection Rate = {}%",
-                snr_db,
-                (num_detected as f64 / NUM_TRIALS as f64 * 100.0) as i32
-            );
+            h1_scores_by_snr.push(scores);
         }
 
-        // 要件確認
-        let mut neg3_db_detection = 0.0f64;
-        for trial in 0..NUM_TRIALS {
-            let (i, q) =
-                generate_signal_with_awgn_seeded(&config, 500, -3.0, (trial + 1000) as u64);
-            if detector.detect(&i, &q, 0).0.is_some() {
-                neg3_db_detection += 1.0;
+        // TPR(τ, snr) = P(H1スコア > τ | SNR) の計算
+        let tpr_at = |scores: &[f32], tau: f32| -> f64 {
+            scores.iter().filter(|&&s| s > tau).count() as f64 / scores.len() as f64
+        };
+
+        // --- ステップ4: ROC テーブル出力 ---
+        // しきい値の候補: H0 分布のパーセンタイル点から選択
+        let thresholds: Vec<f32> = {
+            let percentiles = [0.5, 0.8, 0.9, 0.95, 0.99, 0.999, 1.0];
+            percentiles
+                .iter()
+                .map(|&p| {
+                    let idx = ((p * h0_scores.len() as f64) as usize).min(h0_scores.len() - 1);
+                    h0_scores[idx]
+                })
+                .collect()
+        };
+
+        print!("\n{:>8} | {:>8}", "Thresh", "FPR");
+        for &snr in snr_db_list {
+            print!(" | TPR({:+.0})", snr);
+        }
+        println!();
+        print!("{}", "-".repeat(9 + 10 + snr_db_list.len() * 12));
+        println!();
+
+        let mut auc_values: Vec<f64> = vec![0.0; snr_db_list.len()];
+
+        for &tau in &thresholds {
+            let fpr = fpr_at(tau);
+            print!("{:>8.4} | {:>7.1}%", tau, fpr * 100.0);
+            for (snr_idx, h1_scores) in h1_scores_by_snr.iter().enumerate() {
+                let tpr = tpr_at(h1_scores, tau);
+                print!(" | {:>8.1}%", tpr * 100.0);
+                // 台形則で AUC を積算 (後でソート・正規化)
+                let _ = (snr_idx, tpr);
             }
+            println!();
         }
 
-        neg3_db_detection /= NUM_TRIALS as f64;
+        // AUC 計算（台形則、しきい値を FPR でパラメタライズ）
+        println!("\n=== AUC (Area Under ROC Curve) ===");
+        for (snr_idx, (&snr_db, h1_scores)) in
+            snr_db_list.iter().zip(h1_scores_by_snr.iter()).enumerate()
+        {
+            // 細かいしきい値グリッドで台形則
+            let mut fpr_prev = 1.0f64;
+            let mut tpr_prev = 1.0f64;
+            let mut auc = 0.0f64;
+            let steps = 200usize;
+            for step in 1..=steps {
+                let idx = h0_scores.len() * step / steps;
+                let idx = idx.min(h0_scores.len() - 1);
+                let tau = h0_scores[idx];
+                let fpr = fpr_at(tau);
+                let tpr = tpr_at(h1_scores, tau);
+                auc += (fpr_prev - fpr) * (tpr_prev + tpr) / 2.0;
+                fpr_prev = fpr;
+                tpr_prev = tpr;
+            }
+            // FPR=0 の終端
+            auc += fpr_prev * tpr_prev / 2.0;
+            auc_values[snr_idx] = auc;
+            println!("  SNR {:+.0}dB: AUC = {:.4}", snr_db, auc);
+        }
 
+        // 推奨しきい値 (FAR ≤ 1%) の算出
+        let tau_far1pct = {
+            let target_idx = (h0_scores.len() as f64 * 0.99) as usize;
+            h0_scores[target_idx.min(h0_scores.len() - 1)]
+        };
+        let tau_far01pct = {
+            let target_idx = (h0_scores.len() as f64 * 0.999) as usize;
+            h0_scores[target_idx.min(h0_scores.len() - 1)]
+        };
+        println!();
+        println!("=== Recommended Thresholds (from calibrated noise) ===");
+        println!("  FAR ≤ 1.0%: tau = {:.4}", tau_far1pct);
+        println!("  FAR ≤ 0.1%: tau = {:.4}", tau_far01pct);
+        println!(
+            "  Current THRESHOLD_FINE_DEFAULT: {:.4}",
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT
+        );
+
+        // --- アサーション: SNR 0dB時の AUC が 0.7 以上 ---
+        let snr_0db_idx = snr_db_list.iter().position(|&s| s == 0.0).unwrap();
         assert!(
-            neg3_db_detection >= 0.0,
-            "Placeholder for actual performance report"
+            auc_values[snr_0db_idx] >= 0.7,
+            "AUC at 0dB SNR = {:.4}, expected >= 0.70. \
+             Detector may not be working correctly.",
+            auc_values[snr_0db_idx]
         );
     }
+
 
     #[test]
     fn test_score_candidate_mathematical_verification() {
@@ -716,7 +808,7 @@ mod tests {
                 if n < 0 || n as usize >= i.len() {
                     continue;
                 }
-                let (score, _) = detector.score_candidate(i, q, n as usize, repeat, sym_len);
+                let (score, _) = detector.score_candidate(i, q, n as usize, repeat);
                 if score > best_score {
                     best_score = score;
                 }
@@ -768,13 +860,24 @@ mod tests {
                 let i_noise: Vec<f32> = (0..3000).map(|_| dist.sample(&mut rng)).collect();
                 let q_noise: Vec<f32> = (0..3000).map(|_| dist.sample(&mut rng)).collect();
 
-                let (score, _) = detector.score_candidate(&i_noise, &q_noise, 0, repeat, sym_len);
+                let (score, _) = detector.score_candidate(&i_noise, &q_noise, 0, repeat);
 
                 let mut total_rho_p = 0.0f32;
+                let mut current_offset = 0;
                 for rep in 0..repeat {
+                    let is_preamble = rep < config.preamble_repeat;
                     let (ci, cq, en) =
-                        detector.correlate_one_symbol(&i_noise, &q_noise, rep * sym_len);
-                    total_rho_p += (ci * ci + cq * cq) / (detector.sf as f32 * en);
+                        detector.correlate_one_symbol(&i_noise, &q_noise, current_offset, is_preamble);
+                    let sf = if is_preamble {
+                        detector.preamble_sf
+                    } else {
+                        detector.sync_sf
+                    };
+                    let rho_p_sym = (ci * ci + cq * cq) / (sf as f32 * en);
+                    total_rho_p += rho_p_sym;
+                    
+                    let sym_len = if is_preamble { detector.preamble_sym_len } else { detector.sync_sym_len };
+                    current_offset += sym_len;
                 }
                 let rho_p = total_rho_p / repeat as f32;
                 let rho_phi = (score - 0.7 * rho_p) / 0.3;
@@ -822,18 +925,20 @@ mod tests {
         let mut i_ch: Vec<f32> = i_resampled.iter().map(|&s| rrc_i.process(s)).collect();
         let mut q_ch: Vec<f32> = q_resampled.iter().map(|&s| rrc_q.process(s)).collect();
 
-        // SNRに基づいてAWGNを加算 (信号が存在する区間のみで電力を推定)
-        // 15 * config.proc_samples_per_chip() (sf=15)
-        let preamble_samples = 15 * config.proc_samples_per_chip() * config.preamble_repeat;
-        let start_active = 0; // resampler 後はオフセットが変わるため最初から推定
-        let end_active = preamble_samples.min(i_ch.len());
-
-        let signal_power: f32 = i_ch[start_active..end_active]
-            .iter()
-            .map(|&x| x * x)
-            .chain(q_ch[start_active..end_active].iter().map(|&x| x * x))
-            .sum::<f32>()
-            / (2.0 * (end_active - start_active) as f32);
+        let mut energy_sum = 0.0f32;
+        let mut active_count = 0;
+        for (&i, &q) in i_ch.iter().zip(q_ch.iter()) {
+            let en = i * i + q * q;
+            if en > 0.01 {
+                energy_sum += en;
+                active_count += 1;
+            }
+        }
+        let signal_power = if active_count > 0 {
+            energy_sum / (2.0 * active_count as f32)
+        } else {
+            1.0 // Fallback
+        };
 
         let snr_linear = 10.0_f32.powf(snr_db / 10.0);
         let noise_power = signal_power / snr_linear;
