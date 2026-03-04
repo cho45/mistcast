@@ -112,8 +112,40 @@ defineExpose({
   <div class="app-shell">
     <header class="app-header">
       <div class="app-header-content">
-        <div class="app-brand">
-          <h1>Mistcast</h1>
+        <div class="app-brand-area">
+          <div class="app-brand">
+            <h1>Mistcast</h1>
+          </div>
+          <div class="header-status-area">
+            <TransitionGroup name="header-chip">
+              <!-- Sender Remote Toggle Chip -->
+              <button
+                v-if="runtime.coreReady.value"
+                key="sender"
+                class="header-chip sender-chip"
+                :class="{ 'is-active': runtime.senderStatus.value === 'transmitting' }"
+                @click.stop="runtime.senderStatus.value === 'transmitting' ? runtime.onStopSender.value?.() : runtime.onStartSender.value?.()"
+              >
+                <span class="chip-icon" :class="{ pulse: runtime.senderStatus.value === 'transmitting' }">📡</span>
+                <span class="chip-action">{{ runtime.senderStatus.value === 'transmitting' ? 'Stop' : (runtime.senderStatus.value === 'preparing' ? '...' : 'Start') }}</span>
+              </button>
+
+              <!-- Receiver Status Chip -->
+              <button
+                v-if="runtime.receiverProgress.value > 0 || runtime.receiverStatus.value === 'decoded'"
+                key="receiver"
+                class="header-chip receiver-chip"
+                @click.stop="runtime.receiverStatus.value === 'decoded' ? runtime.onResetReceiver.value?.() : (activeTab = 'receiver')"
+              >
+                <span class="chip-icon" v-if="runtime.receiverStatus.value !== 'decoded'">📥</span>
+                <span class="chip-icon" v-else>✅</span>
+                <span class="chip-label" v-if="runtime.receiverStatus.value !== 'decoded'">
+                  {{ `${(runtime.receiverProgress.value * 100).toFixed(0)}%` }}
+                </span>
+                <span v-if="runtime.receiverStatus.value === 'decoded'" class="chip-action">Reset</span>
+              </button>
+            </TransitionGroup>
+          </div>
         </div>
         <button class="settings-trigger" @click="openSettings" aria-label="Open Settings">
           <img src="./assets/settings.svg" alt="Settings" class="settings-icon" />
@@ -205,6 +237,117 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-height: 3.5rem;
+}
+
+.app-brand-area {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.header-status-area {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.header-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  font-weight: 700;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  min-height: 2rem;
+}
+
+.header-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+  border-color: var(--primary);
+}
+
+.header-chip:active {
+  transform: translateY(0);
+}
+
+.sender-chip {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #64748b;
+}
+
+.sender-chip.is-active {
+  background: #fff4d8;
+  border-color: #f0d299;
+  color: #8e5a00;
+}
+
+.receiver-chip {
+  background: #e4f2fb;
+  border-color: #a9cfe6;
+  color: #0a557f;
+}
+
+.chip-icon.pulse {
+  animation: headerPulse 1.5s infinite ease-in-out;
+}
+
+@keyframes headerPulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.7; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.chip-action {
+  padding: 0.1rem 0.4rem;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.is-active .chip-action {
+  background: rgba(142, 90, 0, 0.1);
+  color: #8e5a00;
+}
+
+.receiver-chip .chip-action {
+  background: rgba(10, 85, 127, 0.1);
+  color: #0a557f;
+}
+
+.header-chip:hover .chip-action {
+  background: var(--primary);
+  color: #fff;
+}
+
+.sender-chip.is-active:hover .chip-action { background: var(--danger); }
+
+/* Animations */
+.header-chip-enter-active,
+.header-chip-leave-active {
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.header-chip-enter-from {
+  opacity: 0;
+  transform: scale(0.8) translateY(-10px);
+}
+
+.header-chip-leave-to {
+  opacity: 0;
+  transform: scale(0.8) translateY(10px);
 }
 
 .app-brand h1 {
@@ -213,6 +356,21 @@ defineExpose({
   font-weight: 600;
   color: #1e293b;
   letter-spacing: -0.01em;
+}
+
+@media (max-width: 480px) {
+  .app-brand h1 {
+    font-size: 1rem;
+  }
+  
+  .app-brand-area {
+    gap: 0.5rem;
+  }
+
+  .header-chip {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+  }
 }
 
 .settings-trigger {

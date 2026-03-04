@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
-import { useDemoRuntime } from '../demo-runtime';
+import { useDemoRuntime, type ReceiverStatus } from '../demo-runtime';
 import { injectSettings } from '../composables/useSettings';
 import { extractImagePayload, type ImagePayload } from '../utils/image-detector';
 import SpectrumCanvas from './SpectrumCanvas.vue';
@@ -69,8 +69,24 @@ const stallProbability = computed(() => {
   return exp;
 });
 
-const receiverStatus = ref('idle');
+const receiverStatus = ref<ReceiverStatus>('idle');
 const isTogglingMic = ref(false);
+
+// runtimeにステータスと進捗を同期
+watch(receiverStatus, (val) => {
+  runtime.receiverStatus.value = val;
+}, { immediate: true });
+watch(progressPercent, (val) => {
+  runtime.receiverProgress.value = val;
+}, { immediate: true });
+
+// runtimeに操作を登録
+onMounted(() => {
+  runtime.onResetReceiver.value = reset;
+});
+onUnmounted(() => {
+  runtime.onResetReceiver.value = null;
+});
 
 const guideMessage = computed(() => {
   if (receiverStatus.value === 'mic-error') {

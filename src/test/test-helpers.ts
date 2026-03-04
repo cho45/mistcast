@@ -1,5 +1,5 @@
 import { h, ref } from 'vue';
-import { provideDemoRuntime, type ModemMode } from '../demo-runtime';
+import { provideDemoRuntime, type ModemMode, type SenderStatus, type ReceiverStatus } from '../demo-runtime';
 import { provideSettings } from '../composables/useSettings';
 
 export function createMockRuntime() {
@@ -8,6 +8,12 @@ export function createMockRuntime() {
     modemMode: ref<ModemMode>('mary'),
     randomizeSeq: ref(false),
     isBusy: ref(false),
+    senderStatus: ref<SenderStatus>('idle'),
+    receiverStatus: ref<ReceiverStatus>('idle'),
+    receiverProgress: ref(0),
+    onStartSender: ref<(() => void) | null>(null),
+    onStopSender: ref<(() => void) | null>(null),
+    onResetReceiver: ref<(() => void) | null>(null),
     ensureAudioCore: async () => ({
       audioContext: {
         sampleRate: 48000,

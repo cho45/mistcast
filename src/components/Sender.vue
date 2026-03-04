@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, useAttrs, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, onUnmounted, ref, useAttrs, watch } from 'vue';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
 import sampleFileUrl from '../assets/sample-files/test.png';
-import { useDemoRuntime } from '../demo-runtime';
+import { useDemoRuntime, type SenderStatus } from '../demo-runtime';
 import SpectrumCanvas from './SpectrumCanvas.vue';
 
 // Disable automatic attribute inheritance since we have multiple root nodes
@@ -34,7 +34,24 @@ const inputText = ref('Hello Acoustic World!');
 const fileInput = ref<HTMLInputElement | null>(null);
 const isTransmitting = ref(false);
 const isPreparing = ref(false);
-const senderStatus = ref('idle');
+const senderStatus = ref<SenderStatus>('idle');
+
+// runtimeにステータスを同期
+watch(senderStatus, (val) => {
+  runtime.senderStatus.value = val;
+}, { immediate: true });
+
+// runtimeに操作を登録
+onMounted(() => {
+  runtime.onStartSender.value = handleSend;
+  runtime.onStopSender.value = stopSending;
+});
+
+onUnmounted(() => {
+  runtime.onStartSender.value = null;
+  runtime.onStopSender.value = null;
+});
+
 const isDragging = ref(false);
 const toasts = ref<Toast[]>([]);
 let toastIdCounter = 0;
