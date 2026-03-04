@@ -535,8 +535,28 @@ describe('Sender.vue', () => {
 
       const sampleInfo = wrapper.find('.sample-info');
       expect(sampleInfo.exists()).toBe(true);
-      expect(sampleInfo.text()).toContain('sample image');
+      expect(sampleInfo.text()).toContain('test.png');
       expect(sampleInfo.text()).toContain('921');
+    });
+
+    it('should allow switching between different sample files', async () => {
+      const wrapper = mountApp(Sender);
+
+      const tabButtons = wrapper.findAll('button.tab-item');
+      await tabButtons[1].trigger('click');
+
+      const sampleButtons = wrapper.findAll('.sample-option-btn');
+      expect(sampleButtons).toHaveLength(2);
+
+      // WebP サンプルに切り替え
+      await sampleButtons[1].trigger('click');
+
+      const sampleInfo = wrapper.find('.sample-info');
+      expect(sampleInfo.text()).toContain('webp.webp');
+      expect(sampleInfo.text()).toContain('3874');
+
+      const vm = wrapper.vm as any;
+      expect(vm.selectedSample.id).toBe('webp');
     });
   });
 

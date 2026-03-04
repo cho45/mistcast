@@ -33,7 +33,7 @@
       "limit_exceeded": "データが制限サイズ ({size} バイト) を超えています"
     },
     "sample": {
-      "info": "内蔵のサンプル画像 (921 バイト) です。"
+      "info": "内蔵サンプル: {name} ({size} バイト)"
     },
     "toasts": {
       "file_too_large": "ファイルが大きすぎます！最大 {max} KB です。",

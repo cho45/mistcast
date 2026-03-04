@@ -4,7 +4,6 @@ import { useI18n } from 'vue-i18n';
 import * as Comlink from 'comlink';
 import type { MistcastBackend } from '../worker';
 import MistcastWorker from '../worker?worker';
-import sampleFileUrl from '../assets/sample-files/test.png';
 import { useDemoRuntime, type SenderStatus } from '../demo-runtime';
 import SpectrumCanvas from './SpectrumCanvas.vue';
 
@@ -19,9 +18,23 @@ const attrs = useAttrs();
 const MAX_FILE_SIZE = 255 * 16; // 4080 bytes
 const TOAST_DURATION_MS = 5000;
 const STORAGE_KEY = 'sender-send-mode';
-const SAMPLE_FILE_SIZE = 921; // test.pngの実際のサイズ
 
-type ToastType = 'error' | 'warning' | 'success';
+import sampleTestPng from '../assets/sample-files/test.png';
+import sampleWebpWebp from '../assets/sample-files/webp.webp';
+
+interface SampleFile {
+  id: string;
+  name: string;
+  url: string;
+  size: number;
+}
+
+const SAMPLE_FILES: SampleFile[] = [
+  { id: 'png', name: 'test.png', url: sampleTestPng, size: 921 },
+  { id: 'webp', name: 'webp.webp', url: sampleWebpWebp, size: 3874 },
+];
+
+const selectedSample = ref<SampleFile>(SAMPLE_FILES[0]);
 
 interface Toast {
   id: number;
@@ -132,7 +145,7 @@ const contentBytes = computed(() => {
     case 'text':
       return textByteSize.value;
     case 'sample':
-      return SAMPLE_FILE_SIZE;
+      return selectedSample.value.size;
     case 'file':
       return selectedFile.value?.size || 0;
   }
@@ -250,7 +263,7 @@ function safeDisconnect<T extends AudioNode>(node: T | null, destination?: Audio
 }
 
 async function loadSampleFile(): Promise<Uint8Array> {
-  const res = await fetch(sampleFileUrl);
+  const res = await fetch(selectedSample.value.url);
   const buf = await res.arrayBuffer();
   return new Uint8Array(buf);
 }
@@ -451,10 +464,23 @@ defineExpose({
       />
     </div>
 
-    <!-- サンプル画像プレビュー（サンプルモード時のみ表示） -->
-    <div v-if="sendMode === 'sample'" class="sample-preview">
-      <img src="../assets/sample-files/test.png" alt="Sample Image" />
-      <div class="sample-info">{{ $t('sender.sample.info') }}</div>
+    <!-- サンプル画像選択 & プレビュー（サンプルモード時のみ表示） -->
+    <div v-if="sendMode === 'sample'" class="sample-mode-container">
+      <div class="sample-selector">
+        <button
+          v-for="sample in SAMPLE_FILES"
+          :key="sample.id"
+          class="sample-option-btn"
+          :class="{ active: selectedSample.id === sample.id }"
+          @click="selectedSample = sample"
+        >
+          {{ sample.name }} ({{ sample.size }}B)
+        </button>
+      </div>
+      <div class="sample-preview">
+        <img :src="selectedSample.url" :alt="selectedSample.name" />
+        <div class="sample-info">{{ $t('sender.sample.info', { name: selectedSample.name, size: selectedSample.size }) }}</div>
+      </div>
     </div>
 
     <!-- ファイル選択エリア（ファイルモード時のみ表示） -->
@@ -678,29 +704,67 @@ textarea:disabled {
 }
 
 /* サンプルプレビュー */
+.sample-mode-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.sample-selector {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.sample-option-btn {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 500;
+}
+
+.sample-option-btn:hover {
+  background: #f1f5f9;
+  color: var(--ink);
+}
+
+.sample-option-btn.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
 .sample-preview {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 1rem;
-  background: #f6f9fc;
+  gap: 1rem;
+  padding: 1.2rem;
+  background: #f8fafc;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  margin-bottom: 1rem;
+  border-radius: 12px;
 }
 
 .sample-preview img {
-  width: 64px;
-  height: 64px;
+  width: 80px;
+  height: 80px;
   object-fit: contain;
+  background: #fff;
   border-radius: 8px;
   border: 1px solid var(--line);
   image-rendering: pixelated;
+  padding: 4px;
 }
 
 .sample-info {
-  font-size: 0.9rem;
-  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--ink);
 }
 
 /* ファイルプレビュー */

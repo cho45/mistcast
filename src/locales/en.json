@@ -33,7 +33,7 @@
       "limit_exceeded": "Data exceeds maximum limit ({size} bytes)"
     },
     "sample": {
-      "info": "This is a built-in sample image (921 bytes)."
+      "info": "Built-in sample: {name} ({size} bytes)"
     },
     "toasts": {
       "file_too_large": "File too large! Maximum is {max} KB.",
