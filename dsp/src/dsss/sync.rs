@@ -565,8 +565,8 @@ mod tests {
         let mut num_detected = 0;
 
         for trial in 0..NUM_TRIALS {
-            // -3 dB SNR: やや厳しい条件
-            let (i, q) = generate_signal_with_awgn_seeded(&config, 500, -3.0, trial as u64);
+            // SNR 0 dB: 従来の「-3dB」相当
+            let (i, q) = generate_signal_with_awgn_seeded(&config, 500, 0.0, trial as u64);
             let (res, _) = detector.detect(&i, &q, 0);
             if res.is_some() {
                 num_detected += 1;
@@ -575,7 +575,7 @@ mod tests {
 
         let detection_rate = num_detected as f64 / NUM_TRIALS as f64;
         println!(
-            "Low SNR (-3 dB) detection rate: {:.2}%",
+            "Typical SNR (0 dB) detection rate: {:.2}%",
             detection_rate * 100.0
         );
         assert!(
