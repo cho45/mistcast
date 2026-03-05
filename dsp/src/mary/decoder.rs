@@ -39,7 +39,6 @@ const TRACKING_TIMING_RATE_LIMIT_CHIP: f32 = 0.25;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const TRACKING_PHASE_RATE_LIMIT_RAD: f32 = 2.6;
 const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
-const TRACKING_SYNC_PHASE_GAIN: f32 = 0.35;
 const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
 const PAYLOAD_SPREAD_FACTOR: usize = 16;
 
@@ -626,68 +625,122 @@ impl Decoder {
                 self.equalized_buffer.drain(0..best_timing_offset);
             }
 
-            // 位相基準の確立 (絶対位相トラッキング)
             let mut st = self.tracking_state.expect("st must exist");
-            let mut prev_unwrapped_phase: Option<f32> = None;
-            let mut phase_delta_sum = 0.0f32;
-            let mut phase_delta_count = 0usize;
+            let repeat = self.config.preamble_repeat;
+            let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
+
+            // sync語全体を使った一括推定:
+            // y_i = corr_i * expected_sign_i ≈ A * exp(j*(phi0 + i*omega_sync))
+            self.complex_buffer.clear();
+            if self.complex_buffer.capacity() < sync_word_bits {
+                self.complex_buffer.reserve(sync_word_bits);
+            }
+            let mut prev_y: Option<Complex32> = None;
+            let mut sum_diff = Complex32::new(0.0, 0.0);
+
+            // timing LS 用の統計量（重み付き直線近似 e_i ≈ a + b*i）
+            let mut sw = 0.0f32;
+            let mut sx = 0.0f32;
+            let mut sy = 0.0f32;
+            let mut sxx = 0.0f32;
+            let mut sxy = 0.0f32;
             for i in 0..sync_word_bits {
                 let symbol_start = i * sf_sync * spc;
-                let corr =
-                    if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, sf_sync, 0) {
-                        c
-                    } else {
-                        break;
-                    };
-                let on_rot = corr[0] * st.phase_ref.conj();
-                let on_norm = on_rot.norm().max(1e-6);
-                let expected_sign =
-                    self.sync_detector.sync_symbols()[self.config.preamble_repeat + i];
-                let abs_diff = on_rot * Complex32::new(expected_sign, 0.0).conj();
-                let mut phase = abs_diff.arg();
-                if let Some(prev) = prev_unwrapped_phase {
-                    while phase - prev > std::f32::consts::PI {
-                        phase -= 2.0 * std::f32::consts::PI;
-                    }
-                    while phase - prev < -std::f32::consts::PI {
-                        phase += 2.0 * std::f32::consts::PI;
-                    }
-                    phase_delta_sum += phase - prev;
-                    phase_delta_count += 1;
-                }
-                prev_unwrapped_phase = Some(phase);
-                let (sin_dphi, cos_dphi) = (phase * TRACKING_SYNC_PHASE_GAIN).sin_cos();
-                st.phase_ref *= Complex32::new(cos_dphi, sin_dphi);
-                st.phase_ref /= st.phase_ref.norm().max(1e-6);
-                self.demodulator.set_prev_phase(on_rot / on_norm);
-            }
-            if phase_delta_count > 0 {
-                let sync_phase_rate = phase_delta_sum / phase_delta_count as f32;
-                let sync_to_payload_scale =
-                    PAYLOAD_SPREAD_FACTOR as f32 / SYNC_SPREAD_FACTOR as f32;
-                st.phase_rate = (sync_phase_rate * sync_to_payload_scale).clamp(
-                    -TRACKING_PHASE_RATE_LIMIT_RAD,
-                    TRACKING_PHASE_RATE_LIMIT_RAD,
-                );
-            }
+                let on = if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, sf_sync, 0)
+                {
+                    c[0]
+                } else {
+                    break;
+                };
 
-            // 同期語から初期タイミングオフセットを推定して、最初の payload パケットへ引き継ぐ。
-            let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-            let mut timing_err_sum = 0.0f32;
-            let mut timing_err_count = 0usize;
-            for i in 1..sync_word_bits {
-                let symbol_start = i * sf_sync * spc;
+                let expected_sign = self.sync_detector.sync_symbols()[repeat + i];
+                let y = on * Complex32::new(expected_sign, 0.0);
+                if let Some(prev) = prev_y {
+                    sum_diff += y * prev.conj();
+                }
+                prev_y = Some(y);
+                self.complex_buffer.push(y);
+
                 let early = self.despread_symbol_inner(symbol_start, -early_late_delta, sf_sync, 0);
                 let late = self.despread_symbol_inner(symbol_start, early_late_delta, sf_sync, 0);
                 if let (Some(e), Some(l)) = (early, late) {
-                    timing_err_sum += timing_error_from_early_late(e[0].norm(), l[0].norm());
-                    timing_err_count += 1;
+                    let err = timing_error_from_early_late(e[0].norm(), l[0].norm());
+                    let w = on.norm_sqr().max(1e-6);
+                    let x = i as f32;
+                    sw += w;
+                    sx += w * x;
+                    sy += w * err;
+                    sxx += w * x * x;
+                    sxy += w * x * err;
                 }
             }
-            if timing_err_count > 0 {
-                let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
-                st.timing_offset = ((timing_err_sum / timing_err_count as f32) * early_late_delta)
-                    .clamp(-timing_limit, timing_limit);
+
+            if self.complex_buffer.is_empty() {
+                return false;
+            }
+
+            let omega_sync = if sum_diff.norm_sqr() > 1e-12 {
+                sum_diff.arg()
+            } else {
+                0.0
+            };
+
+            let mut sum_base = Complex32::new(0.0, 0.0);
+            for (i, &y) in self.complex_buffer.iter().enumerate() {
+                let ang = -omega_sync * i as f32;
+                let (s, c) = ang.sin_cos();
+                sum_base += y * Complex32::new(c, s);
+            }
+            let phi0 = if sum_base.norm_sqr() > 1e-12 {
+                sum_base.arg()
+            } else {
+                0.0
+            };
+
+            let sync_to_payload_scale = PAYLOAD_SPREAD_FACTOR as f32 / SYNC_SPREAD_FACTOR as f32;
+            st.phase_rate = (omega_sync * sync_to_payload_scale).clamp(
+                -TRACKING_PHASE_RATE_LIMIT_RAD,
+                TRACKING_PHASE_RATE_LIMIT_RAD,
+            );
+
+            let last_sync_idx = (self.complex_buffer.len() - 1) as f32;
+            let phi_last = phi0 + omega_sync * last_sync_idx;
+            let phi_payload0 = phi_last + st.phase_rate;
+            let (s_ref, c_ref) = phi_payload0.sin_cos();
+            st.phase_ref = Complex32::new(c_ref, s_ref);
+
+            if let Some(&last_y) = self.complex_buffer.last() {
+                let last_sign =
+                    self.sync_detector.sync_symbols()[repeat + self.complex_buffer.len() - 1];
+                let last_corr = last_y * Complex32::new(last_sign, 0.0);
+                let (s_last, c_last) = (-phi_last).sin_cos();
+                let prev = last_corr * Complex32::new(c_last, s_last);
+                let norm = prev.norm().max(1e-6);
+                self.demodulator.set_prev_phase(prev / norm);
+            } else {
+                self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
+            }
+
+            let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
+            let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
+            if sw > 1e-9 {
+                let denom = sw * sxx - sx * sx;
+                if denom.abs() > 1e-9 {
+                    let slope = (sw * sxy - sx * sy) / denom;
+                    let intercept = (sy - slope * sx) / sw;
+                    st.timing_offset =
+                        (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
+                    st.timing_rate = (slope * early_late_delta * sync_to_payload_scale)
+                        .clamp(-timing_rate_limit, timing_rate_limit);
+                } else {
+                    let intercept = sy / sw;
+                    st.timing_offset =
+                        (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
+                    st.timing_rate = 0.0;
+                }
+            } else {
+                st.timing_offset = 0.0;
+                st.timing_rate = 0.0;
             }
 
             self.tracking_state = Some(st);

@@ -968,7 +968,13 @@ mod tests {
         let mut chips_i = Vec::new();
         let mut chips_q = Vec::new();
         let mut phase = 0;
-        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
+        Modulator::bits_to_chips(
+            &bits,
+            &modulator.wdict,
+            &mut phase,
+            &mut chips_i,
+            &mut chips_q,
+        );
 
         // 16サンプルの信号を構築
         let mut signal = Vec::with_capacity(16);
@@ -1012,9 +1018,15 @@ mod tests {
             let bits = vec![b3 as u8, b2 as u8, b1 as u8, b0 as u8, 0, 0];
 
             let mut chips_i = Vec::new();
-        let mut chips_q = Vec::new();
-        let mut phase = 0;
-        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
+            let mut chips_q = Vec::new();
+            let mut phase = 0;
+            Modulator::bits_to_chips(
+                &bits,
+                &modulator.wdict,
+                &mut phase,
+                &mut chips_i,
+                &mut chips_q,
+            );
 
             // 16サンプルの信号を構築
             let signal: Vec<Complex32> = (0..16)
@@ -1060,9 +1072,15 @@ mod tests {
 
             let bits = vec![0u8, 0, 0, 0, dqpsk_bits[0], dqpsk_bits[1]];
             let mut chips_i = Vec::new();
-        let mut chips_q = Vec::new();
-        let mut phase = 0;
-        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
+            let mut chips_q = Vec::new();
+            let mut phase = 0;
+            Modulator::bits_to_chips(
+                &bits,
+                &modulator.wdict,
+                &mut phase,
+                &mut chips_i,
+                &mut chips_q,
+            );
 
             let signal: Vec<Complex32> = (0..16)
                 .map(|i| Complex32::new(chips_i[i], chips_q[i]))
@@ -1138,7 +1156,7 @@ mod tests {
     fn test_modulator_demodulator_consecutive_symbols() {
         use crate::mary::modulator::Modulator;
 
-        let mut modulator = Modulator::default_48k();
+        let modulator = Modulator::default_48k();
         let mut demodulator = Demodulator::new();
         demodulator.set_reference_phase(16.0, 0.0);
 
@@ -1152,7 +1170,13 @@ mod tests {
         let mut chips_i = Vec::new();
         let mut chips_q = Vec::new();
         let mut phase = 0;
-        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
+        Modulator::bits_to_chips(
+            &bits,
+            &modulator.wdict,
+            &mut phase,
+            &mut chips_i,
+            &mut chips_q,
+        );
 
         // 各シンボルを復調
         let sf = 16;
@@ -1195,7 +1219,7 @@ mod tests {
         use crate::mary::modulator::Modulator;
         use rand::Rng;
 
-        let mut modulator = Modulator::default_48k();
+        let modulator = Modulator::default_48k();
         let mut demodulator = Demodulator::new();
         demodulator.set_reference_phase(16.0, 0.0);
 
@@ -1216,7 +1240,13 @@ mod tests {
         let mut chips_i = Vec::new();
         let mut chips_q = Vec::new();
         let mut phase = 0;
-        Modulator::bits_to_chips(&padded_bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
+        Modulator::bits_to_chips(
+            &padded_bits,
+            &modulator.wdict,
+            &mut phase,
+            &mut chips_i,
+            &mut chips_q,
+        );
 
         let sf = 16;
         let num_symbols = padded_len / 6;
@@ -1252,7 +1282,7 @@ mod tests {
     fn test_modulator_demodulator_walsh_orthogonality() {
         use crate::mary::modulator::Modulator;
 
-        let mut modulator = Modulator::default_48k();
+        let modulator = Modulator::default_48k();
         let demodulator = Demodulator::new();
 
         // Walsh[0]とWalsh[1]の信号を生成
@@ -1262,11 +1292,23 @@ mod tests {
         let mut chips_i0 = Vec::new();
         let mut chips_q0 = Vec::new();
         let mut phase0 = 0;
-        Modulator::bits_to_chips(&bits0, &modulator.wdict, &mut phase0, &mut chips_i0, &mut chips_q0);
+        Modulator::bits_to_chips(
+            &bits0,
+            &modulator.wdict,
+            &mut phase0,
+            &mut chips_i0,
+            &mut chips_q0,
+        );
         let mut chips_i1 = Vec::new();
         let mut chips_q1 = Vec::new();
         let mut phase1 = 0;
-        Modulator::bits_to_chips(&bits1, &modulator.wdict, &mut phase1, &mut chips_i1, &mut chips_q1);
+        Modulator::bits_to_chips(
+            &bits1,
+            &modulator.wdict,
+            &mut phase1,
+            &mut chips_i1,
+            &mut chips_q1,
+        );
 
         let signal0: Vec<Complex32> = (0..16)
             .map(|i| Complex32::new(chips_i0[i], chips_q0[i]))
@@ -1324,7 +1366,13 @@ mod tests {
         let mut chips_i = Vec::new();
         let mut chips_q = Vec::new();
         let mut phase = 0;
-        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
+        Modulator::bits_to_chips(
+            &bits,
+            &modulator.wdict,
+            &mut phase,
+            &mut chips_i,
+            &mut chips_q,
+        );
         let signal: Vec<Complex32> = (0..16)
             .map(|i| Complex32::new(chips_i[i], chips_q[i]))
             .collect();

@@ -544,7 +544,7 @@ mod tests {
     /// 3. エネルギー保存：各シンボルのエネルギーはsf=16に等しい
     #[test]
     fn test_math_mary_dqpsk() {
-        let mut mod_ = make_modulator();
+        let mod_ = make_modulator();
 
         // ===== 検証1: Walsh系列の直交性 =====
         // Walsh[0]とWalsh[1]を生成（DQPSKは同じ00に固定）
@@ -659,7 +659,7 @@ mod tests {
     /// 複数シンボルの位相遷移を検証する
     #[test]
     fn test_phase_transitions_multiple_symbols() {
-        let mut mod_ = make_modulator();
+        let mod_ = make_modulator();
 
         // シンボル1: Walsh[0] + DQPSK 00 (delta=0)
         // シンボル2: Walsh[0] + DQPSK 01 (delta=1)
@@ -773,12 +773,24 @@ mod tests {
         let mut chips_i1 = Vec::new();
         let mut chips_q1 = Vec::new();
         let mut phase1 = 0;
-        Modulator::bits_to_chips(&test_bits, &mod_.wdict, &mut phase1, &mut chips_i1, &mut chips_q1);
+        Modulator::bits_to_chips(
+            &test_bits,
+            &mod_.wdict,
+            &mut phase1,
+            &mut chips_i1,
+            &mut chips_q1,
+        );
         mod_.reset();
         let mut chips_i2 = Vec::new();
         let mut chips_q2 = Vec::new();
         let mut phase2 = 0;
-        Modulator::bits_to_chips(&test_bits, &mod_.wdict, &mut phase2, &mut chips_i2, &mut chips_q2);
+        Modulator::bits_to_chips(
+            &test_bits,
+            &mod_.wdict,
+            &mut phase2,
+            &mut chips_i2,
+            &mut chips_q2,
+        );
 
         // 完全に一致するはず
         assert_eq!(chips_i1, chips_i2, "Deterministic I chips failed");
@@ -887,7 +899,7 @@ mod tests {
     /// Walsh直交性を活用したテスト：異なるWalsh系列は直交している
     #[test]
     fn test_walsh_orthogonality_in_modulated_signals() {
-        let mut mod_ = make_modulator();
+        let mod_ = make_modulator();
 
         // Walsh[0]とWalsh[1]の信号を生成
         let bits0 = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0]
@@ -1280,7 +1292,7 @@ mod tests {
     /// DQPSK位相遷移の連続性検証
     #[test]
     fn test_dqpsk_phase_continuity() {
-        let mut mod_ = make_modulator();
+        let mod_ = make_modulator();
 
         // 連続するDQPSKシンボルを生成
         let bits = vec![
