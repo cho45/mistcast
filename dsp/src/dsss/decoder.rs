@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     fn test_decoder_silence_input_does_not_complete() {
-        let dsp_config = DspConfig::default_48k();
+        let dsp_config = crate::dsss::params::dsp_config_48k();
         let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
 
         let silence = vec![0.0f32; 4096];
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn test_agc_fast_attack_response() {
-        let dsp_config = DspConfig::default_48k();
+        let dsp_config = crate::dsss::params::dsp_config_48k();
         let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
 
         // 初期状態: 低レベルで十分に安定化
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn test_agc_slow_decay_stability() {
-        let dsp_config = DspConfig::default_48k();
+        let dsp_config = crate::dsss::params::dsp_config_48k();
         let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
 
         // 高レベルで安定化
@@ -988,7 +988,7 @@ mod tests {
 
     #[test]
     fn test_decoder_reset_after_silence() {
-        let dsp_config = DspConfig::default_48k();
+        let dsp_config = crate::dsss::params::dsp_config_48k();
         let mut decoder = Decoder::new(16, FIXED_K, dsp_config);
 
         let silence = vec![0.0f32; 2048];
@@ -1002,7 +1002,7 @@ mod tests {
     }
 
     fn build_test_signal(data: &[u8], k: usize, frames: usize, gap_samples: usize) -> Vec<f32> {
-        let mut enc_cfg = EncoderConfig::new(DspConfig::default_48k());
+        let mut enc_cfg = EncoderConfig::new(crate::dsss::params::dsp_config_48k());
         enc_cfg.fountain_k = k;
         let burst_count = enc_cfg.packets_per_sync_burst.max(1);
         let mut encoder = Encoder::new(enc_cfg);
@@ -1076,7 +1076,7 @@ mod tests {
         let signal = build_test_signal(data, k, 6, 64);
         // 実オーディオI/Fで起きるオーダー(100ppm前後)のクロックずれを模擬。
         let drifted = apply_clock_drift_ppm(&signal, 120.0);
-        let recovered = decode_signal(data, k, DspConfig::default_48k(), &drifted)
+        let recovered = decode_signal(data, k, crate::dsss::params::dsp_config_48k(), &drifted)
             .expect("decoder should recover under realistic clock drift");
         assert_eq!(&recovered[..data.len()], data);
     }
@@ -1087,7 +1087,7 @@ mod tests {
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
         let signal = build_test_signal(data, k, 3, 64);
 
-        let mut rx_cfg = DspConfig::default_48k();
+        let mut rx_cfg = crate::dsss::params::dsp_config_48k();
         // 受信LOずれを模擬: 音響リンクで現実的な小さなCFO。
         rx_cfg.carrier_freq += 10.0;
 
@@ -1103,7 +1103,7 @@ mod tests {
         let mut signal = vec![0.0f32; 137];
         signal.extend(build_test_signal(data, k, 3, 64));
 
-        let mut rx_cfg = DspConfig::default_48k();
+        let mut rx_cfg = crate::dsss::params::dsp_config_48k();
         rx_cfg.carrier_freq += 10.0;
 
         let recovered = decode_signal(data, k, rx_cfg, &signal)
@@ -1253,7 +1253,7 @@ mod tests {
     #[test]
     fn test_reproduce_vitest_regression() {
         let data = vec![0xAAu8; 160]; // k=10
-        let mut config = DspConfig::default_48k();
+        let mut config = crate::dsss::params::dsp_config_48k();
         // このテストは以前のデフォルト値での挙動を前提としているため、明示的に指定する
         config.chip_rate = 12000.0;
         config.sync_word_bits = 32;

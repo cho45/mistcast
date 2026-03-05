@@ -148,7 +148,7 @@ impl WasmDsssDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
         console_error_panic_hook::set_once();
-        let mut config = DspConfig::new(sample_rate);
+        let mut config = dsss::params::dsp_config(sample_rate);
         config.packets_per_burst = packets_per_burst;
         WasmDsssDecoder {
             inner: dsss::decoder::Decoder::new(
@@ -195,7 +195,7 @@ pub struct WasmDsssEncoder {
 impl WasmDsssEncoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
-        let mut config = DspConfig::new(sample_rate);
+        let mut config = dsss::params::dsp_config(sample_rate);
         config.packets_per_burst = packets_per_burst;
         let enc_config = dsss::encoder::EncoderConfig::new(config);
         WasmDsssEncoder {

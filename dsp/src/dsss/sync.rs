@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn test_sync_with_different_spread_factors() {
         for &m in &[4, 5, 6] {
-            let mut config = DspConfig::default_48k();
+            let mut config = crate::dsss::params::dsp_config_48k();
             config.mseq_order = m;
             let sf = config.spread_factor();
             println!("Testing m={}, SF={}", m, sf);
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_sync_absolute_timing_accuracy() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let detector = new_detector_default(config.clone());
         let spc = config.proc_samples_per_chip();
         let sf = config.spread_factor();
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_sync_first_match_scenarios() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let detector = new_detector_default(config.clone());
         let sf = config.spread_factor();
         let spc = config.proc_samples_per_chip();
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_sync_boundary_conditions() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let detector = new_detector_default(config.clone());
         let sf = config.spread_factor();
         let sym_len = sf * config.proc_samples_per_chip();
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_sync_low_snr_sensitivity() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let detector = new_detector_default(config.clone());
         const NUM_TRIALS: usize = 100;
         const REQUIRED_DETECTION_RATE: f64 = 0.95;
@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_roc_curve_analysis() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let snr_db_list: &[f32] = &[-10.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0];
         const NUM_TRIALS: usize = 100;
         const NUM_NOISE_TRIALS: usize = 200;
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_score_candidate_mathematical_verification() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let detector = new_detector_default(config.clone());
         let sf = config.spread_factor();
         let sym_len = sf * config.proc_samples_per_chip();
