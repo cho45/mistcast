@@ -17,7 +17,7 @@
     "init_desc": "Mistcast is a tool for acoustic data communication, enabling network-independent data transfer.",
     "init_features": {
       "acoustic": "Packet transmission via acoustic physical layer",
-      "airgap": "Supports data exchange in air-gapped environments",
+      "airgap": "Local broadcast communication",
       "browser": "Operates entirely within the browser using Web Audio API"
     },
     "copy": "Copy",
@@ -95,7 +95,8 @@
         "last_path_used": "Last selected decoding path (0=raw, 1=FDE).",
         "last_pred_mse_fde": "Predicted Mean Squared Error for FDE path (lower is better).",
         "last_pred_mse_raw": "Predicted Mean Squared Error for raw path (lower is better).",
-        "last_est_snr_db": "Estimated Signal-to-Noise Ratio in dB."
+        "last_est_snr_db": "Estimated Signal-to-Noise Ratio (SNR) in dB. Internal value used for Eb/N0 (approx) calculation.",
+        "ebn0_approx_db": "Estimated Eb/N0 (approximate). Energy-per-bit to noise power spectral density ratio in dB. Approximate value; may differ from actual Eb/N0. (Internal SNR: {internal_snr} dB)"
       }
     },
     "timing": {

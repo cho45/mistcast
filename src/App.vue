@@ -120,6 +120,7 @@ defineExpose({
       <div class="app-header-content">
         <div class="app-brand-area">
           <div class="app-brand">
+            <img src="./assets/icon.svg" alt="Mistcast" class="brand-icon" />
             <h1>Mistcast</h1>
           </div>
           <div class="header-status-area">
@@ -168,13 +169,26 @@ defineExpose({
 
     <main class="content">
       <section v-if="!runtime.coreReady.value" class="panel init-panel">
+        <div class="init-icon-wrapper">
+          <img src="./assets/icon.svg" alt="Mistcast" class="init-icon" />
+        </div>
         <div class="init-content">
+          <h2 class="init-title">Mistcast</h2>
           <p class="init-desc">{{ $t('common.init_desc') }}</p>
-          <ul class="init-features">
-            <li>{{ $t('common.init_features.acoustic') }}</li>
-            <li>{{ $t('common.init_features.airgap') }}</li>
-            <li>{{ $t('common.init_features.browser') }}</li>
-          </ul>
+          <div class="init-features">
+            <div class="feature-item">
+              <span class="feature-icon">🔊</span>
+              <span>{{ $t('common.init_features.acoustic') }}</span>
+            </div>
+            <div class="feature-item">
+              <span class="feature-icon">🔒</span>
+              <span>{{ $t('common.init_features.airgap') }}</span>
+            </div>
+            <div class="feature-item">
+              <span class="feature-icon">🌐</span>
+              <span>{{ $t('common.init_features.browser') }}</span>
+            </div>
+          </div>
         </div>
 
         <div class="init-action">
@@ -184,6 +198,7 @@ defineExpose({
             class="btn btn-primary btn-large btn-init"
             :disabled="isInitializing"
           >
+            <span v-if="isInitializing" class="btn-spinner"></span>
             {{ isInitializing ? $t('sender.status.preparing') : $t('common.start') }}
           </button>
         </div>
@@ -369,6 +384,18 @@ defineExpose({
   transform: scale(0.8) translateY(10px);
 }
 
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.brand-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
 .app-brand h1 {
   margin: 0;
   font-size: 1.25rem;
@@ -378,10 +405,15 @@ defineExpose({
 }
 
 @media (max-width: 480px) {
+  .brand-icon {
+    width: 20px;
+    height: 20px;
+  }
+
   .app-brand h1 {
     font-size: 1rem;
   }
-  
+
   .app-brand-area {
     gap: 0.5rem;
   }
@@ -628,49 +660,102 @@ defineExpose({
 }
 
 .init-panel {
-  max-width: 560px;
-  margin: 3rem auto;
-  padding: 3rem 2rem;
+  max-width: 520px;
+  margin: 2rem auto;
+  padding: 2.5rem 2rem;
   text-align: center;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafb 100%);
+  border: 1px solid #e8f0f8;
+  box-shadow: 0 12px 40px rgba(15, 107, 215, 0.08), 0 4px 12px rgba(0, 0, 0, 0.03);
+  position: relative;
+  overflow: hidden;
+}
+
+.init-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, var(--primary) 0%, #38bdf8 50%, var(--primary) 100%);
+}
+
+.init-icon-wrapper {
+  margin-bottom: 1.5rem;
+  animation: iconFloat 3s ease-in-out infinite;
+}
+
+@keyframes iconFloat {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+}
+
+.init-icon {
+  width: 80px;
+  height: 80px;
+  filter: drop-shadow(0 4px 12px rgba(15, 107, 215, 0.15));
 }
 
 .init-content {
-  margin-bottom: 2.5rem;
+  margin-bottom: 2rem;
+}
+
+.init-title {
+  margin: 0 0 1rem;
+  font-size: 1.8rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--primary) 0%, #0ea5e9 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.02em;
 }
 
 .init-desc {
-  font-size: 1.1rem;
+  font-size: 1.05rem;
   font-weight: 500;
-  color: #1e293b;
-  line-height: 1.6;
-  margin-bottom: 1.5rem;
+  color: #334155;
+  line-height: 1.7;
+  margin-bottom: 2rem;
 }
 
 .init-features {
-  list-style: none;
-  padding: 0;
-  margin: 0;
   display: flex;
   flex-direction: column;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feature-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   gap: 0.75rem;
-  text-align: center;
+  padding: 0.6rem 1rem;
+  background: #f0f7ff;
+  border-radius: 10px;
+  border: 1px solid #e0effe;
+  font-size: 0.9rem;
+  color: #334155;
+  transition: all 0.2s;
 }
 
-.init-features li {
-  font-size: 0.95rem;
-  color: var(--muted);
+.feature-item:hover {
+  background: #e6f3ff;
+  border-color: #cce3ff;
+  transform: translateY(-1px);
 }
 
-.init-features li::before {
-  content: '•';
-  margin-right: 0.5rem;
-  color: var(--primary);
-  font-weight: bold;
+.feature-icon {
+  font-size: 1.1rem;
 }
 
 .init-action {
-  padding-top: 2rem;
-  border-top: 1px solid #e2e8f0;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e8f0f8;
 }
 
 .init-hint {
@@ -680,8 +765,35 @@ defineExpose({
 }
 
 .btn-init {
-  padding: 1rem 3rem;
-  font-size: 1.1rem;
+  padding: 0.9rem 2.5rem;
+  font-size: 1rem;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s;
+}
+
+.btn-init:not(:disabled):hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(15, 107, 215, 0.25);
+}
+
+.btn-init:not(:disabled):active {
+  transform: translateY(0);
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 0.5rem;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 textarea {
@@ -808,6 +920,75 @@ textarea {
   color: var(--muted);
   margin-top: 0.15rem;
   font-weight: 400;
+}
+
+.metric-positive {
+  background: oklch(0.98 0.015 145);
+  border-color: oklch(0.94 0.035 145);
+}
+
+.metric-positive span {
+  color: oklch(0.45 0.12 145);
+}
+
+.metric-positive strong {
+  color: oklch(0.35 0.15 145);
+}
+
+.metric-negative {
+  background: oklch(0.98 0.015 25);
+  border-color: oklch(0.94 0.035 25);
+}
+
+.metric-negative span {
+  color: oklch(0.45 0.12 25);
+}
+
+.metric-negative strong {
+  color: oklch(0.35 0.15 25);
+}
+
+.proc-grid .metric-negative {
+  background: oklch(0.98 0.015 25);
+  border: 1px solid oklch(0.94 0.035 25);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+}
+
+.proc-grid .metric-negative span {
+  color: oklch(0.45 0.12 25);
+}
+
+.proc-grid .metric-negative strong {
+  color: oklch(0.35 0.15 25);
+}
+
+/* FDE Frames - 薄いオレンジ */
+.metric-fde {
+  background: oklch(0.98 0.02 50);
+  border-color: oklch(0.93 0.05 50);
+}
+
+.metric-fde span {
+  color: oklch(0.55 0.15 50);
+}
+
+.metric-fde strong {
+  color: oklch(0.45 0.18 50);
+}
+
+/* Raw Frames - 薄い青 */
+.metric-raw {
+  background: oklch(0.98 0.02 240);
+  border-color: oklch(0.93 0.05 240);
+}
+
+.metric-raw span {
+  color: oklch(0.45 0.12 240);
+}
+
+.metric-raw strong {
+  color: oklch(0.35 0.15 240);
 }
 
 .proc-stats {

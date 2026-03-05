@@ -75,18 +75,50 @@ mod tests {
     #[test]
     fn test_interleaver_config_values() {
         // 基本的な定数値の検証
-        assert_eq!(interleaver_config::raw_bits(), 174, "raw_bits should be 174");
-        assert_eq!(interleaver_config::fec_bits(), 348, "fec_bits should be 348");
-        assert_eq!(interleaver_config::INTERLEAVER_ROWS, 29, "INTERLEAVER_ROWS should be 29");
-        assert_eq!(interleaver_config::INTERLEAVER_COLS, 12, "INTERLEAVER_COLS should be 12");
-        assert_eq!(interleaver_config::interleaved_bits(), 348, "interleaved_bits should be 348");
-        assert_eq!(interleaver_config::mary_aligned_bits(), 348, "mary_aligned_bits should be 348 (no padding)");
+        assert_eq!(
+            interleaver_config::raw_bits(),
+            174,
+            "raw_bits should be 174"
+        );
+        assert_eq!(
+            interleaver_config::fec_bits(),
+            348,
+            "fec_bits should be 348"
+        );
+        assert_eq!(
+            interleaver_config::INTERLEAVER_ROWS,
+            29,
+            "INTERLEAVER_ROWS should be 29"
+        );
+        assert_eq!(
+            interleaver_config::INTERLEAVER_COLS,
+            12,
+            "INTERLEAVER_COLS should be 12"
+        );
+        assert_eq!(
+            interleaver_config::interleaved_bits(),
+            348,
+            "interleaved_bits should be 348"
+        );
+        assert_eq!(
+            interleaver_config::mary_aligned_bits(),
+            348,
+            "mary_aligned_bits should be 348 (no padding)"
+        );
 
         // 348は6で割り切れることを確認
-        assert_eq!(interleaver_config::interleaved_bits() % 6, 0, "348 should be divisible by 6");
+        assert_eq!(
+            interleaver_config::interleaved_bits() % 6,
+            0,
+            "348 should be divisible by 6"
+        );
 
         // 58 symbolsであることを確認
-        assert_eq!(interleaver_config::mary_symbols(), 58, "Should have 58 Mary symbols");
+        assert_eq!(
+            interleaver_config::mary_symbols(),
+            58,
+            "Should have 58 Mary symbols"
+        );
     }
 
     #[test]

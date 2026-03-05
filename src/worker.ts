@@ -44,6 +44,7 @@ type WasmDecoderLike = {
     last_pred_mse_fde: number;
     last_pred_mse_raw: number;
     last_est_snr_db: number;
+    ebn0_approx_db: number;
     basis_matrix: Uint8Array;
   };
   recovered_data(): Uint8Array | null | undefined;
@@ -358,6 +359,7 @@ export class MistcastBackend {
       lastPredMseFde: progress.last_pred_mse_fde,
       lastPredMseRaw: progress.last_pred_mse_raw,
       lastEstSnrDb: progress.last_est_snr_db,
+      ebn0ApproxDb: progress.ebn0_approx_db,
       basisMatrix: progress.basis_matrix,
       decoderProc: this.decoderProcessorStats,
     };

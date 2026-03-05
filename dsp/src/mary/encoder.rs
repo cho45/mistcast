@@ -790,7 +790,11 @@ mod tests {
 
         // MaryDQPSKシンボル数（6ビット/シンボル）
         let full_symbols = bits.len() / 6;
-        assert_eq!(full_symbols, expected_symbols, "Should have {} full symbols", expected_symbols);
+        assert_eq!(
+            full_symbols, expected_symbols,
+            "Should have {} full symbols",
+            expected_symbols
+        );
 
         // パディング不要であることを確認
         assert_eq!(

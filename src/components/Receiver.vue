@@ -52,6 +52,7 @@ const lastPathUsed = ref(0);
 const lastPredMseFde = ref(0);
 const lastPredMseRaw = ref(0);
 const lastEstSnrDb = ref(0);
+const ebn0ApproxDb = ref(0);
 
 const rxLogs = ref<string[]>([]);
 const rxTick = ref(0);
@@ -317,6 +318,7 @@ function resetDecoderProgressState(clearLogs: boolean) {
   lastPredMseFde.value = 0;
   lastPredMseRaw.value = 0;
   lastEstSnrDb.value = 0;
+  ebn0ApproxDb.value = 0;
   if (clearLogs) {
     rxLogs.value = [];
     rxTick.value = 0;
@@ -365,6 +367,7 @@ function makeOnProgressCallback() {
     lastPredMseFde.value = p.lastPredMseFde ?? 0;
     lastPredMseRaw.value = p.lastPredMseRaw ?? 0;
     lastEstSnrDb.value = p.lastEstSnrDb ?? 0;
+    ebn0ApproxDb.value = p.ebn0ApproxDb ?? 0;
 
     // 直近の履歴を更新 (差分があった場合)
     if (p.received > prevReceived) {
@@ -738,21 +741,21 @@ defineExpose({
     />
 
     <div class="metric-grid" v-if="settings.debugMode">
-      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.accepted')"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
-      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.stall')"><span>Stall</span><strong>{{ stalledPackets }}</strong><small>{{ $t('receiver.metrics.stall_probability', { prob: stallProbability }) }}</small></div>
+      <div class="metric metric-positive" :data-tooltip="$t('receiver.metrics.tooltips.accepted')"><span>Accepted</span><strong>{{ receivedPackets }}</strong></div>
+      <div class="metric metric-negative" :data-tooltip="$t('receiver.metrics.tooltips.stall')"><span>Stall</span><strong>{{ stalledPackets }}</strong><small>{{ $t('receiver.metrics.stall_probability', { prob: stallProbability }) }}</small></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.dep')"><span>Dep</span><strong>{{ dependentPackets }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.dup')"><span>Dup</span><strong>{{ duplicatePackets }}</strong></div>
-      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.crc')"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
+      <div class="metric metric-negative" :data-tooltip="$t('receiver.metrics.tooltips.crc')"><span>CRC</span><strong>{{ crcErrorPackets }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.parse')"><span>Parse</span><strong>{{ parseErrorPackets }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.inv_nbr')"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_seq')"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_rank_up')"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
-      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.fde_selected_frames')"><span>FDE Frames</span><strong>{{ fdeSelectedFrames }}</strong></div>
-      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.raw_selected_frames')"><span>Raw Frames</span><strong>{{ rawSelectedFrames }}</strong></div>
+      <div class="metric metric-fde" :data-tooltip="$t('receiver.metrics.tooltips.fde_selected_frames')"><span>FDE Frames</span><strong>{{ fdeSelectedFrames }}</strong></div>
+      <div class="metric metric-raw" :data-tooltip="$t('receiver.metrics.tooltips.raw_selected_frames')"><span>Raw Frames</span><strong>{{ rawSelectedFrames }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_path_used')"><span>Last Path</span><strong>{{ lastPathUsed }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_pred_mse_fde')"><span>Pred MSE FDE</span><strong>{{ lastPredMseFde.toFixed(6) }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_pred_mse_raw')"><span>Pred MSE Raw</span><strong>{{ lastPredMseRaw.toFixed(6) }}</strong></div>
-      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_est_snr_db')"><span>Est SNR</span><strong>{{ lastEstSnrDb.toFixed(2) }} dB</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.ebn0_approx_db', { internal_snr: lastEstSnrDb.toFixed(2) })"><span>Est. Eb/N0{approx}</span><strong>{{ ebn0ApproxDb.toFixed(2) }} dB</strong></div>
     </div>
 
     <div class="proc-stats" v-if="settings.debugMode">
@@ -762,7 +765,7 @@ defineExpose({
         <div :data-tooltip="$t('receiver.timing.tooltips.max')"><span>max</span><strong>{{ decoderProcMaxMs.toFixed(3) }} ms</strong></div>
         <div :data-tooltip="$t('receiver.timing.tooltips.last')"><span>last</span><strong>{{ decoderProcLastMs.toFixed(3) }} ms</strong></div>
         <div :data-tooltip="$t('receiver.timing.tooltips.budget')"><span>budget</span><strong>{{ decoderProcBlockMs.toFixed(3) }} ms</strong></div>
-        <div :data-tooltip="$t('receiver.timing.tooltips.overrun')"><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
+        <div class="metric-negative" :data-tooltip="$t('receiver.timing.tooltips.overrun')"><span>overrun</span><strong>{{ decoderProcOverruns }}</strong></div>
         <div :data-tooltip="$t('receiver.timing.tooltips.input_rms')"><span>input RMS</span><strong>{{ decoderProcInputRms.toFixed(5) }}</strong></div>
         <div :data-tooltip="$t('receiver.timing.tooltips.blocks')"><span>blocks</span><strong>{{ decoderProcBlocks }}</strong></div>
       </div>

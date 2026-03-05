@@ -19,7 +19,7 @@
     "init_desc": "Mistcastは、音響通信を利用してネットワーク非依存のデータ転送を実現するツールです。",
     "init_features": {
       "acoustic": "音響物理層によるパケット伝送",
-      "airgap": "エアギャップ環境でのデータ交換に対応",
+      "airgap": "ローカルブロードキャスト通信",
       "browser": "Web Audio API を使用しブラウザのみで完結"
     }
   },
@@ -95,7 +95,8 @@
         "last_path_used": "最後に選択されたデコードパス（0=生, 1=FDE）。",
         "last_pred_mse_fde": "FDEパスの予測平均二乗誤差（小さいほど良い）。",
         "last_pred_mse_raw": "生パスの予測平均二乗誤差（小さいほど良い）。",
-        "last_est_snr_db": "推定信号対雑音比（dB）。"
+        "last_est_snr_db": "推定信号対雑音比（SNR）（dB）。Eb/N0（approx）の計算に使用される内部値。",
+        "ebn0_approx_db": "推定Eb/N0（近似値）。チップ当たりのエネルギー対ノイズスペクトル密度比（dB）。近似値のため、実際のEb/N0とは異なる場合がある。（内部値SNR: {internal_snr} dB）"
       }
     },
     "timing": {
