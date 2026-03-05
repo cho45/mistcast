@@ -66,6 +66,12 @@ pub struct DecodeProgress {
     pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
+    pub fde_selected_frames: usize,
+    pub raw_selected_frames: usize,
+    pub last_path_used: i32,
+    pub last_pred_mse_fde: f32,
+    pub last_pred_mse_raw: f32,
+    pub last_est_snr_db: f32,
     pub basis_matrix: Vec<u8>,
 }
 
@@ -112,6 +118,12 @@ pub struct Decoder {
     remaining_samples_in_frame: isize,
     fde_auto_path_select: bool,
     current_frame_use_fde: bool,
+    fde_selected_frames: usize,
+    raw_selected_frames: usize,
+    last_path_used: i32,
+    last_pred_mse_fde: f32,
+    last_pred_mse_raw: f32,
+    last_est_snr_db: f32,
     fde_mmse_settings: MmseSettings,
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
@@ -223,6 +235,12 @@ impl Decoder {
             remaining_samples_in_frame: 0,
             fde_auto_path_select: false,
             current_frame_use_fde: true,
+            fde_selected_frames: 0,
+            raw_selected_frames: 0,
+            last_path_used: -1,
+            last_pred_mse_fde: f32::NAN,
+            last_pred_mse_raw: f32::NAN,
+            last_est_snr_db: f32::NAN,
             fde_mmse_settings: MmseSettings::default(),
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
@@ -433,17 +451,31 @@ impl Decoder {
             }
 
             let mut use_fde_this_frame = self.equalizer.is_some();
+            let mut pred_mse_fde = f32::NAN;
+            let mut pred_mse_raw = f32::NAN;
             if let Some(ref mut predictor) = self.channel_mse_predictor {
                 let signal_var = chq.signal_var.max(0.0);
                 let noise_var = chq.noise_var.max(0.0);
                 let cir_slice = &self.cir_buffer[..cir_len];
                 let mse_fde = predictor.predict_mse_fde(cir_slice, signal_var, noise_var, mmse);
                 let mse_raw = predictor.predict_mse_raw(cir_slice, signal_var, noise_var);
+                pred_mse_fde = mse_fde;
+                pred_mse_raw = mse_raw;
                 if self.fde_auto_path_select {
                     use_fde_this_frame = mse_fde < mse_raw;
                 }
             }
             self.current_frame_use_fde = use_fde_this_frame;
+            self.last_pred_mse_fde = pred_mse_fde;
+            self.last_pred_mse_raw = pred_mse_raw;
+            self.last_est_snr_db = chq.snr_db.unwrap_or(f32::NAN);
+            if use_fde_this_frame {
+                self.fde_selected_frames += 1;
+                self.last_path_used = 1;
+            } else {
+                self.raw_selected_frames += 1;
+                self.last_path_used = 0;
+            }
 
             let overlap = if use_fde_this_frame {
                 self.equalizer.as_ref().map_or(0, |eq| eq.overlap_len())
@@ -955,6 +987,12 @@ impl Decoder {
         self.crc_error_packets = 0;
         self.parse_error_packets = 0;
         self.invalid_neighbor_packets = 0;
+        self.fde_selected_frames = 0;
+        self.raw_selected_frames = 0;
+        self.last_path_used = -1;
+        self.last_pred_mse_fde = f32::NAN;
+        self.last_pred_mse_raw = f32::NAN;
+        self.last_est_snr_db = f32::NAN;
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -975,6 +1013,12 @@ impl Decoder {
             last_rank_up_seq: self.last_rank_up_seq.map(|s| s as i32).unwrap_or(-1),
             progress,
             complete: self.recovered_data.is_some(),
+            fde_selected_frames: self.fde_selected_frames,
+            raw_selected_frames: self.raw_selected_frames,
+            last_path_used: self.last_path_used,
+            last_pred_mse_fde: self.last_pred_mse_fde,
+            last_pred_mse_raw: self.last_pred_mse_raw,
+            last_est_snr_db: self.last_est_snr_db,
             basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
     }
@@ -1179,6 +1223,12 @@ impl Decoder {
         self.pending_warmup_input_samples = 0;
         self.remaining_samples_in_frame = 0;
         self.current_frame_use_fde = self.equalizer.is_some();
+        self.fde_selected_frames = 0;
+        self.raw_selected_frames = 0;
+        self.last_path_used = -1;
+        self.last_pred_mse_fde = f32::NAN;
+        self.last_pred_mse_raw = f32::NAN;
+        self.last_est_snr_db = f32::NAN;
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
         self.equalized_buffer.clear();

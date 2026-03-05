@@ -46,6 +46,13 @@ const decoderProcOverruns = ref(0);
 const decoderProcInputRms = ref(0);
 const decoderProcBlocks = ref(0);
 
+const fdeSelectedFrames = ref(0);
+const rawSelectedFrames = ref(0);
+const lastPathUsed = ref(0);
+const lastPredMseFde = ref(0);
+const lastPredMseRaw = ref(0);
+const lastEstSnrDb = ref(0);
+
 const rxLogs = ref<string[]>([]);
 const rxTick = ref(0);
 const rxNoChangeTicks = ref(0);
@@ -304,6 +311,12 @@ function resetDecoderProgressState(clearLogs: boolean) {
   lastRankUpSeq.value = -1;
   progressPercent.value = 0;
   recentPacketHistory.value = [];
+  fdeSelectedFrames.value = 0;
+  rawSelectedFrames.value = 0;
+  lastPathUsed.value = 0;
+  lastPredMseFde.value = 0;
+  lastPredMseRaw.value = 0;
+  lastEstSnrDb.value = 0;
   if (clearLogs) {
     rxLogs.value = [];
     rxTick.value = 0;
@@ -346,6 +359,12 @@ function makeOnProgressCallback() {
     lastPacketSeq.value = p.lastPacketSeq ?? -1;
     lastRankUpSeq.value = p.lastRankUpSeq ?? -1;
     progressPercent.value = p.progress;
+    fdeSelectedFrames.value = p.fdeSelectedFrames ?? 0;
+    rawSelectedFrames.value = p.rawSelectedFrames ?? 0;
+    lastPathUsed.value = p.lastPathUsed ?? 0;
+    lastPredMseFde.value = p.lastPredMseFde ?? 0;
+    lastPredMseRaw.value = p.lastPredMseRaw ?? 0;
+    lastEstSnrDb.value = p.lastEstSnrDb ?? 0;
 
     // 直近の履歴を更新 (差分があった場合)
     if (p.received > prevReceived) {
@@ -728,6 +747,12 @@ defineExpose({
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.inv_nbr')"><span>InvNbr</span><strong>{{ invalidNeighborPackets }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_seq')"><span>Last Seq</span><strong>{{ lastPacketSeq }}</strong></div>
       <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_rank_up')"><span>Last RankUp</span><strong>{{ lastRankUpSeq }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.fde_selected_frames')"><span>FDE Frames</span><strong>{{ fdeSelectedFrames }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.raw_selected_frames')"><span>Raw Frames</span><strong>{{ rawSelectedFrames }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_path_used')"><span>Last Path</span><strong>{{ lastPathUsed }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_pred_mse_fde')"><span>Pred MSE FDE</span><strong>{{ lastPredMseFde.toFixed(6) }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_pred_mse_raw')"><span>Pred MSE Raw</span><strong>{{ lastPredMseRaw.toFixed(6) }}</strong></div>
+      <div class="metric" :data-tooltip="$t('receiver.metrics.tooltips.last_est_snr_db')"><span>Est SNR</span><strong>{{ lastEstSnrDb.toFixed(2) }} dB</strong></div>
     </div>
 
     <div class="proc-stats" v-if="settings.debugMode">

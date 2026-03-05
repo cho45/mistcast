@@ -139,6 +139,12 @@ struct TrialResult {
     /// FEC符号化ビットのハード判定BER（Fountain符号の外側の生BER）
     raw_bit_errors: usize,
     raw_bits_compared: usize,
+    fde_selected_frames: usize,
+    raw_selected_frames: usize,
+    last_path_used: i32,
+    last_pred_mse_fde: f32,
+    last_pred_mse_raw: f32,
+    last_est_snr_db: f32,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -160,6 +166,16 @@ struct Metrics {
     cir_nmses: Vec<f32>,
     total_raw_bit_errors: usize,
     total_raw_bits_compared: usize,
+    total_fde_selected_frames: usize,
+    total_raw_selected_frames: usize,
+    last_path_fde_trials: usize,
+    last_path_raw_trials: usize,
+    sum_last_pred_mse_fde: f64,
+    count_last_pred_mse_fde: usize,
+    sum_last_pred_mse_raw: f64,
+    count_last_pred_mse_raw: usize,
+    sum_last_est_snr_db: f64,
+    count_last_est_snr_db: usize,
 }
 
 impl Metrics {
@@ -173,9 +189,28 @@ impl Metrics {
         self.dropped_attempts += t.dropped_attempts;
         self.total_raw_bit_errors += t.raw_bit_errors;
         self.total_raw_bits_compared += t.raw_bits_compared;
+        self.total_fde_selected_frames += t.fde_selected_frames;
+        self.total_raw_selected_frames += t.raw_selected_frames;
         self.total_tx_signal_energy += t.tx_signal_energy_sum;
         self.total_tx_signal_samples += t.tx_signal_samples;
         self.total_process_time_ns += t.process_time_ns;
+        if t.last_path_used == 1 {
+            self.last_path_fde_trials += 1;
+        } else if t.last_path_used == 0 {
+            self.last_path_raw_trials += 1;
+        }
+        if t.last_pred_mse_fde.is_finite() {
+            self.sum_last_pred_mse_fde += t.last_pred_mse_fde as f64;
+            self.count_last_pred_mse_fde += 1;
+        }
+        if t.last_pred_mse_raw.is_finite() {
+            self.sum_last_pred_mse_raw += t.last_pred_mse_raw as f64;
+            self.count_last_pred_mse_raw += 1;
+        }
+        if t.last_est_snr_db.is_finite() {
+            self.sum_last_est_snr_db += t.last_est_snr_db as f64;
+            self.count_last_est_snr_db += 1;
+        }
 
         if t.first_attempt_success {
             self.first_attempt_successes += 1;
@@ -283,6 +318,45 @@ impl Metrics {
             f32::NAN
         } else {
             self.total_raw_bit_errors as f32 / self.total_raw_bits_compared as f32
+        }
+    }
+
+    fn fde_selected_ratio(&self) -> f32 {
+        ratio(
+            self.total_fde_selected_frames,
+            self.total_fde_selected_frames + self.total_raw_selected_frames,
+        )
+    }
+
+    fn last_path_fde_ratio(&self) -> f32 {
+        ratio(self.last_path_fde_trials, self.trials)
+    }
+
+    fn last_path_raw_ratio(&self) -> f32 {
+        ratio(self.last_path_raw_trials, self.trials)
+    }
+
+    fn avg_last_pred_mse_fde(&self) -> Option<f32> {
+        if self.count_last_pred_mse_fde == 0 {
+            None
+        } else {
+            Some((self.sum_last_pred_mse_fde / self.count_last_pred_mse_fde as f64) as f32)
+        }
+    }
+
+    fn avg_last_pred_mse_raw(&self) -> Option<f32> {
+        if self.count_last_pred_mse_raw == 0 {
+            None
+        } else {
+            Some((self.sum_last_pred_mse_raw / self.count_last_pred_mse_raw as f64) as f32)
+        }
+    }
+
+    fn avg_last_est_snr_db(&self) -> Option<f32> {
+        if self.count_last_est_snr_db == 0 {
+            None
+        } else {
+            Some((self.sum_last_est_snr_db / self.count_last_est_snr_db as f64) as f32)
         }
     }
 
@@ -785,6 +859,12 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     cir_nmse: None,
                     raw_bit_errors: 0,
                     raw_bits_compared: 0,
+                    fde_selected_frames: 0,
+                    raw_selected_frames: 0,
+                    last_path_used: -1,
+                    last_pred_mse_fde: f32::NAN,
+                    last_pred_mse_raw: f32::NAN,
+                    last_est_snr_db: f32::NAN,
                 };
             }
         }
@@ -821,6 +901,12 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         cir_nmse: None,
                         raw_bit_errors: 0,
                         raw_bits_compared: 0,
+                        fde_selected_frames: 0,
+                        raw_selected_frames: 0,
+                        last_path_used: -1,
+                        last_pred_mse_fde: f32::NAN,
+                        last_pred_mse_raw: f32::NAN,
+                        last_est_snr_db: f32::NAN,
                     };
                 }
             }
@@ -846,6 +932,12 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         cir_nmse: None,
         raw_bit_errors: 0,
         raw_bits_compared: 0,
+        fde_selected_frames: 0,
+        raw_selected_frames: 0,
+        last_path_used: -1,
+        last_pred_mse_fde: f32::NAN,
+        last_pred_mse_raw: f32::NAN,
+        last_est_snr_db: f32::NAN,
     }
 }
 
@@ -994,6 +1086,12 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     cir_nmse: None,
                     raw_bit_errors,
                     raw_bits_compared,
+                    fde_selected_frames: progress.fde_selected_frames,
+                    raw_selected_frames: progress.raw_selected_frames,
+                    last_path_used: progress.last_path_used,
+                    last_pred_mse_fde: progress.last_pred_mse_fde,
+                    last_pred_mse_raw: progress.last_pred_mse_raw,
+                    last_est_snr_db: progress.last_est_snr_db,
                 };
             }
         }
@@ -1032,6 +1130,12 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         cir_nmse: None,
                         raw_bit_errors,
                         raw_bits_compared,
+                        fde_selected_frames: progress.fde_selected_frames,
+                        raw_selected_frames: progress.raw_selected_frames,
+                        last_path_used: progress.last_path_used,
+                        last_pred_mse_fde: progress.last_pred_mse_fde,
+                        last_pred_mse_raw: progress.last_pred_mse_raw,
+                        last_est_snr_db: progress.last_est_snr_db,
                     };
                 }
             }
@@ -1059,12 +1163,18 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         cir_nmse: None,
         raw_bit_errors,
         raw_bits_compared,
+        fde_selected_frames: final_progress.fde_selected_frames,
+        raw_selected_frames: final_progress.raw_selected_frames,
+        last_path_used: final_progress.last_path_used,
+        last_pred_mse_fde: final_progress.last_pred_mse_fde,
+        last_pred_mse_raw: final_progress.last_pred_mse_raw,
+        last_est_snr_db: final_progress.last_est_snr_db,
     }
 }
 
 fn print_header() {
     println!(
-        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,multipath"
+        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,multipath"
     );
 }
 
@@ -1085,37 +1195,46 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
     } else {
         format!("{raw_ber:.6}")
     };
-    println!(
-        "{scenario},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{:.6},{},{:.2},{},{},{}",
-        cli.phy,
-        m.trials,
-        m.successes,
-        m.deadline_hits,
-        m.first_attempt_successes,
-        m.total_bits_compared,
-        m.total_bit_errors,
+    let cols = vec![
+        scenario.to_string(),
+        cli.phy.clone(),
+        m.trials.to_string(),
+        m.successes.to_string(),
+        m.deadline_hits.to_string(),
+        m.first_attempt_successes.to_string(),
+        m.total_bits_compared.to_string(),
+        m.total_bit_errors.to_string(),
         fmt_opt(m.tx_signal_power()),
         fmt_opt(noise_power),
         fmt_opt(m.awgn_snr_db(imp.sigma)),
-        m.p_complete(),
-        m.p_complete_deadline(),
-        cli.deadline_sec,
-        m.ber(),
-        m.per(),
-        m.fer(),
-        m.goodput_effective_bps(cli.payload_bytes * 8),
+        format!("{:.6}", m.p_complete()),
+        format!("{:.6}", m.p_complete_deadline()),
+        format!("{:.3}", cli.deadline_sec),
+        format!("{:.6}", m.ber()),
+        format!("{:.6}", m.per()),
+        format!("{:.6}", m.fer()),
+        format!("{:.3}", m.goodput_effective_bps(cli.payload_bytes * 8)),
         fmt_opt(m.goodput_success_mean_bps(cli.payload_bytes * 8)),
         fmt_opt(m.p95_completion_sec()),
         fmt_opt(m.mean_completion_sec()),
-        m.total_attempts,
-        m.total_synced_frames,
-        m.synced_frame_ratio(),
-        m.dropped_attempts,
-        m.avg_process_time_per_sample_ns(),
+        m.total_attempts.to_string(),
+        m.total_synced_frames.to_string(),
+        format!("{:.6}", m.synced_frame_ratio()),
+        m.dropped_attempts.to_string(),
+        format!("{:.2}", m.avg_process_time_per_sample_ns()),
         fmt_opt(m.avg_cir_nmse()),
         raw_ber_str,
-        imp.multipath.name,
-    );
+        m.total_fde_selected_frames.to_string(),
+        m.total_raw_selected_frames.to_string(),
+        format!("{:.6}", m.fde_selected_ratio()),
+        format!("{:.6}", m.last_path_fde_ratio()),
+        format!("{:.6}", m.last_path_raw_ratio()),
+        fmt_opt(m.avg_last_pred_mse_fde()),
+        fmt_opt(m.avg_last_pred_mse_raw()),
+        fmt_opt(m.avg_last_est_snr_db()),
+        imp.multipath.name.clone(),
+    ];
+    println!("{}", cols.join(","));
 }
 
 fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {

@@ -38,6 +38,12 @@ type WasmDecoderLike = {
     last_rank_up_seq: number;
     progress: number;
     complete: boolean;
+    fde_selected_frames: number;
+    raw_selected_frames: number;
+    last_path_used: number;
+    last_pred_mse_fde: number;
+    last_pred_mse_raw: number;
+    last_est_snr_db: number;
     basis_matrix: Uint8Array;
   };
   recovered_data(): Uint8Array | null | undefined;
@@ -346,6 +352,12 @@ export class MistcastBackend {
       lastRankUpSeq: progress.last_rank_up_seq,
       progress: progress.progress,
       complete: progress.complete,
+      fdeSelectedFrames: progress.fde_selected_frames,
+      rawSelectedFrames: progress.raw_selected_frames,
+      lastPathUsed: progress.last_path_used,
+      lastPredMseFde: progress.last_pred_mse_fde,
+      lastPredMseRaw: progress.last_pred_mse_raw,
+      lastEstSnrDb: progress.last_est_snr_db,
       basisMatrix: progress.basis_matrix,
       decoderProc: this.decoderProcessorStats,
     };

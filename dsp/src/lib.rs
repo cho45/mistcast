@@ -262,6 +262,12 @@ pub struct WasmMaryDecodeProgress {
     pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
+    pub fde_selected_frames: usize,
+    pub raw_selected_frames: usize,
+    pub last_path_used: i32,
+    pub last_pred_mse_fde: f32,
+    pub last_pred_mse_raw: f32,
+    pub last_est_snr_db: f32,
     #[wasm_bindgen(skip)]
     pub basis_matrix: Vec<u8>,
 }
@@ -310,6 +316,12 @@ impl WasmMaryDecoder {
             last_rank_up_seq: progress.last_rank_up_seq,
             progress: progress.progress,
             complete: progress.complete,
+            fde_selected_frames: progress.fde_selected_frames,
+            raw_selected_frames: progress.raw_selected_frames,
+            last_path_used: progress.last_path_used,
+            last_pred_mse_fde: progress.last_pred_mse_fde,
+            last_pred_mse_raw: progress.last_pred_mse_raw,
+            last_est_snr_db: progress.last_est_snr_db,
             basis_matrix: progress.basis_matrix,
         }
     }
