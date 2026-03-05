@@ -14,6 +14,20 @@ pub struct SyncResult {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelQualityEstimate {
+    /// チップ中心サンプル上で推定した複素ノイズ分散 E[|n|^2]
+    pub noise_var: f32,
+    /// チップ中心サンプル上で推定した複素信号分散 E[|s|^2]
+    pub signal_var: f32,
+    /// 推定SNR[dB]。noise_var が極小の場合は None。
+    pub snr_db: Option<f32>,
+    /// プリアンブル反復間位相差から推定した CFO [rad/sample]
+    pub cfo_rad_per_sample: f32,
+    /// ノイズ推定に使えた差分対の数
+    pub used_pairs: usize,
+}
+
 pub struct MarySyncDetector {
     config: DspConfig,
     preamble_pn: Vec<Complex32>, // Zadoff-Chu SF=13
@@ -312,18 +326,11 @@ impl MarySyncDetector {
         (score.max(0.0), (last_ci, last_cq))
     }
 
-    /// プリアンブル相関を用いてチャネルインパルス応答 (CIR) を推定し、提供されたバッファに書き込む。
-    /// 同期開始位置 `n` (チップ同期済み想定) において、複素ベースバンド相関を行う。
-    pub fn estimate_cir(&self, i_ch: &[f32], q_ch: &[f32], n: usize, out: &mut [Complex32]) {
-        if out.is_empty() {
-            return;
-        }
+    fn estimate_cfo_rad_per_sample(&self, i_ch: &[f32], q_ch: &[f32], n: usize) -> f32 {
         let repeat = self.config.preamble_repeat.max(1);
         let sf = self.preamble_sf;
         let preamble_sym_len = self.preamble_sym_len;
 
-        // プリアンブル反復間の位相差から CFO (rad/sample) を推定する。
-        // sync_symbols の preamble 部分は [+, ..., -] の符号を持つため、符号補償後に位相差を取る。
         let mut cfo_rad_per_sample = 0.0f32;
         if repeat >= 2 {
             let mut sum = 0.0f32;
@@ -350,6 +357,99 @@ impl MarySyncDetector {
                 cfo_rad_per_sample = sum / count as f32;
             }
         }
+        cfo_rad_per_sample
+    }
+
+    pub fn estimate_channel_quality(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        n: usize,
+    ) -> ChannelQualityEstimate {
+        let repeat = self.config.preamble_repeat.max(1);
+        let sf = self.preamble_sf;
+        let preamble_sym_len = self.preamble_sym_len;
+        let cfo_rad_per_sample = self.estimate_cfo_rad_per_sample(i_ch, q_ch, n);
+
+        let mut noise_acc = 0.0f32;
+        let mut used_pairs = 0usize;
+        let mut signal_acc = 0.0f32;
+        let mut used_signal = 0usize;
+
+        for k in 0..sf {
+            let mut prev_z: Option<Complex32> = None;
+            let mut sum_z = Complex32::new(0.0, 0.0);
+            let mut count_z = 0usize;
+
+            for rep in 0..repeat {
+                let rep_start = n + rep * preamble_sym_len;
+                let p = rep_start + k * self.spc + (self.spc / 2);
+                if p >= i_ch.len() || p >= q_ch.len() {
+                    break;
+                }
+                let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
+                let val = self.preamble_pn[k] * Complex32::new(sign, 0.0);
+                let sig = Complex32::new(i_ch[p], q_ch[p]);
+                let mut z = sig * val.conj();
+                if cfo_rad_per_sample != 0.0 {
+                    let t = (rep * preamble_sym_len + k * self.spc) as f32;
+                    let ang = -cfo_rad_per_sample * t;
+                    let (s, c) = ang.sin_cos();
+                    z *= Complex32::new(c, s);
+                }
+
+                if let Some(prev) = prev_z {
+                    // 差分で信号成分を消し、複素ノイズ分散を推定する。
+                    noise_acc += 0.5 * (z - prev).norm_sqr();
+                    used_pairs += 1;
+                }
+                prev_z = Some(z);
+                sum_z += z;
+                count_z += 1;
+            }
+
+            if count_z > 0 {
+                let mean_z = sum_z / count_z as f32;
+                signal_acc += mean_z.norm_sqr();
+                used_signal += 1;
+            }
+        }
+
+        let noise_var = if used_pairs > 0 {
+            noise_acc / used_pairs as f32
+        } else {
+            0.0
+        };
+        let signal_var = if used_signal > 0 {
+            signal_acc / used_signal as f32
+        } else {
+            0.0
+        };
+        let snr_db = if noise_var > 1e-12 && signal_var > 0.0 {
+            Some(10.0 * (signal_var / noise_var).log10())
+        } else {
+            None
+        };
+
+        ChannelQualityEstimate {
+            noise_var,
+            signal_var,
+            snr_db,
+            cfo_rad_per_sample,
+            used_pairs,
+        }
+    }
+
+    /// プリアンブル相関を用いてチャネルインパルス応答 (CIR) を推定し、提供されたバッファに書き込む。
+    /// 同期開始位置 `n` (チップ同期済み想定) において、複素ベースバンド相関を行う。
+    pub fn estimate_cir(&self, i_ch: &[f32], q_ch: &[f32], n: usize, out: &mut [Complex32]) {
+        if out.is_empty() {
+            return;
+        }
+        let repeat = self.config.preamble_repeat.max(1);
+        let sf = self.preamble_sf;
+        let preamble_sym_len = self.preamble_sym_len;
+        let cfo_rad_per_sample = self.estimate_cfo_rad_per_sample(i_ch, q_ch, n);
 
         for (d, out_val) in out.iter_mut().enumerate() {
             let mut sum = Complex32::new(0.0, 0.0);
@@ -513,8 +613,10 @@ mod tests {
             // したがって required_len = 437 以上が必要
             let preamble_count = config.preamble_repeat;
             let sync_count = unified_len - preamble_count;
-            let last_symbol_offset = preamble_count * detector.preamble_sym_len + (sync_count - 1) * detector.sync_sym_len;
-            let last_symbol_access = last_symbol_offset + detector.spc / 2 + (detector.sync_sf - 1) * detector.spc;
+            let last_symbol_offset = preamble_count * detector.preamble_sym_len
+                + (sync_count - 1) * detector.sync_sym_len;
+            let last_symbol_access =
+                last_symbol_offset + detector.spc / 2 + (detector.sync_sf - 1) * detector.spc;
             let required_len = last_symbol_access + 1; // +1 for 0-indexed
             if i.len() < required_len {
                 return (0.0, 0);
@@ -1112,6 +1214,363 @@ mod tests {
         let q_ch: Vec<f32> = q_res.iter().map(|&s| rrc_q.process(s)).collect();
 
         (i_ch, q_ch)
+    }
+
+    fn synth_preamble_observation(
+        detector: &MarySyncDetector,
+        taps: &[(usize, Complex32)],
+        noise_std_iq: f32,
+        seed: u64,
+    ) -> (Vec<f32>, Vec<f32>) {
+        synth_preamble_observation_with_cfo(detector, taps, noise_std_iq, 0.0, seed)
+    }
+
+    fn synth_preamble_observation_with_cfo(
+        detector: &MarySyncDetector,
+        taps: &[(usize, Complex32)],
+        noise_std_iq: f32,
+        cfo_rad_per_sample: f32,
+        seed: u64,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let repeat = detector.config.preamble_repeat.max(1);
+        let sf = detector.preamble_sf;
+        let spc = detector.spc;
+        let preamble_sym_len = detector.preamble_sym_len;
+        let max_delay = taps.iter().map(|(d, _)| *d).max().unwrap_or(0);
+        let len = repeat * preamble_sym_len + max_delay + spc + 8;
+
+        let mut x = vec![Complex32::new(0.0, 0.0); len];
+        for rep in 0..repeat {
+            let rep_start = rep * preamble_sym_len;
+            let sign = detector.sync_symbols.get(rep).copied().unwrap_or(1.0);
+            for k in 0..sf {
+                let p = rep_start + k * spc + (spc / 2);
+                if p < len {
+                    x[p] = detector.preamble_pn[k] * Complex32::new(sign, 0.0);
+                }
+            }
+        }
+
+        let mut y = vec![Complex32::new(0.0, 0.0); len];
+        for &(delay, gain) in taps {
+            for n in delay..len {
+                y[n] += x[n - delay] * gain;
+            }
+        }
+
+        if cfo_rad_per_sample != 0.0 {
+            for (idx, v) in y.iter_mut().enumerate() {
+                let ang = cfo_rad_per_sample * idx as f32;
+                let (s, c) = ang.sin_cos();
+                *v *= Complex32::new(c, s);
+            }
+        }
+
+        if noise_std_iq > 0.0 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let dist = Normal::new(0.0, noise_std_iq).unwrap();
+            for v in &mut y {
+                v.re += dist.sample(&mut rng);
+                v.im += dist.sample(&mut rng);
+            }
+        }
+
+        let i = y.iter().map(|c| c.re).collect();
+        let q = y.iter().map(|c| c.im).collect();
+        (i, q)
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_zero_noise_baseline() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        let gain = Complex32::new(0.8, -0.3);
+        let (i, q) = synth_preamble_observation(&detector, &[(0, gain)], 0.0, 1);
+
+        let est = detector.estimate_channel_quality(&i, &q, 0);
+        assert!(est.noise_var < 1e-9, "noise_var={}", est.noise_var);
+        assert!(
+            (est.signal_var - gain.norm_sqr()).abs() < 1e-5,
+            "signal_var={}, expected={}",
+            est.signal_var,
+            gain.norm_sqr()
+        );
+        assert!(est.snr_db.is_none(), "snr_db should be None for zero-noise");
+        assert!(
+            est.cfo_rad_per_sample.abs() < 1e-6,
+            "cfo_rad_per_sample={}",
+            est.cfo_rad_per_sample
+        );
+        assert!(
+            est.used_pairs > 0,
+            "used_pairs should be positive, got {}",
+            est.used_pairs
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_noise_variance_accuracy() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        let gain = Complex32::new(1.0, 0.0);
+        let noise_std = 0.05f32;
+        let expected_noise_var = 2.0 * noise_std * noise_std;
+
+        let trials = 200usize;
+        let mut sum = 0.0f32;
+        for t in 0..trials {
+            let (i, q) = synth_preamble_observation(&detector, &[(0, gain)], noise_std, t as u64);
+            let est = detector.estimate_channel_quality(&i, &q, 0);
+            sum += est.noise_var;
+        }
+        let avg = sum / trials as f32;
+        let rel_err = (avg - expected_noise_var).abs() / expected_noise_var.max(1e-12);
+        assert!(
+            rel_err < 0.18,
+            "avg_noise_var={} expected={} rel_err={}",
+            avg,
+            expected_noise_var,
+            rel_err
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_noise_variance_scales_with_sigma() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let gain = Complex32::new(1.0, 0.0);
+
+        let sigma_lo = 0.03f32;
+        let sigma_hi = 0.09f32;
+        let expected_ratio = (sigma_hi / sigma_lo).powi(2);
+
+        let trials = 120usize;
+        let mut sum_lo = 0.0f32;
+        let mut sum_hi = 0.0f32;
+        for t in 0..trials {
+            let (i_lo, q_lo) =
+                synth_preamble_observation(&detector, &[(0, gain)], sigma_lo, t as u64 + 11);
+            let (i_hi, q_hi) =
+                synth_preamble_observation(&detector, &[(0, gain)], sigma_hi, t as u64 + 5011);
+            sum_lo += detector.estimate_channel_quality(&i_lo, &q_lo, 0).noise_var;
+            sum_hi += detector.estimate_channel_quality(&i_hi, &q_hi, 0).noise_var;
+        }
+        let avg_lo = sum_lo / trials as f32;
+        let avg_hi = sum_hi / trials as f32;
+        let ratio = avg_hi / avg_lo.max(1e-12);
+        assert!(
+            ratio > expected_ratio * 0.75 && ratio < expected_ratio * 1.25,
+            "ratio={} expected_ratio={}",
+            ratio,
+            expected_ratio
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_snr_db_accuracy() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        let gain = Complex32::new(0.9, 0.0);
+        let noise_std = 0.05f32;
+        let expected_noise_var = 2.0 * noise_std * noise_std;
+        let expected_signal_var = gain.norm_sqr();
+        let expected_snr_db = 10.0 * (expected_signal_var / expected_noise_var).log10();
+
+        let trials = 160usize;
+        let mut sum_snr = 0.0f32;
+        let mut used = 0usize;
+        for t in 0..trials {
+            let (i, q) = synth_preamble_observation(&detector, &[(0, gain)], noise_std, t as u64);
+            let est = detector.estimate_channel_quality(&i, &q, 0);
+            if let Some(v) = est.snr_db {
+                sum_snr += v;
+                used += 1;
+            }
+        }
+        let avg_snr = sum_snr / used.max(1) as f32;
+        assert!(
+            (avg_snr - expected_snr_db).abs() < 1.5,
+            "avg_snr={} expected_snr_db={}",
+            avg_snr,
+            expected_snr_db
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_cfo_estimation_accuracy() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 4;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        let gain = Complex32::new(1.0, 0.0);
+        let injected_cfo = 0.0045f32;
+        let trials = 80usize;
+        let mut sum = 0.0f32;
+
+        for t in 0..trials {
+            let (i, q) = synth_preamble_observation_with_cfo(
+                &detector,
+                &[(0, gain)],
+                0.01,
+                injected_cfo,
+                t as u64 + 2000,
+            );
+            let est = detector.estimate_channel_quality(&i, &q, 0);
+            sum += est.cfo_rad_per_sample;
+        }
+        let avg = sum / trials as f32;
+        assert!(
+            (avg - injected_cfo).abs() < 5e-4,
+            "avg_cfo={} injected_cfo={}",
+            avg,
+            injected_cfo
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_noise_var_monotonic_under_multipath() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 3;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let noise_std_lo = 0.02f32;
+        let noise_std_hi = 0.06f32;
+        let trials = 140usize;
+        let taps_mp = [
+            (0usize, Complex32::new(1.0, 0.0)),
+            (3usize, Complex32::new(0.45, 0.2)),
+            (9usize, Complex32::new(0.2, -0.15)),
+        ];
+
+        let mut sum_noise_lo = 0.0f32;
+        let mut sum_noise_hi = 0.0f32;
+        let mut sum_snr_lo = 0.0f32;
+        let mut sum_snr_hi = 0.0f32;
+        for t in 0..trials {
+            let (i1, q1) =
+                synth_preamble_observation(&detector, &taps_mp, noise_std_lo, t as u64 + 9007);
+            let (i2, q2) =
+                synth_preamble_observation(&detector, &taps_mp, noise_std_hi, t as u64 + 19007);
+            let est_lo = detector.estimate_channel_quality(&i1, &q1, 0);
+            let est_hi = detector.estimate_channel_quality(&i2, &q2, 0);
+            sum_noise_lo += est_lo.noise_var;
+            sum_noise_hi += est_hi.noise_var;
+            sum_snr_lo += est_lo.snr_db.unwrap_or(-100.0);
+            sum_snr_hi += est_hi.snr_db.unwrap_or(-100.0);
+        }
+        let avg_noise_lo = sum_noise_lo / trials as f32;
+        let avg_noise_hi = sum_noise_hi / trials as f32;
+        let avg_snr_lo = sum_snr_lo / trials as f32;
+        let avg_snr_hi = sum_snr_hi / trials as f32;
+
+        assert!(
+            avg_noise_hi > avg_noise_lo * 2.0,
+            "noise_var should increase with sigma under multipath: lo={} hi={}",
+            avg_noise_lo,
+            avg_noise_hi
+        );
+        assert!(
+            avg_snr_hi + 3.0 < avg_snr_lo,
+            "snr should decrease with sigma under multipath: snr_lo={} snr_hi={}",
+            avg_snr_lo,
+            avg_snr_hi
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_used_pairs_scales_with_repeat() {
+        for repeat in [2usize, 3, 4] {
+            let mut config = DspConfig::default_48k();
+            config.preamble_sf = 127;
+            config.preamble_repeat = repeat;
+            let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+            let (i, q) = synth_preamble_observation(
+                &detector,
+                &[(0usize, Complex32::new(1.0, 0.0))],
+                0.02,
+                11,
+            );
+            let est = detector.estimate_channel_quality(&i, &q, 0);
+            let expected = detector.preamble_sf * (repeat - 1);
+            assert_eq!(
+                est.used_pairs, expected,
+                "used_pairs mismatch for repeat={}",
+                repeat
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_frontend_snr_monotonicity() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 71;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config.clone(), 0.15, 0.18);
+
+        let spc = config.proc_samples_per_chip();
+        let preamble_len = config.preamble_sf * config.preamble_repeat * spc;
+
+        let mut snr0_vals = Vec::new();
+        let mut snr10_vals = Vec::new();
+        for seed in 0..40u64 {
+            for (snr_db, dst) in [(-0.0f32, &mut snr0_vals), (10.0f32, &mut snr10_vals)] {
+                let (i, q) = generate_signal_with_awgn_seeded(&config, 500, snr_db, 1000 + seed);
+                let (res, _) = detector.detect(&i, &q, 0);
+                let sync = res.expect("sync should be detected in frontend monotonicity test");
+                let preamble_start = sync
+                    .peak_sample_idx
+                    .saturating_sub(preamble_len)
+                    .saturating_sub(spc / 2);
+                let est = detector.estimate_channel_quality(&i, &q, preamble_start);
+                if let Some(v) = est.snr_db {
+                    dst.push(v);
+                }
+            }
+        }
+
+        let avg0 = snr0_vals.iter().sum::<f32>() / snr0_vals.len().max(1) as f32;
+        let avg10 = snr10_vals.iter().sum::<f32>() / snr10_vals.len().max(1) as f32;
+        assert!(
+            avg10 > avg0 + 3.0,
+            "frontend SNR estimate should be monotonic: avg0={} avg10={}",
+            avg0,
+            avg10
+        );
+    }
+
+    #[test]
+    fn test_estimate_channel_quality_tiny_noise_is_finite() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        let (i, q) =
+            synth_preamble_observation(&detector, &[(0usize, Complex32::new(1.0, 0.0))], 1e-6, 99);
+        let est = detector.estimate_channel_quality(&i, &q, 0);
+        assert!(est.noise_var.is_finite(), "noise_var must be finite");
+        assert!(est.signal_var.is_finite(), "signal_var must be finite");
+        if let Some(snr) = est.snr_db {
+            assert!(snr.is_finite(), "snr_db must be finite");
+            assert!(
+                snr > 40.0,
+                "snr_db should be high under tiny noise: {}",
+                snr
+            );
+        }
     }
 
     #[test]
