@@ -360,12 +360,17 @@ impl MarySyncDetector {
         cfo_rad_per_sample
     }
 
+    /// プリアンブル相関から CIR とチャネル品質を同時推定する。
+    /// - `cir_out`: サンプル解像度のCIRを書き込む先（空ならCIR推定をスキップ）
+    /// - `quality_out`: ノイズ分散/SNR/CFOなどを上書き
     pub fn estimate_channel_quality(
         &self,
         i_ch: &[f32],
         q_ch: &[f32],
         n: usize,
-    ) -> ChannelQualityEstimate {
+        cir_out: &mut [Complex32],
+        quality_out: &mut ChannelQualityEstimate,
+    ) {
         let repeat = self.config.preamble_repeat.max(1);
         let sf = self.preamble_sf;
         let preamble_sym_len = self.preamble_sym_len;
@@ -415,6 +420,40 @@ impl MarySyncDetector {
             }
         }
 
+        if !cir_out.is_empty() {
+            for (d, out_val) in cir_out.iter_mut().enumerate() {
+                let mut sum = Complex32::new(0.0, 0.0);
+                let mut used = 0usize;
+                for rep in 0..repeat {
+                    let rep_start = n + rep * preamble_sym_len;
+                    let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
+                    let sign_c = Complex32::new(sign, 0.0);
+                    for k in 0..sf {
+                        let p = rep_start + d + k * self.spc;
+                        if p >= i_ch.len() || p >= q_ch.len() {
+                            break;
+                        }
+                        let val = self.preamble_pn[k] * sign_c;
+                        let sig = Complex32::new(i_ch[p], q_ch[p]);
+                        let mut corr = sig * val.conj();
+                        if cfo_rad_per_sample != 0.0 {
+                            let t = (rep * preamble_sym_len + k * self.spc) as f32;
+                            let ang = -cfo_rad_per_sample * t;
+                            let (s, c) = ang.sin_cos();
+                            corr *= Complex32::new(c, s);
+                        }
+                        sum += corr;
+                        used += 1;
+                    }
+                }
+                *out_val = if used > 0 {
+                    sum / used as f32
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+            }
+        }
+
         let noise_var = if used_pairs > 0 {
             noise_acc / used_pairs as f32
         } else {
@@ -431,58 +470,13 @@ impl MarySyncDetector {
             None
         };
 
-        ChannelQualityEstimate {
+        *quality_out = ChannelQualityEstimate {
             noise_var,
             signal_var,
             snr_db,
             cfo_rad_per_sample,
             used_pairs,
-        }
-    }
-
-    /// プリアンブル相関を用いてチャネルインパルス応答 (CIR) を推定し、提供されたバッファに書き込む。
-    /// 同期開始位置 `n` (チップ同期済み想定) において、複素ベースバンド相関を行う。
-    pub fn estimate_cir(&self, i_ch: &[f32], q_ch: &[f32], n: usize, out: &mut [Complex32]) {
-        if out.is_empty() {
-            return;
-        }
-        let repeat = self.config.preamble_repeat.max(1);
-        let sf = self.preamble_sf;
-        let preamble_sym_len = self.preamble_sym_len;
-        let cfo_rad_per_sample = self.estimate_cfo_rad_per_sample(i_ch, q_ch, n);
-
-        for (d, out_val) in out.iter_mut().enumerate() {
-            let mut sum = Complex32::new(0.0, 0.0);
-            let mut used = 0usize;
-
-            for rep in 0..repeat {
-                let rep_start = n + rep * preamble_sym_len;
-                let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
-                let sign_c = Complex32::new(sign, 0.0);
-                for k in 0..sf {
-                    let p = rep_start + d + k * self.spc;
-                    if p >= i_ch.len() || p >= q_ch.len() {
-                        break;
-                    }
-                    let val = self.preamble_pn[k] * sign_c;
-                    let sig = Complex32::new(i_ch[p], q_ch[p]);
-                    let mut corr = sig * val.conj();
-                    if cfo_rad_per_sample != 0.0 {
-                        let t = (rep * preamble_sym_len + k * self.spc) as f32;
-                        let ang = -cfo_rad_per_sample * t;
-                        let (s, c) = ang.sin_cos();
-                        corr *= Complex32::new(c, s);
-                    }
-                    sum += corr;
-                    used += 1;
-                }
-            }
-            *out_val = if used > 0 {
-                sum / used as f32
-            } else {
-                Complex32::new(0.0, 0.0)
-            };
-        }
+        };
     }
 
     pub fn sync_symbols(&self) -> &[f32] {
@@ -1280,6 +1274,18 @@ mod tests {
         (i, q)
     }
 
+    fn estimate_quality_only(
+        detector: &MarySyncDetector,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        n: usize,
+    ) -> ChannelQualityEstimate {
+        let mut est = ChannelQualityEstimate::default();
+        let mut cir_dummy: [Complex32; 0] = [];
+        detector.estimate_channel_quality(i_ch, q_ch, n, &mut cir_dummy, &mut est);
+        est
+    }
+
     #[test]
     fn test_estimate_channel_quality_zero_noise_baseline() {
         let mut config = DspConfig::default_48k();
@@ -1290,7 +1296,7 @@ mod tests {
         let gain = Complex32::new(0.8, -0.3);
         let (i, q) = synth_preamble_observation(&detector, &[(0, gain)], 0.0, 1);
 
-        let est = detector.estimate_channel_quality(&i, &q, 0);
+        let est = estimate_quality_only(&detector, &i, &q, 0);
         assert!(est.noise_var < 1e-9, "noise_var={}", est.noise_var);
         assert!(
             (est.signal_var - gain.norm_sqr()).abs() < 1e-5,
@@ -1326,7 +1332,7 @@ mod tests {
         let mut sum = 0.0f32;
         for t in 0..trials {
             let (i, q) = synth_preamble_observation(&detector, &[(0, gain)], noise_std, t as u64);
-            let est = detector.estimate_channel_quality(&i, &q, 0);
+            let est = estimate_quality_only(&detector, &i, &q, 0);
             sum += est.noise_var;
         }
         let avg = sum / trials as f32;
@@ -1360,8 +1366,8 @@ mod tests {
                 synth_preamble_observation(&detector, &[(0, gain)], sigma_lo, t as u64 + 11);
             let (i_hi, q_hi) =
                 synth_preamble_observation(&detector, &[(0, gain)], sigma_hi, t as u64 + 5011);
-            sum_lo += detector.estimate_channel_quality(&i_lo, &q_lo, 0).noise_var;
-            sum_hi += detector.estimate_channel_quality(&i_hi, &q_hi, 0).noise_var;
+            sum_lo += estimate_quality_only(&detector, &i_lo, &q_lo, 0).noise_var;
+            sum_hi += estimate_quality_only(&detector, &i_hi, &q_hi, 0).noise_var;
         }
         let avg_lo = sum_lo / trials as f32;
         let avg_hi = sum_hi / trials as f32;
@@ -1392,7 +1398,7 @@ mod tests {
         let mut used = 0usize;
         for t in 0..trials {
             let (i, q) = synth_preamble_observation(&detector, &[(0, gain)], noise_std, t as u64);
-            let est = detector.estimate_channel_quality(&i, &q, 0);
+            let est = estimate_quality_only(&detector, &i, &q, 0);
             if let Some(v) = est.snr_db {
                 sum_snr += v;
                 used += 1;
@@ -1427,7 +1433,7 @@ mod tests {
                 injected_cfo,
                 t as u64 + 2000,
             );
-            let est = detector.estimate_channel_quality(&i, &q, 0);
+            let est = estimate_quality_only(&detector, &i, &q, 0);
             sum += est.cfo_rad_per_sample;
         }
         let avg = sum / trials as f32;
@@ -1463,8 +1469,8 @@ mod tests {
                 synth_preamble_observation(&detector, &taps_mp, noise_std_lo, t as u64 + 9007);
             let (i2, q2) =
                 synth_preamble_observation(&detector, &taps_mp, noise_std_hi, t as u64 + 19007);
-            let est_lo = detector.estimate_channel_quality(&i1, &q1, 0);
-            let est_hi = detector.estimate_channel_quality(&i2, &q2, 0);
+            let est_lo = estimate_quality_only(&detector, &i1, &q1, 0);
+            let est_hi = estimate_quality_only(&detector, &i2, &q2, 0);
             sum_noise_lo += est_lo.noise_var;
             sum_noise_hi += est_hi.noise_var;
             sum_snr_lo += est_lo.snr_db.unwrap_or(-100.0);
@@ -1503,7 +1509,7 @@ mod tests {
                 0.02,
                 11,
             );
-            let est = detector.estimate_channel_quality(&i, &q, 0);
+            let est = estimate_quality_only(&detector, &i, &q, 0);
             let expected = detector.preamble_sf * (repeat - 1);
             assert_eq!(
                 est.used_pairs, expected,
@@ -1534,7 +1540,7 @@ mod tests {
                     .peak_sample_idx
                     .saturating_sub(preamble_len)
                     .saturating_sub(spc / 2);
-                let est = detector.estimate_channel_quality(&i, &q, preamble_start);
+                let est = estimate_quality_only(&detector, &i, &q, preamble_start);
                 if let Some(v) = est.snr_db {
                     dst.push(v);
                 }
@@ -1560,7 +1566,7 @@ mod tests {
 
         let (i, q) =
             synth_preamble_observation(&detector, &[(0usize, Complex32::new(1.0, 0.0))], 1e-6, 99);
-        let est = detector.estimate_channel_quality(&i, &q, 0);
+        let est = estimate_quality_only(&detector, &i, &q, 0);
         assert!(est.noise_var.is_finite(), "noise_var must be finite");
         assert!(est.signal_var.is_finite(), "signal_var must be finite");
         if let Some(snr) = est.snr_db {
@@ -1673,7 +1679,8 @@ mod tests {
 
         // サンプル解像度のCIRを期待して、チップ数 * spc 分のバッファを用意
         let mut est_cir = vec![Complex32::new(0.0, 0.0); sf * spc];
-        detector.estimate_cir(&i_ch, &q_ch, sync_idx, &mut est_cir);
+        let mut chq = ChannelQualityEstimate::default();
+        detector.estimate_channel_quality(&i_ch, &q_ch, sync_idx, &mut est_cir, &mut chq);
 
         // 第0タップで正規化（位相回転も補正）
         let ref_val = est_cir[0];
@@ -1757,7 +1764,8 @@ mod tests {
 
         // 2. CIR 推定
         let mut est_cir = vec![Complex32::new(0.0, 0.0); 5];
-        detector.estimate_cir(&i_ch, &q_ch, 0, &mut est_cir);
+        let mut chq = ChannelQualityEstimate::default();
+        detector.estimate_channel_quality(&i_ch, &q_ch, 0, &mut est_cir, &mut chq);
 
         println!("Pure Unit Test CIR:");
         for (i, val) in est_cir.iter().enumerate() {

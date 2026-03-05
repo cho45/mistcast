@@ -17,7 +17,7 @@ use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::frame::packet::Packet;
 use crate::mary::demodulator::Demodulator;
-use crate::mary::sync::{MarySyncDetector, SyncResult};
+use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 use num_complex::Complex32;
@@ -328,11 +328,13 @@ impl Decoder {
 
             // 1. 新しい CIR を推定 (絶対にバッファを削る前に行う)
             let mut cir = vec![Complex32::new(0.0, 0.0); sf_preamble * spc];
-            self.sync_detector.estimate_cir(
+            let mut chq = ChannelQualityEstimate::default();
+            self.sync_detector.estimate_channel_quality(
                 &self.sample_buffer_i,
                 &self.sample_buffer_q,
                 preamble_start_idx,
                 &mut cir,
+                &mut chq,
             );
             self.postprocess_cir(&mut cir);
 
@@ -357,7 +359,11 @@ impl Decoder {
 
             // EQ リセット
             if let Some(ref mut eq) = self.equalizer {
-                eq.set_cir_with_mmse(&cir, self.fde_mmse_settings);
+                let mut mmse = self.fde_mmse_settings;
+                if let Some(snr_db) = chq.snr_db {
+                    mmse.snr_db = snr_db.clamp(-20.0, 40.0);
+                }
+                eq.set_cir_with_mmse(&cir, mmse);
                 eq.reset();
             }
 
