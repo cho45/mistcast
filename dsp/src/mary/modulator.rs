@@ -368,7 +368,7 @@ mod tests {
         preamble.extend(mod_.flush());
 
         let config = DspConfig::default_48k();
-        let expected_base = 13 * config.preamble_repeat * config.samples_per_chip();
+        let expected_base = config.preamble_sf * config.preamble_repeat * config.samples_per_chip();
 
         // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
         // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
@@ -655,29 +655,27 @@ mod tests {
         assert!(!frame.is_empty());
         assert!(frame.iter().all(|&s| s.is_finite()));
 
-        // フレーム長の妥当性計算:
-        // 1. プリアンブル: sf=13, repeat=2, spc=6 -> 156
-        // 2. 同期ワード: sf=15, bits=16, spc=6 -> 1440
-        // 3. ペイロード: sf=16, symbols=1, spc=6 -> 96
-        // 4. マージン: sf=16, symbols=1, spc=6 -> 96
-        let preamble_len = 13 * 2 * 6;
-        let sync_len = 15 * 16 * 6;
+        // フレーム長の妥当性計算（設定値ベース）
+        let spc = mod_.config.samples_per_chip();
+        let preamble_len = mod_.config.preamble_sf * mod_.config.preamble_repeat * spc;
+        let sync_len = 15 * mod_.config.sync_word_bits * spc;
         let payload_len = 96;
         let margin_len = 96;
-        let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1788
+        let expected_base = preamble_len + sync_len + payload_len + margin_len;
 
         // 物理的テール (32サンプル) を加算
         // encode_frame() 内部ですでに flush() が呼ばれており、RRCのテールは押し出されている。
         // リサンプラによる物理的な伸び（立ち上がり16 + 立ち下がり16）の 32 サンプルを加算する。
         let expected_total = expected_base + 32;
+        let diff = (frame.len() as i32 - expected_total as i32).abs();
 
         assert!(
-            (frame.len() as i32 - expected_total).abs() <= 5,
+            diff <= 5,
             "Frame length mismatch: actual={}, expected_total={}, base={}, diff={}",
             frame.len(),
             expected_total,
             expected_base,
-            (frame.len() as i32 - expected_total).abs()
+            diff
         );
     }
 
@@ -688,10 +686,10 @@ mod tests {
         let mut preamble = mod_.generate_preamble();
         preamble.extend(mod_.flush());
 
-        // プリアンブルはZadoff-Chu SF=13で構成される
-        let sf = 13;
+        // プリアンブルは設定値のZadoff-Chu SFで構成される
+        let sf = mod_.config.preamble_sf;
         let repeat = mod_.config.preamble_repeat;
-        let expected_base = sf * repeat * mod_.config.samples_per_chip(); // 156
+        let expected_base = sf * repeat * mod_.config.samples_per_chip();
 
         // 物理的テール (130サンプル) を加算
         let expected_total = expected_base + 130;
@@ -765,14 +763,14 @@ mod tests {
 
     // ========== 厳密な信号処理テスト ==========
 
-    /// プリアンブルの数学的正しさ：sf=13, Zadoff-Chu, 符号反転パターン
+    /// プリアンブルの数学的正しさ：設定SFのZadoff-Chu、符号反転パターン
     #[test]
     fn test_preamble_math_rigor() {
         let mut mod_ = make_modulator();
         mod_.reset();
 
         let preamble = mod_.generate_preamble();
-        let sf = 13;
+        let sf = mod_.config.preamble_sf;
         let repeat = mod_.config.preamble_repeat;
 
         // 根拠1: RRCフィルタの群遅延 (L-1)/2サンプル + リサンプラの補間遅延
@@ -1206,18 +1204,14 @@ mod tests {
 
         let repeat = mod_.config.preamble_repeat;
         let spc = mod_.config.samples_per_chip();
-        let symbol_len = 13 * spc;
+        let symbol_len = mod_.config.preamble_sf * spc;
         let delay = mod_.delay();
 
         // 各シンボルのエネルギーを、物理的な遅延を考慮した窓で計算
         let mut symbol_energies = Vec::new();
         for sym_idx in 0..repeat {
-            // 物理的根拠：
-            // Modulator::delay() は最初の入力 $x[0]$ がピークに達する時間である。
-            // ベースバンドRRCフィルタの遅延 (24) は出力レートで 48 サンプルに相当する。
-            // シンボルのエネルギー中心を正確に捉えるため、このオフセットを加味する。
-            let rrc_offset = 48;
-            let center = delay + sym_idx * symbol_len + rrc_offset;
+            // 設定依存のシンボル中心窓でエネルギーを評価する。
+            let center = delay + sym_idx * symbol_len + symbol_len / 2;
             let start = center.saturating_sub(symbol_len / 2);
             let end = center + symbol_len / 2;
 
