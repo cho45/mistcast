@@ -125,6 +125,15 @@ pub struct Decoder {
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
+
+    // ゼロアロケーション用バッファプール
+    pub(crate) mix_buffer_i: Vec<f32>,
+    pub(crate) mix_buffer_q: Vec<f32>,
+    resample_buffer_i: Vec<f32>,
+    resample_buffer_q: Vec<f32>,
+    cir_buffer: Vec<Complex32>,
+    complex_buffer: Vec<Complex32>,
+    packet_llrs_buffer: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -155,6 +164,11 @@ impl Decoder {
 
         let tc = MarySyncDetector::THRESHOLD_COARSE_DEFAULT;
         let tf = MarySyncDetector::THRESHOLD_FINE_DEFAULT;
+
+        // ゼロアロケーションバッファの初期化
+        let spc = dsp_config.proc_samples_per_chip();
+        let cir_buffer_size = dsp_config.preamble_sf * spc;
+
         Decoder {
             resampler_i: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
@@ -202,6 +216,14 @@ impl Decoder {
             invalid_neighbor_packets: 0,
             llr_callback: None,
             stats_total_samples: 0,
+            // ゼロアロケーションバッファ初期化
+            mix_buffer_i: Vec::with_capacity(4096),
+            mix_buffer_q: Vec::with_capacity(4096),
+            resample_buffer_i: Vec::with_capacity(6144),
+            resample_buffer_q: Vec::with_capacity(6144),
+            cir_buffer: vec![Complex32::new(0.0, 0.0); cir_buffer_size],
+            complex_buffer: Vec::with_capacity(16_000),
+            packet_llrs_buffer: Vec::with_capacity(352),
         }
     }
 
@@ -243,17 +265,20 @@ impl Decoder {
         }
         self.stats_total_samples += samples.len();
 
-        let mut i_mixed = Vec::with_capacity(samples.len());
-        let mut q_mixed = Vec::with_capacity(samples.len());
-        self.mix_real_to_iq(samples, &mut i_mixed, &mut q_mixed);
+        // 1. Real → IQ 変換（事前確保バッファ使用）
+        self.mix_real_to_iq_zero_alloc(samples);
 
-        let mut i_resampled = Vec::new();
-        let mut q_resampled = Vec::new();
-        self.resampler_i.process(&i_mixed, &mut i_resampled);
-        self.resampler_q.process(&q_mixed, &mut q_resampled);
+        // 2. リサンプリング（事前確保バッファ使用）
+        self.resample_buffer_i.clear();
+        self.resample_buffer_q.clear();
+        self.resampler_i
+            .process(&self.mix_buffer_i, &mut self.resample_buffer_i);
+        self.resampler_q
+            .process(&self.mix_buffer_q, &mut self.resample_buffer_q);
 
-        let i_filtered = self.rrc_filter_i.process_block(&i_resampled);
-        let q_filtered = self.rrc_filter_q.process_block(&q_resampled);
+        // 3. RRCフィルタ（既存API使用、アロケーションは残る）
+        let i_filtered = self.rrc_filter_i.process_block(&self.resample_buffer_i);
+        let q_filtered = self.rrc_filter_q.process_block(&self.resample_buffer_q);
 
         self.sample_buffer_i.extend_from_slice(&i_filtered);
         self.sample_buffer_q.extend_from_slice(&q_filtered);
@@ -261,11 +286,21 @@ impl Decoder {
         self.detect_and_process_frames()
     }
 
-    fn mix_real_to_iq(&mut self, samples: &[f32], i_mixed: &mut Vec<f32>, q_mixed: &mut Vec<f32>) {
+    fn mix_real_to_iq_zero_alloc(&mut self, samples: &[f32]) {
+        self.mix_buffer_i.clear();
+        self.mix_buffer_q.clear();
+
+        // キャパシティ確認（必要なら拡張）
+        if self.mix_buffer_i.capacity() < samples.len() {
+            self.mix_buffer_i.reserve(samples.len());
+            self.mix_buffer_q.reserve(samples.len());
+        }
+
+        // 安全なパターン: pushを使用（unsafe set_lenの回避）
         for &s in samples {
             let lo = self.lo_nco.step();
-            i_mixed.push(s * lo.re * 2.0);
-            q_mixed.push(s * lo.im * 2.0);
+            self.mix_buffer_i.push(s * lo.re * 2.0);
+            self.mix_buffer_q.push(s * lo.im * 2.0);
         }
     }
 
@@ -327,16 +362,23 @@ impl Decoder {
                 .saturating_sub(spc / 2);
 
             // 1. 新しい CIR を推定 (絶対にバッファを削る前に行う)
-            let mut cir = vec![Complex32::new(0.0, 0.0); sf_preamble * spc];
+            // ゼロアロケーション: 事前確保バッファ使用
+            let cir_len = sf_preamble * spc;
+            self.cir_buffer.fill(Complex32::new(0.0, 0.0));
             let mut chq = ChannelQualityEstimate::default();
-            self.sync_detector.estimate_channel_quality(
-                &self.sample_buffer_i,
-                &self.sample_buffer_q,
-                preamble_start_idx,
-                &mut cir,
-                &mut chq,
-            );
-            self.postprocess_cir(&mut cir);
+            {
+                let cir_slice = &mut self.cir_buffer[..cir_len];
+                self.sync_detector.estimate_channel_quality(
+                    &self.sample_buffer_i,
+                    &self.sample_buffer_q,
+                    preamble_start_idx,
+                    cir_slice,
+                    &mut chq,
+                );
+            }
+            // CIRデータをコピーして後で使用
+            let mut cir_copy: Vec<Complex32> = self.cir_buffer[..cir_len].to_vec();
+            self.postprocess_cir(&mut cir_copy);
 
             let overlap = if let Some(ref eq) = self.equalizer {
                 eq.overlap_len()
@@ -363,7 +405,7 @@ impl Decoder {
                 if let Some(snr_db) = chq.snr_db {
                     mmse.snr_db = snr_db.clamp(-20.0, 40.0);
                 }
-                eq.set_cir_with_mmse(&cir, mmse);
+                eq.set_cir_with_mmse(&cir_copy, mmse);
                 eq.reset();
             }
 
@@ -373,13 +415,21 @@ impl Decoder {
             let warmup_real_len = sync_start
                 .saturating_sub(initial_drain_len)
                 .min(self.sample_buffer_i.len());
-            let mut warmup_input = Vec::with_capacity(warmup_real_len);
-            for i in 0..warmup_real_len {
-                warmup_input.push(Complex32::new(
-                    self.sample_buffer_i[i],
-                    self.sample_buffer_q[i],
-                ));
+
+            // ゼロアロケーション: 事前確保バッファ使用
+            self.complex_buffer.clear();
+            if self.complex_buffer.capacity() < warmup_real_len {
+                self.complex_buffer.reserve(warmup_real_len);
             }
+            unsafe {
+                self.complex_buffer.set_len(warmup_real_len);
+            }
+            for i in 0..warmup_real_len {
+                self.complex_buffer[i] =
+                    Complex32::new(self.sample_buffer_i[i], self.sample_buffer_q[i]);
+            }
+            // スライスをVecにコピーして借用の問題を回避
+            let warmup_input: Vec<Complex32> = self.complex_buffer[..warmup_real_len].to_vec();
 
             // 3. カウンタ初期化
             self.pending_warmup_samples = warmup_input.len();
@@ -434,14 +484,23 @@ impl Decoder {
             .len()
             .saturating_sub(self.equalizer_input_offset);
         if to_process > 0 {
-            let mut complex_input = Vec::with_capacity(to_process);
-            for i in self.equalizer_input_offset..self.equalizer_input_offset + to_process {
-                complex_input.push(Complex32::new(
-                    self.sample_buffer_i[i],
-                    self.sample_buffer_q[i],
-                ));
+            // ゼロアロケーション: 事前確保バッファ使用
+            self.complex_buffer.clear();
+            if self.complex_buffer.capacity() < to_process {
+                self.complex_buffer.reserve(to_process);
             }
-            self.equalize(&complex_input);
+            unsafe {
+                self.complex_buffer.set_len(to_process);
+            }
+            for (idx, i) in
+                (self.equalizer_input_offset..self.equalizer_input_offset + to_process).enumerate()
+            {
+                self.complex_buffer[idx] =
+                    Complex32::new(self.sample_buffer_i[i], self.sample_buffer_q[i]);
+            }
+            // スライスをクローンして借用の問題を回避（equalizeは&mut selfを必要とする）
+            let slice = self.complex_buffer[..to_process].to_vec();
+            self.equalize(&slice);
         }
 
         // 2. 同期語の再復調と位相基準の確立
@@ -629,7 +688,8 @@ impl Decoder {
         let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
 
-        let mut packet_llrs = Vec::with_capacity(interleaved_bits);
+        // ゼロアロケーション: 事前確保バッファ使用
+        self.packet_llrs_buffer.clear();
         let mut total_packet_energy = 0.0f32;
 
         for sym_idx in 0..expected_symbols {
@@ -676,8 +736,8 @@ impl Decoder {
             let walsh_llr = self.demodulator.walsh_llr(&energies, max_energy);
             let dqpsk_llr = self.demodulator.dqpsk_llr(diff, max_energy);
 
-            packet_llrs.extend_from_slice(&walsh_llr);
-            packet_llrs.extend_from_slice(&dqpsk_llr);
+            self.packet_llrs_buffer.extend_from_slice(&walsh_llr);
+            self.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
 
             let decided = if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
                 Complex32::new(1.0, 0.0)
@@ -711,6 +771,9 @@ impl Decoder {
         self.tracking_state = Some(st);
 
         let avg_energy = total_packet_energy / expected_symbols as f32;
+        // packet_llrs_bufferからデータをコピーして借用の問題を回避
+        let packet_llrs_len = self.packet_llrs_buffer.len().min(interleaved_bits);
+        let packet_llrs: Vec<f32> = self.packet_llrs_buffer[..packet_llrs_len].to_vec();
         let success = if packet_llrs.len() >= interleaved_bits {
             self.decode_llrs(&packet_llrs) > 0
         } else {
@@ -1311,14 +1374,15 @@ mod tests {
         // process_samples は同期確定後に内部バッファを消費するため、
         // GT検証では detect 前の生データを直接使う。
         let mut decoder = Decoder::new(160, 10, config.clone());
-        let mut i_mixed = Vec::with_capacity(frame_48k.len());
-        let mut q_mixed = Vec::with_capacity(frame_48k.len());
-        decoder.mix_real_to_iq(&frame_48k, &mut i_mixed, &mut q_mixed);
 
+        // 内部バッファを直接操作してテスト用にデータを準備
+        decoder.mix_real_to_iq_zero_alloc(&frame_48k);
+
+        // リサンプリング
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
-        decoder.resampler_i.process(&i_mixed, &mut i_resampled);
-        decoder.resampler_q.process(&q_mixed, &mut q_resampled);
+        decoder.resampler_i.process(&decoder.mix_buffer_i, &mut i_resampled);
+        decoder.resampler_q.process(&decoder.mix_buffer_q, &mut q_resampled);
 
         let i_filtered = decoder.rrc_filter_i.process_block(&i_resampled);
         let q_filtered = decoder.rrc_filter_q.process_block(&q_resampled);
