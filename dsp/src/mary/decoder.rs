@@ -11,7 +11,7 @@ use crate::coding::fec;
 use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::common::equalization::{FrequencyDomainEqualizer, MmseSettings};
+use crate::common::equalization::{ChannelMsePredictor, FrequencyDomainEqualizer, MmseSettings};
 use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
@@ -89,6 +89,7 @@ pub struct Decoder {
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
     equalizer: Option<FrequencyDomainEqualizer>,
+    channel_mse_predictor: Option<ChannelMsePredictor>,
     equalized_buffer: Vec<Complex32>,
     equalizer_input_offset: usize,
     demodulator: Demodulator,
@@ -109,6 +110,8 @@ pub struct Decoder {
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
+    fde_auto_path_select: bool,
+    current_frame_use_fde: bool,
     fde_mmse_settings: MmseSettings,
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
@@ -148,13 +151,23 @@ struct TrackingState {
 }
 
 impl Decoder {
+    fn default_fde_fft_size(dsp_config: &DspConfig) -> usize {
+        let spc = dsp_config.proc_samples_per_chip();
+        let cir_samples = dsp_config.preamble_sf * spc;
+        (cir_samples * 2).next_power_of_two().max(1024)
+    }
+
     fn build_default_equalizer(dsp_config: &DspConfig) -> FrequencyDomainEqualizer {
         let spc = dsp_config.proc_samples_per_chip();
         let cir_samples = dsp_config.preamble_sf * spc;
-        let fft_size = (cir_samples * 2).next_power_of_two().max(1024);
+        let fft_size = Self::default_fde_fft_size(dsp_config);
         let mut initial_cir = vec![Complex32::new(0.0, 0.0); cir_samples];
         initial_cir[0] = Complex32::new(1.0, 0.0);
         FrequencyDomainEqualizer::new(&initial_cir, fft_size, 15.0)
+    }
+
+    fn build_default_mse_predictor(dsp_config: &DspConfig) -> ChannelMsePredictor {
+        ChannelMsePredictor::new(Self::default_fde_fft_size(dsp_config))
     }
 
     /// 新しいデコーダを作成する
@@ -194,6 +207,7 @@ impl Decoder {
             config: dsp_config.clone(),
             lo_nco,
             equalizer: Some(Self::build_default_equalizer(&dsp_config)),
+            channel_mse_predictor: Some(Self::build_default_mse_predictor(&dsp_config)),
             equalized_buffer: Vec::new(),
             equalizer_input_offset: 0,
             state: DecoderState::Searching,
@@ -207,6 +221,8 @@ impl Decoder {
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: 0,
+            fde_auto_path_select: false,
+            current_frame_use_fde: true,
             fde_mmse_settings: MmseSettings::default(),
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
@@ -238,11 +254,25 @@ impl Decoder {
             if self.equalizer.is_none() {
                 self.equalizer = Some(Self::build_default_equalizer(&self.config));
             }
+            if self.channel_mse_predictor.is_none() {
+                self.channel_mse_predictor = Some(Self::build_default_mse_predictor(&self.config));
+            }
+            self.current_frame_use_fde = true;
         } else {
             self.equalizer = None;
+            self.channel_mse_predictor = None;
+            self.current_frame_use_fde = false;
+            self.fde_auto_path_select = false;
         }
         self.equalized_buffer.clear();
         self.equalizer_input_offset = 0;
+    }
+
+    pub fn set_fde_auto_path_select(&mut self, enabled: bool) {
+        self.fde_auto_path_select = enabled;
+        if !enabled {
+            self.current_frame_use_fde = self.equalizer.is_some();
+        }
     }
 
     pub fn set_fde_mmse_settings(
@@ -289,19 +319,15 @@ impl Decoder {
             .resize(self.resample_buffer_i.len(), 0.0);
         self.rrc_filtered_q
             .resize(self.resample_buffer_q.len(), 0.0);
-        self.rrc_filtered_i
-            .copy_from_slice(&self.resample_buffer_i);
-        self.rrc_filtered_q
-            .copy_from_slice(&self.resample_buffer_q);
+        self.rrc_filtered_i.copy_from_slice(&self.resample_buffer_i);
+        self.rrc_filtered_q.copy_from_slice(&self.resample_buffer_q);
         self.rrc_filter_i
             .process_block_in_place(&mut self.rrc_filtered_i);
         self.rrc_filter_q
             .process_block_in_place(&mut self.rrc_filtered_q);
 
-        self.sample_buffer_i
-            .extend_from_slice(&self.rrc_filtered_i);
-        self.sample_buffer_q
-            .extend_from_slice(&self.rrc_filtered_q);
+        self.sample_buffer_i.extend_from_slice(&self.rrc_filtered_i);
+        self.sample_buffer_q.extend_from_slice(&self.rrc_filtered_q);
 
         self.detect_and_process_frames()
     }
@@ -395,13 +421,32 @@ impl Decoder {
                     cir_slice,
                     &mut chq,
                 );
+                Self::postprocess_cir(
+                    cir_slice,
+                    self.cir_normalization_mode,
+                    self.cir_tap_threshold_alpha,
+                );
             }
-            // CIRデータをコピーして後で使用
-            let mut cir_copy: Vec<Complex32> = self.cir_buffer[..cir_len].to_vec();
-            self.postprocess_cir(&mut cir_copy);
+            let mut mmse = self.fde_mmse_settings;
+            if let Some(snr_db) = chq.snr_db {
+                mmse.snr_db = snr_db.clamp(-20.0, 40.0);
+            }
 
-            let overlap = if let Some(ref eq) = self.equalizer {
-                eq.overlap_len()
+            let mut use_fde_this_frame = self.equalizer.is_some();
+            if let Some(ref mut predictor) = self.channel_mse_predictor {
+                let signal_var = chq.signal_var.max(0.0);
+                let noise_var = chq.noise_var.max(0.0);
+                let cir_slice = &self.cir_buffer[..cir_len];
+                let mse_fde = predictor.predict_mse_fde(cir_slice, signal_var, noise_var, mmse);
+                let mse_raw = predictor.predict_mse_raw(cir_slice, signal_var, noise_var);
+                if self.fde_auto_path_select {
+                    use_fde_this_frame = mse_fde < mse_raw;
+                }
+            }
+            self.current_frame_use_fde = use_fde_this_frame;
+
+            let overlap = if use_fde_this_frame {
+                self.equalizer.as_ref().map_or(0, |eq| eq.overlap_len())
             } else {
                 0
             };
@@ -420,13 +465,11 @@ impl Decoder {
             self.equalizer_input_offset = 0;
 
             // EQ リセット
-            if let Some(ref mut eq) = self.equalizer {
-                let mut mmse = self.fde_mmse_settings;
-                if let Some(snr_db) = chq.snr_db {
-                    mmse.snr_db = snr_db.clamp(-20.0, 40.0);
+            if use_fde_this_frame {
+                if let Some(ref mut eq) = self.equalizer {
+                    eq.set_cir_with_mmse(&self.cir_buffer[..cir_len], mmse);
+                    eq.reset();
                 }
-                eq.set_cir_with_mmse(&cir_copy, mmse);
-                eq.reset();
             }
 
             // 2. ワームアップ投入
@@ -448,18 +491,15 @@ impl Decoder {
                 self.complex_buffer[i] =
                     Complex32::new(self.sample_buffer_i[i], self.sample_buffer_q[i]);
             }
-            // スライスをVecにコピーして借用の問題を回避
-            let warmup_input: Vec<Complex32> = self.complex_buffer[..warmup_real_len].to_vec();
-
             // 3. カウンタ初期化
-            self.pending_warmup_samples = warmup_input.len();
+            self.pending_warmup_samples = warmup_real_len;
             self.pending_warmup_input_samples = warmup_real_len;
             let frame_samples = (sync_word_bits * sf_sync
                 + packets_per_frame * (expected_symbols * sf_payload))
                 * spc;
             self.remaining_samples_in_frame = frame_samples as isize;
 
-            self.equalize_with_raw_consumed(&warmup_input, warmup_real_len);
+            self.equalize_from_complex_buffer(warmup_real_len, warmup_real_len);
 
             // 4. 状態移行
             self.current_sync = Some(s.clone());
@@ -518,9 +558,7 @@ impl Decoder {
                 self.complex_buffer[idx] =
                     Complex32::new(self.sample_buffer_i[i], self.sample_buffer_q[i]);
             }
-            // スライスをクローンして借用の問題を回避（equalizeは&mut selfを必要とする）
-            let slice = self.complex_buffer[..to_process].to_vec();
-            self.equalize(&slice);
+            self.equalize_from_complex_buffer(to_process, to_process);
         }
 
         // 2. 同期語の再復調と位相基準の確立
@@ -791,14 +829,16 @@ impl Decoder {
         self.tracking_state = Some(st);
 
         let avg_energy = total_packet_energy / expected_symbols as f32;
-        // packet_llrs_bufferからデータをコピーして借用の問題を回避
-        let packet_llrs_len = self.packet_llrs_buffer.len().min(interleaved_bits);
-        let packet_llrs: Vec<f32> = self.packet_llrs_buffer[..packet_llrs_len].to_vec();
-        let success = if packet_llrs.len() >= interleaved_bits {
-            self.decode_llrs(&packet_llrs) > 0
+        // バッファの所有権を一時的に移して借用衝突を回避する（追加アロケーションなし）
+        let mut llr_buf = std::mem::take(&mut self.packet_llrs_buffer);
+        let packet_llrs_len = llr_buf.len().min(interleaved_bits);
+        let success = if packet_llrs_len >= interleaved_bits {
+            self.decode_llrs(&llr_buf[..packet_llrs_len]) > 0
         } else {
             false
         };
+        llr_buf.clear();
+        self.packet_llrs_buffer = llr_buf;
 
         (avg_energy, success, true)
     }
@@ -823,8 +863,7 @@ impl Decoder {
 
             let interleaver = BlockInterleaver::new(rows, cols);
             // インプレースAPI使用
-            self.deinterleave_buffer
-                .resize(interleaved_bits, 0.0);
+            self.deinterleave_buffer.resize(interleaved_bits, 0.0);
             interleaver.deinterleave_f32_in_place(
                 valid_llrs,
                 &mut self.deinterleave_buffer[..interleaved_bits],
@@ -841,8 +880,7 @@ impl Decoder {
                 callback(&self.deinterleave_buffer[..interleaved_bits]);
             }
 
-            let decoded_bits =
-                fec::decode_soft(&self.deinterleave_buffer[..fec_bits]);
+            let decoded_bits = fec::decode_soft(&self.deinterleave_buffer[..fec_bits]);
             if decoded_bits.len() < p_bits_len {
                 continue;
             }
@@ -941,15 +979,19 @@ impl Decoder {
         }
     }
 
-    fn postprocess_cir(&self, cir: &mut [Complex32]) {
+    fn postprocess_cir(
+        cir: &mut [Complex32],
+        cir_normalization_mode: CirNormalizationMode,
+        cir_tap_threshold_alpha: f32,
+    ) {
         if cir.is_empty() {
             return;
         }
 
         let max_mag = cir.iter().map(|c| c.norm()).fold(0.0f32, |a, b| a.max(b));
 
-        if max_mag > 0.0 && self.cir_tap_threshold_alpha > 0.0 {
-            let threshold = self.cir_tap_threshold_alpha * max_mag;
+        if max_mag > 0.0 && cir_tap_threshold_alpha > 0.0 {
+            let threshold = cir_tap_threshold_alpha * max_mag;
             for tap in cir.iter_mut() {
                 if tap.norm() < threshold {
                     *tap = Complex32::new(0.0, 0.0);
@@ -957,7 +999,7 @@ impl Decoder {
             }
         }
 
-        match self.cir_normalization_mode {
+        match cir_normalization_mode {
             CirNormalizationMode::None => {}
             CirNormalizationMode::UnitEnergy => {
                 let energy = cir.iter().map(|c| c.norm_sqr()).sum::<f32>();
@@ -979,10 +1021,14 @@ impl Decoder {
         }
     }
 
-    /// 等化処理の統合口。
-    /// 投入サンプル数と出力サンプル数のアライメントを、ウォームアップ期間を考慮して管理する。
-    fn equalize(&mut self, input: &[Complex32]) {
-        self.equalize_with_raw_consumed(input, input.len());
+    fn equalize_from_complex_buffer(&mut self, valid_len: usize, raw_consumed: usize) {
+        if valid_len == 0 {
+            return;
+        }
+        let mut input_vec = std::mem::take(&mut self.complex_buffer);
+        self.equalize_with_raw_consumed(&input_vec[..valid_len], raw_consumed);
+        input_vec.clear();
+        self.complex_buffer = input_vec;
     }
 
     fn equalize_with_raw_consumed(&mut self, input: &[Complex32], raw_consumed: usize) {
@@ -1009,19 +1055,21 @@ impl Decoder {
             self.remaining_samples_in_frame -= payload_drain as isize;
         }
 
-        if let Some(ref mut eq) = self.equalizer {
-            // C. 等化実行
-            let added = eq.process(input, &mut self.equalized_buffer);
-            if added == 0 {
-                return;
-            }
+        if self.current_frame_use_fde {
+            if let Some(ref mut eq) = self.equalizer {
+                // C. 等化実行
+                let added = eq.process(input, &mut self.equalized_buffer);
+                if added == 0 {
+                    return;
+                }
 
-            // D. 等化後バッファのアライメント (ゴミ捨て)
-            // ウォームアップ由来の中間状態を先頭から捨てる。
-            let warmup_to_drain = added.min(self.pending_warmup_samples);
-            if warmup_to_drain > 0 {
-                self.equalized_buffer.drain(0..warmup_to_drain);
-                self.pending_warmup_samples -= warmup_to_drain;
+                // D. 等化後バッファのアライメント (ゴミ捨て)
+                // ウォームアップ由来の中間状態を先頭から捨てる。
+                let warmup_to_drain = added.min(self.pending_warmup_samples);
+                if warmup_to_drain > 0 {
+                    self.equalized_buffer.drain(0..warmup_to_drain);
+                    self.pending_warmup_samples -= warmup_to_drain;
+                }
             }
         } else {
             // FDE無効時はパススルーで同じ管理ルールを適用する
@@ -1130,6 +1178,7 @@ impl Decoder {
         self.pending_warmup_samples = 0;
         self.pending_warmup_input_samples = 0;
         self.remaining_samples_in_frame = 0;
+        self.current_frame_use_fde = self.equalizer.is_some();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
         self.equalized_buffer.clear();
@@ -1195,6 +1244,14 @@ mod tests {
     fn make_decoder() -> Decoder {
         let config = DspConfig::default_48k();
         Decoder::new(160, 10, config)
+    }
+
+    fn apply_two_path_channel(input: &[f32], delay_samples: usize, alpha: f32) -> Vec<f32> {
+        let mut out = input.to_vec();
+        for t in delay_samples..input.len() {
+            out[t] += input[t - delay_samples] * alpha;
+        }
+        out
     }
 
     #[test]
@@ -2024,6 +2081,81 @@ mod tests {
             "FDE should not increase CRC errors: with_fde={}, no_fde={}",
             progress.crc_error_packets,
             progress_no_fde.crc_error_packets
+        );
+    }
+
+    #[test]
+    fn test_fde_auto_disabled_keeps_fde_path() {
+        use crate::mary::encoder::Encoder;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(160, 10, config);
+        decoder.config.packets_per_burst = 1;
+        decoder.set_fde_enabled(true);
+        decoder.set_fde_auto_path_select(false);
+        decoder.set_fde_mmse_settings(15.0, 1.0, 10.0, None);
+
+        let data = vec![0x23u8; 32];
+        encoder.set_data(&data);
+        let mut signal = encoder.encode_frame().expect("frame");
+        signal.extend(vec![0.0; 8000]);
+        decoder.process_samples(&signal);
+
+        assert!(
+            decoder.current_frame_use_fde,
+            "AUTO無効時は常にFDE経路を使うべき"
+        );
+    }
+
+    #[test]
+    fn test_fde_auto_selects_raw_on_flat_channel_with_large_lambda_floor() {
+        use crate::mary::encoder::Encoder;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(160, 10, config);
+        decoder.config.packets_per_burst = 1;
+        decoder.set_fde_enabled(true);
+        decoder.set_fde_auto_path_select(true);
+        decoder.set_fde_mmse_settings(15.0, 1.0, 10.0, None);
+
+        let data = vec![0x45u8; 32];
+        encoder.set_data(&data);
+        let mut signal = encoder.encode_frame().expect("frame");
+        signal.extend(vec![0.0; 8000]);
+        decoder.process_samples(&signal);
+
+        assert!(
+            !decoder.current_frame_use_fde,
+            "平坦チャネルかつ強正則化ではAUTOはRAWを選ぶべき"
+        );
+    }
+
+    #[test]
+    fn test_fde_auto_selects_fde_on_noiseless_multipath() {
+        use crate::mary::encoder::Encoder;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(160, 10, config.clone());
+        decoder.config.packets_per_burst = 1;
+        decoder.set_fde_enabled(true);
+        decoder.set_fde_auto_path_select(true);
+        decoder.set_fde_mmse_settings(30.0, 1.0, 0.0, None);
+
+        let data = vec![0x67u8; 32];
+        encoder.set_data(&data);
+        let signal = encoder.encode_frame().expect("frame");
+        let spc = config.proc_samples_per_chip();
+        let delay = 3 * spc * (config.sample_rate / config.proc_sample_rate()) as usize;
+        let mut multipath = apply_two_path_channel(&signal, delay, 0.6);
+        multipath.extend(vec![0.0; 8000]);
+        decoder.process_samples(&multipath);
+
+        assert!(
+            decoder.current_frame_use_fde,
+            "ISIが強い無雑音マルチパスではAUTOはFDEを選ぶべき"
         );
     }
 }
