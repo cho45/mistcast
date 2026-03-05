@@ -957,14 +957,18 @@ mod tests {
 
         // Walsh[0] + DQPSK 00 (phase=0)
         let bits = vec![0u8, 0, 0, 0, 0, 0];
-        let _samples = modulator.modulate(&bits);
+        let mut samples = Vec::new();
+        modulator.modulate(&bits, &mut samples);
 
         // サンプルを16個のシンボルに分割（各シンボル16サンプル）
         // 注: 実際にはRRCフィルタとリサンプラがあるため、正確な分割は困難
         // ここでは信号の主要部分を抽出してテストする
 
         // チップ列を直接取得してテスト
-        let (chips_i, chips_q) = modulator.bits_to_chips(&bits);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         // 16サンプルの信号を構築
         let mut signal = Vec::with_capacity(16);
@@ -1007,7 +1011,10 @@ mod tests {
             let b0 = walsh_idx & 1;
             let bits = vec![b3 as u8, b2 as u8, b1 as u8, b0 as u8, 0, 0];
 
-            let (chips_i, chips_q) = modulator.bits_to_chips(&bits);
+            let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
             // 16サンプルの信号を構築
             let signal: Vec<Complex32> = (0..16)
@@ -1052,7 +1059,10 @@ mod tests {
             demodulator.reset();
 
             let bits = vec![0u8, 0, 0, 0, dqpsk_bits[0], dqpsk_bits[1]];
-            let (chips_i, chips_q) = modulator.bits_to_chips(&bits);
+            let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
             let signal: Vec<Complex32> = (0..16)
                 .map(|i| Complex32::new(chips_i[i], chips_q[i]))
@@ -1139,7 +1149,10 @@ mod tests {
             0, 0, 0, 0, 1, 1, // Walsh[0], DQPSK 11 (phase=3)
         ];
 
-        let (chips_i, chips_q) = modulator.bits_to_chips(&bits);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         // 各シンボルを復調
         let sf = 16;
@@ -1200,7 +1213,10 @@ mod tests {
         let mut padded_bits = bits.clone();
         padded_bits.resize(padded_len, 0);
 
-        let (chips_i, chips_q) = modulator.bits_to_chips(&padded_bits);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&padded_bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         let sf = 16;
         let num_symbols = padded_len / 6;
@@ -1243,8 +1259,14 @@ mod tests {
         let bits0 = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0]
         let bits1 = vec![0u8, 0, 0, 1, 0, 0]; // Walsh[1]
 
-        let (chips_i0, chips_q0) = modulator.bits_to_chips(&bits0);
-        let (chips_i1, chips_q1) = modulator.bits_to_chips(&bits1);
+        let mut chips_i0 = Vec::new();
+        let mut chips_q0 = Vec::new();
+        let mut phase0 = 0;
+        Modulator::bits_to_chips(&bits0, &modulator.wdict, &mut phase0, &mut chips_i0, &mut chips_q0);
+        let mut chips_i1 = Vec::new();
+        let mut chips_q1 = Vec::new();
+        let mut phase1 = 0;
+        Modulator::bits_to_chips(&bits1, &modulator.wdict, &mut phase1, &mut chips_i1, &mut chips_q1);
 
         let signal0: Vec<Complex32> = (0..16)
             .map(|i| Complex32::new(chips_i0[i], chips_q0[i]))
@@ -1299,7 +1321,10 @@ mod tests {
         // 高エネルギー信号
         modulator.reset();
         let bits = vec![0u8, 0, 0, 0, 0, 0];
-        let (chips_i, chips_q) = modulator.bits_to_chips(&bits);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &modulator.wdict, &mut phase, &mut chips_i, &mut chips_q);
         let signal: Vec<Complex32> = (0..16)
             .map(|i| Complex32::new(chips_i[i], chips_q[i]))
             .collect();

@@ -43,7 +43,7 @@ fn phase_to_iq(phase: u8) -> (f32, f32) {
 /// MaryDQPSK変調器
 pub struct Modulator {
     pub config: DspConfig,
-    wdict: WalshDictionary,
+    pub wdict: WalshDictionary,
     resampler_i: Resampler,
     resampler_q: Resampler,
     rrc_i: RrcFilter,
@@ -145,9 +145,10 @@ impl Modulator {
     /// 6ビットずつ変調（4ビットWalsh index + 2ビットDQPSK phase）
     pub fn modulate(&mut self, bits: &[u8], output: &mut Vec<f32>) {
         let mut phase = self.prev_phase;
+        let wdict = &self.wdict;
         Self::bits_to_chips(
             bits,
-            &self.wdict,
+            wdict,
             &mut phase,
             &mut self.chips_buffer_i,
             &mut self.chips_buffer_q,
@@ -217,7 +218,7 @@ impl Modulator {
     }
 
     /// チップ列をRRC整形 + キャリア変調してサンプル列に変換
-    fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32], output: &mut Vec<f32>) {
+    pub fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32], output: &mut Vec<f32>) {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         let spc = INTERNAL_SPC;
 
@@ -377,10 +378,10 @@ impl Modulator {
         output.extend_from_slice(&sync_samples_buf);
         output.extend_from_slice(&data_samples_buf);
 
-        // flush を直接 output に追加
-        let _flush_start = output.len();
-        self.flush(output);
-        // flush は clear してから追加するので、正しく動作するはず
+        // flush を一時的なバッファに追加してから output に結合
+        let mut flush_buf = Vec::new();
+        self.flush(&mut flush_buf);
+        output.extend_from_slice(&flush_buf);
     }
 
     /// 変調器の状態をリセット
@@ -509,7 +510,8 @@ mod tests {
         let expected_delay = mod_.delay();
 
         // 1チップ（1.0）のインパルスを入力
-        let mut samples = mod_.chips_to_samples(&[1.0], &[0.0]);
+        let mut samples = Vec::new();
+        mod_.chips_to_samples(&[1.0], &[0.0], &mut samples);
         let mut flush_buf = Vec::new();
         mod_.flush(&mut flush_buf);
         samples.extend(flush_buf);
@@ -668,7 +670,10 @@ mod tests {
             0, 0, 0, 0, 1, 1,
         ]; // Walsh[0], DQPSK 11
 
-        let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         // 各シンボルの位相を確認
         let sf = 16;
@@ -713,8 +718,8 @@ mod tests {
 
         // ===== 検証1: 16個の異なるビットパターンを生成 =====
         // 4ビットの全パターン (0000 から 1111) に対してchipsを生成
-        let mut all_chips_i = Vec::new();
-        let mut all_chips_q = Vec::new();
+        let mut all_chips_i: Vec<Vec<f32>> = Vec::new();
+        let mut all_chips_q: Vec<Vec<f32>> = Vec::new();
 
         for walsh_idx in 0..16u32 {
             // 4ビットパターンを生成（ビッグエンディアンで上位ビットから）
@@ -727,7 +732,10 @@ mod tests {
                 0, // DQPSK 00（固定）
             ];
 
-            let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
+            let mut chips_i = Vec::new();
+            let mut chips_q = Vec::new();
+            let mut phase = 0;
+            Modulator::bits_to_chips(&bits, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
             all_chips_i.push(chips_i);
             all_chips_q.push(chips_q);
         }
@@ -762,9 +770,15 @@ mod tests {
         // 同じ入力に対しては同じ出力が生成される
         let test_bits = vec![1u8, 0, 1, 1, 0, 0]; // Walsh[11], DQPSK 00
 
-        let (chips_i1, chips_q1) = mod_.bits_to_chips(&test_bits);
+        let mut chips_i1 = Vec::new();
+        let mut chips_q1 = Vec::new();
+        let mut phase1 = 0;
+        Modulator::bits_to_chips(&test_bits, &mod_.wdict, &mut phase1, &mut chips_i1, &mut chips_q1);
         mod_.reset();
-        let (chips_i2, chips_q2) = mod_.bits_to_chips(&test_bits);
+        let mut chips_i2 = Vec::new();
+        let mut chips_q2 = Vec::new();
+        let mut phase2 = 0;
+        Modulator::bits_to_chips(&test_bits, &mod_.wdict, &mut phase2, &mut chips_i2, &mut chips_q2);
 
         // 完全に一致するはず
         assert_eq!(chips_i1, chips_i2, "Deterministic I chips failed");
@@ -851,7 +865,10 @@ mod tests {
         for (bits, expected_delta) in test_cases {
             mod_.reset();
             let input = vec![0, 0, 0, 0, bits[0], bits[1]]; // Walsh[0] + DQPSK
-            let (chips_i, chips_q) = mod_.bits_to_chips(&input);
+            let mut chips_i = Vec::new();
+            let mut chips_q = Vec::new();
+            let mut phase = 0;
+            Modulator::bits_to_chips(&input, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
             // 位相を確認
             let phase = expected_delta & 0x03;

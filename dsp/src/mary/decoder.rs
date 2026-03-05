@@ -1537,13 +1537,15 @@ mod tests {
 
         // 1. 各セクションのサンプル数を送信レート(48k)で実測
         let mut modulator = Modulator::new(config.clone());
-        let preamble_part = modulator.generate_preamble();
+        let mut preamble_part = Vec::new();
+        modulator.generate_preamble(&mut preamble_part);
         let preamble_len_48k = preamble_part.len();
 
         // 信号全体を生成 (新しいインスタンスで)
         let mut modulator2 = Modulator::new(config.clone());
         let data = vec![0x55u8; 16];
-        let frame_48k = modulator2.encode_frame(&data);
+        let mut frame_48k = Vec::new();
+        modulator2.encode_frame(&data, &mut frame_48k);
 
         println!("[GT] Preamble len (48k): {}", preamble_len_48k);
 
