@@ -550,7 +550,6 @@ mod tests {
         let fft_size = 64;
         let mut fde = FrequencyDomainEqualizer::new(&cir, fft_size, 60.0);
         let overlap = fde.overlap_len();
-        let step = fft_size - overlap;
 
         let mut output = Vec::new();
 

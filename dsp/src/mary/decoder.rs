@@ -1128,8 +1128,9 @@ mod tests {
     #[test]
     fn test_sync_word_bit_pattern() {
         let sync_word = crate::params::SYNC_WORD;
-        let sync_bits: Vec<u8> = (0..16)
-            .map(|i| ((sync_word >> (15 - i)) & 1) as u8)
+        let sync_word_bits = crate::params::SYNC_WORD_BITS;
+        let sync_bits: Vec<u8> = (0..sync_word_bits)
+            .map(|i| ((sync_word >> (sync_word_bits - 1 - i)) & 1) as u8)
             .collect();
         assert!(sync_bits.iter().all(|&b| b == 0 || b == 1));
         assert_eq!(sync_bits[0], 1);

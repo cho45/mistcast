@@ -33,8 +33,9 @@ pub mod params {
     pub const RRC_ALPHA: f32 = 0.30;
     pub const CHIP_RATE: f32 = 8000.0;
     pub const PREAMBLE_REPEAT: usize = 2;
-    pub const SYNC_WORD_BITS: usize = 16;
+    pub const SYNC_WORD_BITS: usize = 8;
     pub const SYNC_WORD: u32 = 0xDEAD_BEEF;
+    pub const PREAMBLE_SF: usize = 71;
     pub const PACKETS_PER_SYNC_BURST: usize = 1;
     pub const PAYLOAD_SIZE: usize = 16;
     pub const FIXED_K: usize = 10;
@@ -72,7 +73,7 @@ impl DspConfig {
             preamble_repeat: params::PREAMBLE_REPEAT,
             sync_word_bits: params::SYNC_WORD_BITS,
             packets_per_burst: params::PACKETS_PER_SYNC_BURST,
-            preamble_sf: 13,
+            preamble_sf: params::PREAMBLE_SF,
         }
     }
 
