@@ -79,7 +79,7 @@ impl DspConfig {
     pub fn default_48k() -> Self {
         Self::new(params::DEFAULT_SAMPLE_RATE)
     }
-    
+
     pub fn default_44k() -> Self {
         Self::new(44100.0)
     }

@@ -427,7 +427,8 @@ mod tests {
         assert!(
             sync.peak_sample_idx >= preamble_len,
             "Peak should be after preamble: detected={}, preamble_len={}",
-            sync.peak_sample_idx, preamble_len
+            sync.peak_sample_idx,
+            preamble_len
         );
         assert!(sync.score > detector.threshold_fine);
     }
@@ -597,7 +598,9 @@ mod tests {
         let ref_signal_power: f32 = {
             let (i, q) = generate_signal_with_awgn_seeded(&config, 0, 60.0, 0);
             let n = i.len().min(200);
-            if n == 0 { 1.0 } else {
+            if n == 0 {
+                1.0
+            } else {
                 (i[..n].iter().map(|&x| x * x).sum::<f32>()
                     + q[..n].iter().map(|&x| x * x).sum::<f32>())
                     / (2.0 * n as f32)
@@ -606,7 +609,10 @@ mod tests {
         let signal_rms = ref_signal_power.sqrt();
         let noise_sigma_0db = signal_rms / 2.0_f32.sqrt();
 
-        println!("=== ROC Analysis: DSSS SF={} preamble + SYNC_WORD ===", config.spread_factor());
+        println!(
+            "=== ROC Analysis: DSSS SF={} preamble + SYNC_WORD ===",
+            config.spread_factor()
+        );
         println!("  Signal RMS (after pipeline): {:.4}", signal_rms);
         println!("  Noise sigma at 0dB SNR:      {:.4}", noise_sigma_0db);
         println!();
@@ -627,7 +633,8 @@ mod tests {
             let q: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
 
             for n in (0..=(i.len() - required_len)).step_by(1) {
-                let (score, _) = detector.score_candidate(&i, &q, n, config.preamble_repeat + 1, sym_len);
+                let (score, _) =
+                    detector.score_candidate(&i, &q, n, config.preamble_repeat + 1, sym_len);
                 h0_scores.push(score);
             }
         }
@@ -653,10 +660,17 @@ mod tests {
                     generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 100);
 
                 let mut best_score = 0.0f32;
-                for offset in (signal_start_in_proc.saturating_sub(20))..=(signal_start_in_proc + 20) {
+                for offset in
+                    (signal_start_in_proc.saturating_sub(20))..=(signal_start_in_proc + 20)
+                {
                     if offset + required_len <= i.len() {
-                        let (score, _) =
-                            detector.score_candidate(&i, &q, offset, total_symbols_for_fine, sym_len);
+                        let (score, _) = detector.score_candidate(
+                            &i,
+                            &q,
+                            offset,
+                            total_symbols_for_fine,
+                            sym_len,
+                        );
                         if score > best_score {
                             best_score = score;
                         }
@@ -683,7 +697,10 @@ mod tests {
                 .collect()
         };
 
-        println!("{:>8} | {:>8} | {:>10} | {:>10} | {:>10}", "Thresh", "FPR", "TPR(-6dB)", "TPR(0dB)", "TPR(6dB)");
+        println!(
+            "{:>8} | {:>8} | {:>10} | {:>10} | {:>10}",
+            "Thresh", "FPR", "TPR(-6dB)", "TPR(0dB)", "TPR(6dB)"
+        );
         println!("{}", "-".repeat(60));
 
         let mut auc_values: Vec<f64> = vec![0.0; snr_db_list.len()];
@@ -735,7 +752,10 @@ mod tests {
         println!("\n=== Recommended Thresholds ===");
         println!("  FAR ≤ 1.0%: tau = {:.4}", tau_far1pct);
         println!("  FAR ≤ 0.1%: tau = {:.4}", tau_far01pct);
-        println!("  Current THRESHOLD_FINE_DEFAULT: {:.4}", SyncDetector::THRESHOLD_FINE_DEFAULT);
+        println!(
+            "  Current THRESHOLD_FINE_DEFAULT: {:.4}",
+            SyncDetector::THRESHOLD_FINE_DEFAULT
+        );
 
         let snr_0db_idx = snr_db_list.iter().position(|&s| s == 0.0).unwrap();
         assert!(auc_values[snr_0db_idx] >= 0.7);

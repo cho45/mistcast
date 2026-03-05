@@ -17,8 +17,8 @@
 //! - マルチパスのような遅延プロファイル推定に非常に有利。
 //! - プリアンブル等での利用が適している。
 
-use std::f32::consts::PI;
 use num_complex::Complex32;
+use std::f32::consts::PI;
 
 pub struct ZadoffChu {
     n_zc: usize,
@@ -43,7 +43,7 @@ impl ZadoffChu {
         let n_f32 = n as f32;
         let n_zc_f32 = self.n_zc as f32;
 
-        let phase = if self.n_zc % 2 == 0 {
+        let phase = if self.n_zc.is_multiple_of(2) {
             // 偶数の場合: -pi * u * n^2 / N_ZC
             -PI * root * n_f32 * n_f32 / n_zc_f32
         } else {
@@ -61,8 +61,8 @@ impl ZadoffChu {
         let root = self.u as f64;
         let n_zc_f64 = self.n_zc as f64;
         let pi = std::f64::consts::PI;
-        
-        if self.n_zc % 2 == 0 {
+
+        if self.n_zc.is_multiple_of(2) {
             for n in 0..self.n_zc {
                 let n_f64 = n as f64;
                 let phase = -pi * root * n_f64 * n_f64 / n_zc_f64;
@@ -112,7 +112,11 @@ mod tests {
             r0 += seq[i] * seq[i].conj();
         }
 
-        assert!((r0.re - n_zc as f32).abs() < 1e-3, "R(0) should be N_ZC, got {}", r0.re);
+        assert!(
+            (r0.re - n_zc as f32).abs() < 1e-3,
+            "R(0) should be N_ZC, got {}",
+            r0.re
+        );
         assert!(r0.im.abs() < 1e-3);
 
         // R(k) for k = 1..N_ZC-1
@@ -121,7 +125,7 @@ mod tests {
             for i in 0..n_zc {
                 rk += seq[i] * seq[(i + k) % n_zc].conj();
             }
-            
+
             assert!(rk.norm() < 1e-3, "R({}) should be 0, got {}", k, rk.norm());
         }
     }
@@ -137,7 +141,12 @@ mod tests {
             for i in 0..n_zc {
                 rk += seq[i] * seq[(i + k) % n_zc].conj();
             }
-            assert!(rk.norm() < 1e-3, "R({}) should be 0 for N_ZC=16, got {}", k, rk.norm());
+            assert!(
+                rk.norm() < 1e-3,
+                "R({}) should be 0 for N_ZC=16, got {}",
+                k,
+                rk.norm()
+            );
         }
     }
 
@@ -160,7 +169,12 @@ mod tests {
             }
             println!("SF={}: max_side_lobe={:.4}", sf, max_side_lobe);
             // 理想的なZC系列の自己相関サイドローブは0（計算誤差を考慮して非常に小さい値であるべき）
-            assert!(max_side_lobe < 1e-2, "SF={} side lobe too high: {:.4}", sf, max_side_lobe);
+            assert!(
+                max_side_lobe < 1e-2,
+                "SF={} side lobe too high: {:.4}",
+                sf,
+                max_side_lobe
+            );
         }
     }
 }

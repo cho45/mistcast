@@ -7,53 +7,56 @@ use std::sync::Arc;
 pub struct FrequencyDomainEqualizer {
     fft: Arc<dyn Fft<f32>>,
     ifft: Arc<dyn Fft<f32>>,
-    
+
     /// FFTサイズ (N)
     fft_size: usize,
-    
+
     /// 周波数領域でのMMSE等化重み W(k) (サイズは `fft_size`)
     /// 既に因果的FIRフィルタとして適切にウィンドウ処理され、FFTされた状態。
     weights: Vec<Complex<f32>>,
-    
+
     /// Overlap-Save法におけるオーバーラップ長 (L_eq - 1)
     overlap_len: usize,
-    
+
     /// 1ブロックの処理で消費する新規サンプルの数 (N - overlap_len)
     step_size: usize,
-    
+
     /// 因果的FIRフィルタ化によって生じる遅延サンプル数 (M)
     filter_delay: usize,
-    
+
     /// Overlap-Save法のための内部状態バッファ。
     /// 前回のブロックの末尾サンプルと新しい入力データを保持する。
     buffer: Vec<Complex<f32>>,
-    
+
     /// 出力時に先頭から破棄すべき残りサンプル数（フィルタ遅延の相殺用）
     samples_to_drop: usize,
-    
+
     /// これまでに入力されたトータルサンプル数
     total_input_samples: usize,
-    
+
     /// これまでに出力されたトータルサンプル数
     total_output_samples: usize,
-    
+
     /// `process` メソッド内でのゼロアロケーションを実現するための作業用バッファ
     scratch: Vec<Complex<f32>>,
 }
 
 impl FrequencyDomainEqualizer {
     /// FDEの初期化と重み W(k) の事前計算を行う。
-    /// 
+    ///
     /// # 引数
     /// * `cir` - プリアンブル等から推定されたチャネルインパルス応答。
     /// * `fft_size` - FFTのサイズ。効率のため、`fft_size >= cir.len() * 2` を満たす4の倍数（通常は2の冪乗）を強く推奨。
     /// * `snr_db` - 推定された信号対雑音比(dB)。MMSEの正則化項として働き、ノイズの過剰増幅を防ぐ。
-    /// 
+    ///
     /// # パニック
     /// * `fft_size` が `cir.len() * 2` 未満の場合、または4の倍数でない場合。
     pub fn new(cir: &[Complex<f32>], fft_size: usize, snr_db: f32) -> Self {
-        assert!(fft_size >= cir.len() * 2, "fft_size must be at least twice the CIR length");
-        assert!(fft_size % 4 == 0, "fft_size must be a multiple of 4");
+        assert!(
+            fft_size >= cir.len() * 2,
+            "fft_size must be at least twice the CIR length"
+        );
+        assert!(fft_size.is_multiple_of(4), "fft_size must be a multiple of 4");
 
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
@@ -62,7 +65,7 @@ impl FrequencyDomainEqualizer {
         // FIR等化フィルタの長さを決定
         let l_eq = fft_size / 2;
         let filter_delay = l_eq / 2;
-        
+
         let overlap_len = l_eq - 1;
         let step_size = fft_size - overlap_len;
         let buffer = vec![Complex::new(0.0, 0.0); overlap_len];
@@ -90,15 +93,18 @@ impl FrequencyDomainEqualizer {
     /// 新しいCIR（チャネルインパルス応答）とSNRを用いて等化器の重みを再計算し、状態をリセットする。
     /// インスタンス（特にFFTプラン等のヒープアロケーション）を使い回したまま、
     /// 新しいパケットの受信に備えることができる。
-    /// 
+    ///
     /// # 引数
     /// * `cir` - 新しいチャネルインパルス応答。長さは初期化時に指定した条件 (`fft_size >= cir.len() * 2`) を満たす必要がある。
     /// * `snr_db` - 推定された信号対雑音比(dB)。
-    /// 
+    ///
     /// # パニック
     /// * `cir.len() * 2 > fft_size` の場合。
     pub fn set_cir(&mut self, cir: &[Complex<f32>], snr_db: f32) {
-        assert!(self.fft_size >= cir.len() * 2, "CIR length is too large for the configured fft_size");
+        assert!(
+            self.fft_size >= cir.len() * 2,
+            "CIR length is too large for the configured fft_size"
+        );
 
         let l_eq = self.fft_size / 2;
 
@@ -120,7 +126,7 @@ impl FrequencyDomainEqualizer {
             }
         }
         self.ifft.process(&mut self.weights);
-        
+
         // IFFTの正規化
         let scale = 1.0 / (self.fft_size as f32);
         for x in &mut self.weights {
@@ -130,8 +136,10 @@ impl FrequencyDomainEqualizer {
         // 3. 長さ l_eq の因果的FIRフィルタの抽出
         // scratchを再度一時バッファとして利用して再配置を行う
         self.scratch.fill(Complex::new(0.0, 0.0));
-        self.scratch[..self.filter_delay].copy_from_slice(&self.weights[self.fft_size - self.filter_delay..]);
-        self.scratch[self.filter_delay..l_eq].copy_from_slice(&self.weights[..l_eq - self.filter_delay]);
+        self.scratch[..self.filter_delay]
+            .copy_from_slice(&self.weights[self.fft_size - self.filter_delay..]);
+        self.scratch[self.filter_delay..l_eq]
+            .copy_from_slice(&self.weights[..l_eq - self.filter_delay]);
 
         // 4. Overlap-Save用の重みとしてFFT
         self.weights.copy_from_slice(&self.scratch);
@@ -147,7 +155,9 @@ impl FrequencyDomainEqualizer {
 
     /// 任意の長さのストリーム入力サンプルを受け取り、等化処理を行う。
     /// 内部バッファにデータが蓄積され、ブロックサイズに達するごとに出力バッファへ追記される。
-    pub fn process(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) {
+    /// 返り値は、今回の呼び出しで出力バッファへ追記されたサンプルの総数。
+    pub fn process(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) -> usize {
+        let initial_output_len = output.len();
         self.total_input_samples += input.len();
         self.buffer.extend_from_slice(input);
 
@@ -160,7 +170,7 @@ impl FrequencyDomainEqualizer {
                 self.scratch[i] *= self.weights[i];
             }
             self.ifft.process(&mut self.scratch);
-            
+
             // IFFTの正規化
             let scale = 1.0 / (self.fft_size as f32);
             for x in &mut self.scratch {
@@ -185,6 +195,7 @@ impl FrequencyDomainEqualizer {
             // バッファを進める (step_size 分のデータを消費)
             self.buffer.drain(..self.step_size);
         }
+        output.len() - initial_output_len
     }
 
     /// ストリームの終端に達した際、内部に滞留しているサンプルを強制的に等化して出力する。
@@ -251,12 +262,22 @@ mod tests {
         fde.process(&input, &mut output);
         fde.flush(&mut output);
 
-        assert_eq!(input.len(), output.len(), "Input and output lengths must match exactly");
+        assert_eq!(
+            input.len(),
+            output.len(),
+            "Input and output lengths must match exactly"
+        );
 
         // FDEを通した結果は元の入力とほぼ一致するはず
         for i in 0..input.len() {
             let diff = (input[i] - output[i]).norm();
-            assert!(diff < 1e-4, "Mismatch at index {}: expected {}, got {}", i, input[i], output[i]);
+            assert!(
+                diff < 1e-4,
+                "Mismatch at index {}: expected {}, got {}",
+                i,
+                input[i],
+                output[i]
+            );
         }
     }
 
@@ -264,7 +285,11 @@ mod tests {
     fn test_delayed_channel() {
         // CIRが [0.0, 0.0, 1.0] のように遅延している場合
         // FDEは遅延を打ち消すように働くため、出力は時間軸が補正されて入力と一致するはず。
-        let cir = vec![Complex::new(0.0, 0.0), Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)];
+        let cir = vec![
+            Complex::new(0.0, 0.0),
+            Complex::new(0.0, 0.0),
+            Complex::new(1.0, 0.0),
+        ];
         let fft_size = 64;
         let mut fde = FrequencyDomainEqualizer::new(&cir, fft_size, 60.0);
 
@@ -284,11 +309,19 @@ mod tests {
 
         // 出力は元のインパルス位置 (index 10) に戻っているはず
         let diff = (output[10] - Complex::new(1.0, 0.0)).norm();
-        assert!(diff < 1e-4, "Peak not restored properly, expected 1.0, got {}", output[10]);
-        
+        assert!(
+            diff < 1e-4,
+            "Peak not restored properly, expected 1.0, got {}",
+            output[10]
+        );
+
         // それ以外の部分は0に近い
         let diff_other = output[12].norm();
-        assert!(diff_other < 1e-4, "Delayed peak should be removed, expected 0.0, got {}", output[12]);
+        assert!(
+            diff_other < 1e-4,
+            "Delayed peak should be removed, expected 0.0, got {}",
+            output[12]
+        );
     }
 
     #[test]
@@ -325,16 +358,26 @@ mod tests {
         for i in 0..tx_signal.len() {
             // FDEのFIRフィルタ近似とエッジ効果のため、パケットの極端な末尾などは誤差が出やすいが
             // 中央部分は非常に精度良く一致するはず。
-            if i < 80 { 
+            if i < 80 {
                 let diff = (tx_signal[i] - output[i]).norm();
-                assert!(diff < 1e-2, "Mismatch at index {}: expected {}, got {}", i, tx_signal[i], output[i]);
+                assert!(
+                    diff < 1e-2,
+                    "Mismatch at index {}: expected {}, got {}",
+                    i,
+                    tx_signal[i],
+                    output[i]
+                );
             }
         }
     }
 
     #[test]
     fn test_stream_continuity_and_chunking() {
-        let cir = vec![Complex::new(1.0, 0.0), Complex::new(-0.8, 0.0), Complex::new(0.4, 0.0)];
+        let cir = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(-0.8, 0.0),
+            Complex::new(0.4, 0.0),
+        ];
         let fft_size = 128;
         let mut fde_bulk = FrequencyDomainEqualizer::new(&cir, fft_size, 30.0);
         let mut fde_chunked = FrequencyDomainEqualizer::new(&cir, fft_size, 30.0);
@@ -370,12 +413,22 @@ mod tests {
         }
         fde_chunked.flush(&mut chunked_output);
 
-        assert_eq!(bulk_output.len(), chunked_output.len(), "Lengths must match");
-        
+        assert_eq!(
+            bulk_output.len(),
+            chunked_output.len(),
+            "Lengths must match"
+        );
+
         // チャンク処理と一括処理の結果が数学的に完全に一致することを証明
         for i in 0..bulk_output.len() {
             let diff = (bulk_output[i] - chunked_output[i]).norm();
-            assert!(diff < 1e-5, "Mismatch between bulk and chunked at {}: {} vs {}", i, bulk_output[i], chunked_output[i]);
+            assert!(
+                diff < 1e-5,
+                "Mismatch between bulk and chunked at {}: {} vs {}",
+                i,
+                bulk_output[i],
+                chunked_output[i]
+            );
         }
     }
 
@@ -385,7 +438,7 @@ mod tests {
         let mut cir = vec![Complex::new(0.0, 0.0); 16];
         cir[0] = Complex::new(1.0, 0.0);
         cir[15] = Complex::new(0.8, 0.0); // 強い遅延波
-        
+
         let fft_size = 64;
         let mut fde = FrequencyDomainEqualizer::new(&cir, fft_size, 40.0);
 
@@ -410,10 +463,16 @@ mod tests {
 
         // エコーが綺麗に消去され、元のインパルスだけが残るか確認
         assert!((output[20] - Complex::new(1.0, 0.0)).norm() < 1e-2);
-        assert!((output[35] - Complex::new(0.0, 0.0)).norm() < 1e-2, "Echo at 35 not cancelled");
-        
+        assert!(
+            (output[35] - Complex::new(0.0, 0.0)).norm() < 1e-2,
+            "Echo at 35 not cancelled"
+        );
+
         assert!((output[40] - Complex::new(-1.0, 0.0)).norm() < 1e-2);
-        assert!((output[55] - Complex::new(0.0, 0.0)).norm() < 1e-2, "Echo at 55 not cancelled");
+        assert!(
+            (output[55] - Complex::new(0.0, 0.0)).norm() < 1e-2,
+            "Echo at 55 not cancelled"
+        );
     }
 
     #[test]
@@ -428,8 +487,15 @@ mod tests {
         fde.process(&input, &mut output);
         fde.flush(&mut output);
 
-        assert_eq!(output.len(), 1, "Output length must exactly match input length even for 1 sample");
-        assert!((output[0] - input[0]).norm() < 1e-4, "The single sample must be correctly preserved");
+        assert_eq!(
+            output.len(),
+            1,
+            "Output length must exactly match input length even for 1 sample"
+        );
+        assert!(
+            (output[0] - input[0]).norm() < 1e-4,
+            "The single sample must be correctly preserved"
+        );
     }
 
     #[test]
@@ -439,13 +505,16 @@ mod tests {
         let mut fde_normal = FrequencyDomainEqualizer::new(&cir, fft_size, 40.0);
         let mut fde_scaled = FrequencyDomainEqualizer::new(&cir, fft_size, 40.0);
 
-        let input_normal = vec![Complex::new(1.0, -1.0), Complex::new(-0.5, 0.5), Complex::new(0.0, 1.0)];
-        
+        let input_normal = vec![
+            Complex::new(1.0, -1.0),
+            Complex::new(-0.5, 0.5),
+            Complex::new(0.0, 1.0),
+        ];
+
         // 信号の振幅を100倍にする
         let scale_factor = 100.0;
-        let input_scaled: Vec<Complex<f32>> = input_normal.iter()
-            .map(|x| *x * scale_factor)
-            .collect();
+        let input_scaled: Vec<Complex<f32>> =
+            input_normal.iter().map(|x| *x * scale_factor).collect();
 
         let mut out_normal = Vec::new();
         fde_normal.process(&input_normal, &mut out_normal);
@@ -461,12 +530,42 @@ mod tests {
         for i in 0..out_normal.len() {
             let expected = out_normal[i] * scale_factor;
             let diff = (expected - out_scaled[i]).norm();
-            
+
             // F32の計算誤差を考慮して相対誤差で評価する
             let relative_error = diff / expected.norm().max(1e-10);
-            assert!(relative_error < 1e-4, 
-                "Scale invariance failed at index {}: expected {}, got {} (relative error: {})", 
-                i, expected, out_scaled[i], relative_error);
+            assert!(
+                relative_error < 1e-4,
+                "Scale invariance failed at index {}: expected {}, got {} (relative error: {})",
+                i,
+                expected,
+                out_scaled[i],
+                relative_error
+            );
         }
+    }
+
+    #[test]
+    fn test_process_returns_added_count() {
+        let cir = vec![Complex::new(1.0, 0.0)];
+        let fft_size = 64;
+        let mut fde = FrequencyDomainEqualizer::new(&cir, fft_size, 60.0);
+        let overlap = fde.overlap_len();
+        let step = fft_size - overlap;
+
+        let mut output = Vec::new();
+
+        // 最初の投入: fft_size に満たない場合は 0 が返るはず
+        let count1 = fde.process(&vec![Complex::new(1.0, 0.0); 10], &mut output);
+        assert_eq!(count1, 0);
+        assert_eq!(output.len(), 0);
+
+        // fft_size を超えるように投入: 最初のブロックが処理される
+        // ただし、初回は filter_delay 分が samples_to_drop で削られる
+        let needed = fft_size - 10;
+        let count2 = fde.process(&vec![Complex::new(1.0, 0.0); needed], &mut output);
+
+        let expected_first_block = (fft_size - overlap).saturating_sub(fde.filter_delay());
+        assert_eq!(count2, expected_first_block);
+        assert_eq!(output.len(), expected_first_block);
     }
 }

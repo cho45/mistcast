@@ -998,7 +998,11 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         None
     };
     let raw_ber = m.raw_ber();
-    let raw_ber_str = if raw_ber.is_nan() { "NaN".to_string() } else { format!("{raw_ber:.6}") };
+    let raw_ber_str = if raw_ber.is_nan() {
+        "NaN".to_string()
+    } else {
+        format!("{raw_ber:.6}")
+    };
     println!(
         "{scenario},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{:.2},{},{},{}",
         cli.phy,

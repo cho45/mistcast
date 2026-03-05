@@ -16,9 +16,9 @@ pub struct SyncResult {
 
 pub struct MarySyncDetector {
     config: DspConfig,
-    preamble_pn: Vec<Complex32>,  // Zadoff-Chu SF=13
-    sync_pn: Vec<f32>,            // Walsh[0] SF=15
-    sync_symbols: Vec<f32>,       // プリアンブル構造 + SYNC_WORD
+    preamble_pn: Vec<Complex32>, // Zadoff-Chu SF=13
+    sync_pn: Vec<f32>,           // Walsh[0] SF=15
+    sync_symbols: Vec<f32>,      // プリアンブル構造 + SYNC_WORD
     preamble_sf: usize,
     sync_sf: usize,
     spc: usize,
@@ -43,7 +43,11 @@ impl MarySyncDetector {
         let preamble_pn = zc.generate_sequence();
 
         let wdict = crate::common::walsh::WalshDictionary::default_w16();
-        let sync_pn: Vec<f32> = wdict.w16[0].iter().take(sync_sf).map(|&x| x as f32).collect();
+        let sync_pn: Vec<f32> = wdict.w16[0]
+            .iter()
+            .take(sync_sf)
+            .map(|&x| x as f32)
+            .collect();
 
         let preamble_sym_len = preamble_sf * spc;
         let sync_sym_len = sync_sf * spc;
@@ -64,7 +68,7 @@ impl MarySyncDetector {
 
         // Sync Word bits (16 bits)
         // Modulator.encode_frame: maintains its own prev_phase (reset to 0 at start)
-        let mut current_phase_factor = 1.0; 
+        let mut current_phase_factor = 1.0;
         let word = crate::params::SYNC_WORD;
         for i in 0..config.sync_word_bits {
             let bit = (word >> (config.sync_word_bits - 1 - i)) & 1;
@@ -130,8 +134,7 @@ impl MarySyncDetector {
                     let mut fine_best_idx = n;
                     let mut last_sym_iq = (0.0, 0.0);
                     for fn_idx in f_start..=f_end {
-                        let (f_score, f_iq) =
-                            self.score_candidate(i_ch, q_ch, fn_idx, unified_len);
+                        let (f_score, f_iq) = self.score_candidate(i_ch, q_ch, fn_idx, unified_len);
                         if f_score >= fine_best_score {
                             fine_best_score = f_score;
                             fine_best_idx = fn_idx;
@@ -187,13 +190,19 @@ impl MarySyncDetector {
     }
 
     /// 1シンボル分だけの相関を計算
-    fn correlate_one_symbol(&self, i_ch: &[f32], q_ch: &[f32], offset: usize, is_preamble: bool) -> (f32, f32, f32) {
+    fn correlate_one_symbol(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        offset: usize,
+        is_preamble: bool,
+    ) -> (f32, f32, f32) {
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         let mut sum_en = 0.0f32;
 
         let mut p = offset + (self.spc / 2);
-        
+
         if is_preamble {
             for val in &self.preamble_pn {
                 debug_assert!(p < i_ch.len() && p < q_ch.len());
@@ -237,7 +246,7 @@ impl MarySyncDetector {
         let mut last_ci = 0.0f32;
         let mut last_cq = 0.0f32;
         let mut last_mag = 0.0f32;
-        
+
         let mut current_offset = n;
 
         for rep in 0..num_symbols {
@@ -245,7 +254,11 @@ impl MarySyncDetector {
             let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, current_offset, is_preamble);
             let mag2 = ci * ci + cq * cq;
             let mag = mag2.sqrt();
-            let sf = if is_preamble { self.preamble_sf } else { self.sync_sf };
+            let sf = if is_preamble {
+                self.preamble_sf
+            } else {
+                self.sync_sf
+            };
 
             let rho_p_sym = if en > 1e-9 {
                 mag2 / (sf as f32 * en)
@@ -272,8 +285,12 @@ impl MarySyncDetector {
             last_ci = ci;
             last_cq = cq;
             last_mag = mag;
-            
-            let sym_len = if is_preamble { self.preamble_sym_len } else { self.sync_sym_len };
+
+            let sym_len = if is_preamble {
+                self.preamble_sym_len
+            } else {
+                self.sync_sym_len
+            };
             current_offset += sym_len;
         }
 
@@ -301,15 +318,70 @@ impl MarySyncDetector {
         if out.is_empty() {
             return;
         }
+        let repeat = self.config.preamble_repeat.max(1);
         let sf = self.preamble_sf;
-        // バッファ長が sf 未満の場合はその分だけ、sf 以上の場合は sf 分までを基本とするが、
-        // 呼び出し側がマルチパスの最大遅延を考慮して sf 以上を要求する場合もあり得る。
-        for d in 0..out.len() {
-            if n + d * self.spc >= i_ch.len() {
-                break;
+        let preamble_sym_len = self.preamble_sym_len;
+
+        // プリアンブル反復間の位相差から CFO (rad/sample) を推定する。
+        // sync_symbols の preamble 部分は [+, ..., -] の符号を持つため、符号補償後に位相差を取る。
+        let mut cfo_rad_per_sample = 0.0f32;
+        if repeat >= 2 {
+            let mut sum = 0.0f32;
+            let mut count = 0usize;
+            for rep in 1..repeat {
+                let prev_off = n + (rep - 1) * preamble_sym_len;
+                let curr_off = n + rep * preamble_sym_len;
+                if curr_off + (sf - 1) * self.spc >= i_ch.len()
+                    || curr_off + (sf - 1) * self.spc >= q_ch.len()
+                {
+                    break;
+                }
+                let (pi, pq, _) = self.correlate_one_symbol(i_ch, q_ch, prev_off, true);
+                let (ci, cq, _) = self.correlate_one_symbol(i_ch, q_ch, curr_off, true);
+                let prev_sign = self.sync_symbols.get(rep - 1).copied().unwrap_or(1.0);
+                let curr_sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
+                let prev_c = Complex32::new(pi, pq) * Complex32::new(prev_sign, 0.0);
+                let curr_c = Complex32::new(ci, cq) * Complex32::new(curr_sign, 0.0);
+                let dphi = (curr_c * prev_c.conj()).arg();
+                sum += dphi / preamble_sym_len as f32;
+                count += 1;
             }
-            let (ci, cq, _) = self.correlate_one_symbol(i_ch, q_ch, n + d * self.spc, true);
-            out[d] = Complex32::new(ci, cq) / sf as f32;
+            if count > 0 {
+                cfo_rad_per_sample = sum / count as f32;
+            }
+        }
+
+        for (d, out_val) in out.iter_mut().enumerate() {
+            let mut sum = Complex32::new(0.0, 0.0);
+            let mut used = 0usize;
+
+            for rep in 0..repeat {
+                let rep_start = n + rep * preamble_sym_len;
+                let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
+                let sign_c = Complex32::new(sign, 0.0);
+                for k in 0..sf {
+                    let p = rep_start + d + k * self.spc;
+                    if p >= i_ch.len() || p >= q_ch.len() {
+                        break;
+                    }
+                    let val = self.preamble_pn[k] * sign_c;
+                    let sig = Complex32::new(i_ch[p], q_ch[p]);
+                    let mut corr = sig * val.conj();
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (rep * preamble_sym_len + k * self.spc) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        corr *= Complex32::new(c, s);
+                    }
+                    sum += corr;
+                    used += 1;
+                }
+            }
+            *out_val = if used > 0 {
+                sum / used as f32
+            } else {
+                Complex32::new(0.0, 0.0)
+            };
         }
     }
 
@@ -411,7 +483,8 @@ mod tests {
         assert!(
             sync.peak_sample_idx >= preamble_len,
             "Peak should be after preamble: detected={}, preamble_len={}",
-            sync.peak_sample_idx, preamble_len
+            sync.peak_sample_idx,
+            preamble_len
         );
         assert!(sync.score > detector.threshold_fine);
     }
@@ -455,8 +528,16 @@ mod tests {
                         detector.correlate_one_symbol(i, q, current_offset, is_preamble);
                     let mag2 = ci * ci + cq * cq;
                     let mag = mag2.sqrt();
-                    let sf = if is_preamble { detector.preamble_sf } else { detector.sync_sf };
-                    total_rho_p += if en > 1e-9 { mag2 / (sf as f32 * en) } else { 0.0 };
+                    let sf = if is_preamble {
+                        detector.preamble_sf
+                    } else {
+                        detector.sync_sf
+                    };
+                    total_rho_p += if en > 1e-9 {
+                        mag2 / (sf as f32 * en)
+                    } else {
+                        0.0
+                    };
                     if rep > 0 && last_mag > 1e-9 && mag > 1e-9 {
                         let re = last_ci * ci + last_cq * cq;
                         let im = last_ci * cq - last_cq * ci;
@@ -468,7 +549,11 @@ mod tests {
                     last_ci = ci;
                     last_cq = cq;
                     last_mag = mag;
-                    let sym_len = if is_preamble { detector.preamble_sym_len } else { detector.sync_sym_len };
+                    let sym_len = if is_preamble {
+                        detector.preamble_sym_len
+                    } else {
+                        detector.sync_sym_len
+                    };
                     current_offset += sym_len;
                 }
                 let rho_p = total_rho_p / unified_len as f32;
@@ -690,7 +775,9 @@ mod tests {
 
                 // ピーク周辺(-20..+20)を探して最大スコアを取る
                 let mut best_score = 0.0f32;
-                for offset in (signal_start_in_proc.saturating_sub(20))..=(signal_start_in_proc + 20) {
+                for offset in
+                    (signal_start_in_proc.saturating_sub(20))..=(signal_start_in_proc + 20)
+                {
                     if offset + required_len <= i.len() {
                         let (score, _) =
                             det_ref.score_candidate(&i, &q, offset, total_symbols_for_fine);
@@ -798,7 +885,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_score_candidate_mathematical_verification() {
         let config = DspConfig::default_48k();
@@ -888,8 +974,12 @@ mod tests {
                 let mut current_offset = 0;
                 for rep in 0..repeat {
                     let is_preamble = rep < config.preamble_repeat;
-                    let (ci, cq, en) =
-                        detector.correlate_one_symbol(&i_noise, &q_noise, current_offset, is_preamble);
+                    let (ci, cq, en) = detector.correlate_one_symbol(
+                        &i_noise,
+                        &q_noise,
+                        current_offset,
+                        is_preamble,
+                    );
                     let sf = if is_preamble {
                         detector.preamble_sf
                     } else {
@@ -897,8 +987,12 @@ mod tests {
                     };
                     let rho_p_sym = (ci * ci + cq * cq) / (sf as f32 * en);
                     total_rho_p += rho_p_sym;
-                    
-                    let sym_len = if is_preamble { detector.preamble_sym_len } else { detector.sync_sym_len };
+
+                    let sym_len = if is_preamble {
+                        detector.preamble_sym_len
+                    } else {
+                        detector.sync_sym_len
+                    };
                     current_offset += sym_len;
                 }
                 let rho_p = total_rho_p / repeat as f32;
@@ -1010,18 +1104,19 @@ mod tests {
     fn test_sync_sf_sweep() {
         for sf in [13, 31, 63, 127] {
             let mut config = DspConfig::default_48k();
-            // test downsampling behavior 
+            // test downsampling behavior
             config.preamble_sf = sf;
-            
+
             let mut modulator = Modulator::new(config.clone());
             let mut frame = modulator.encode_frame(&[]);
             // フィルタ遅延によって波形が後ろにズレるため、受信十分なマージン（無音）を追加する
             frame.extend(vec![0.0; 4000]);
             let (i_ch, q_ch) = simulate_rx_frontend(&frame, &config);
-            
+
             let detector = MarySyncDetector::new(config.clone(), 0.15, 0.18);
-            
-            let required_len = (sf * config.preamble_repeat + 15 * config.sync_word_bits) * config.proc_samples_per_chip();
+
+            let required_len = (sf * config.preamble_repeat + 15 * config.sync_word_bits)
+                * config.proc_samples_per_chip();
             assert!(i_ch.len() > required_len, "i_ch not large enough");
             let mut sync_found = None;
             for offset in 0..(i_ch.len() - required_len) {
@@ -1031,42 +1126,59 @@ mod tests {
                     break;
                 }
             }
-            
+
             if sync_found.is_none() {
                 // 最大スコアを全範囲で探してデバッグ出力
                 let mut max_score = 0.0f32;
                 let mut max_idx = 0;
                 for offset in 0..(i_ch.len() - required_len) {
-                    let (score, _) = detector.score_candidate(&i_ch, &q_ch, offset, config.preamble_repeat + config.sync_word_bits);
+                    let (score, _) = detector.score_candidate(
+                        &i_ch,
+                        &q_ch,
+                        offset,
+                        config.preamble_repeat + config.sync_word_bits,
+                    );
                     if score > max_score {
                         max_score = score;
                         max_idx = offset;
                     }
                 }
-                println!("  SF={} sync failed. Max manual score was {:.4} at offset {}", sf, max_score, max_idx);
+                println!(
+                    "  SF={} sync failed. Max manual score was {:.4} at offset {}",
+                    sf, max_score, max_idx
+                );
             }
 
             assert!(sync_found.is_some(), "Sync failed for SF={}", sf);
             let result = sync_found.unwrap();
-            println!("SF={}: score={:.4}, idx={}", sf, result.score, result.peak_sample_idx);
-            assert!(result.score > 0.8, "Score too low for SF={}: {}", sf, result.score);
+            println!(
+                "SF={}: score={:.4}, idx={}",
+                sf, result.score, result.peak_sample_idx
+            );
+            assert!(
+                result.score > 0.8,
+                "Score too low for SF={}: {}",
+                sf,
+                result.score
+            );
         }
     }
-
 
     #[test]
     fn test_estimate_cir_simple_multipath() {
         let sf = 31;
         let mut config = DspConfig::default_48k();
         config.preamble_sf = sf;
-        
+
         let mut modulator = Modulator::new(config.clone());
         let mut frame = modulator.encode_frame(&[]);
         frame.extend(vec![0.0; 4000]);
 
         // まずマルチパスをパスバンドでかける（本当はベースバンドでも良いが、モジュレータ出力はパスバンド）
         let mut multipath_frame = frame.clone();
-        let delay_samples = 5 * config.proc_samples_per_chip() * (config.sample_rate / config.proc_sample_rate()) as usize;
+        let delay_samples = 5
+            * config.proc_samples_per_chip()
+            * (config.sample_rate / config.proc_sample_rate()) as usize;
         // 位相がどう回るかは複雑なのでここでは単純なゲイン減衰だけにする
         let gain = 0.5f32;
         for t in delay_samples..frame.len() {
@@ -1081,23 +1193,91 @@ mod tests {
         let sync_res = res.unwrap();
 
         let spc = config.proc_samples_per_chip();
-        let sync_idx = sync_res.peak_sample_idx.saturating_sub(sf * config.preamble_repeat * spc).saturating_sub(spc / 2);
-        let mut est_cir = vec![Complex32::new(0.0, 0.0); sf];
+        let sync_idx = sync_res
+            .peak_sample_idx
+            .saturating_sub(sf * config.preamble_repeat * spc)
+            .saturating_sub(spc / 2);
+
+        // サンプル解像度のCIRを期待して、チップ数 * spc 分のバッファを用意
+        let mut est_cir = vec![Complex32::new(0.0, 0.0); sf * spc];
         detector.estimate_cir(&i_ch, &q_ch, sync_idx, &mut est_cir);
 
         // 第0タップで正規化（位相回転も補正）
         let ref_val = est_cir[0];
         for val in est_cir.iter_mut() {
-            *val /= ref_val;
+            if ref_val.norm() > 1e-9 {
+                *val /= ref_val;
+            }
         }
 
         println!("Estimated CIR (normalized by Tap 0):");
-        for (i, val) in est_cir.iter().enumerate().take(10) {
-            println!("  [{}] {:.4} + {:.4}j (mag={:.4})", i, val.re, val.im, val.norm());
+        for (i, val) in est_cir.iter().enumerate().take(20) {
+            println!(
+                "  [{}] {:.4} + {:.4}j (mag={:.4})",
+                i,
+                val.re,
+                val.im,
+                val.norm()
+            );
         }
 
         assert!((est_cir[0].re - 1.0).abs() < 0.1);
         assert!((est_cir[0].im).abs() < 0.1);
-        assert!((est_cir[5].norm() - 0.5).abs() < 0.1, "Failed to estimate 0.5 magnitude tap at index 5");
+
+        // 5チップ遅延 = 5 * spc サンプル遅延の位置にピークがあるはず
+        let expected_sample_idx = 5 * spc;
+        assert!(
+            (est_cir[expected_sample_idx].norm() - 0.5).abs() < 0.1,
+            "Failed to estimate 0.5 magnitude tap at sample index {}",
+            expected_sample_idx
+        );
+    }
+
+    #[test]
+    fn test_estimate_cir_pure_unit() {
+        let sf = 13;
+        let spc = 3;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = sf;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        // 1. ZC系列をベースに、理想的なマルチパス信号を作成
+        let signal_len = sf * spc + 20;
+        let mut i_ch = vec![0.0f32; signal_len];
+        let mut q_ch = vec![0.0f32; signal_len];
+
+        // メインパス (idx=0)
+        let zc = &detector.preamble_pn;
+        for k in 0..sf {
+            i_ch[k * spc] = zc[k].re;
+            q_ch[k * spc] = zc[k].im;
+        }
+
+        // 遅延パス (idx=1 に 0.7 倍の強度で重畳)
+        let alpha = 0.7f32;
+        for k in 0..sf {
+            i_ch[1 + k * spc] += zc[k].re * alpha;
+            q_ch[1 + k * spc] += zc[k].im * alpha;
+        }
+
+        // 2. CIR 推定
+        let mut est_cir = vec![Complex32::new(0.0, 0.0); 5];
+        detector.estimate_cir(&i_ch, &q_ch, 0, &mut est_cir);
+
+        println!("Pure Unit Test CIR:");
+        for (i, val) in est_cir.iter().enumerate() {
+            println!(
+                "  [{}] {:.4} + {:.4}j (mag={:.4})",
+                i,
+                val.re,
+                val.im,
+                val.norm()
+            );
+        }
+
+        // 3. 検証: 理想的な環境なので、誤差なく抽出できるはず
+        assert!((est_cir[0].norm() - 1.0).abs() < 1e-5, "Main tap error");
+        assert!((est_cir[1].norm() - 0.7).abs() < 1e-5, "Delayed tap error");
+        assert!(est_cir[2].norm() < 1e-5, "Ghost tap at idx 2");
     }
 }
