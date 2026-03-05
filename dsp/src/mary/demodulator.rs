@@ -1332,7 +1332,8 @@ mod tests {
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0], DQPSK 00
 
         // encode_frameで完全な信号生成（RRC、リサンプル、キャリア変調含む）
-        let frame = modulator.encode_frame(&bits);
+        let mut frame = Vec::new();
+        modulator.encode_frame(&bits, &mut frame);
 
         // 出力信号は十分な長さを持つ
         assert!(
@@ -1384,7 +1385,8 @@ mod tests {
             0, 0, 1, 0, 1, 1, // Walsh[2], DQPSK 11
         ];
 
-        let frame = modulator.encode_frame(&bits);
+        let mut frame = Vec::new();
+        modulator.encode_frame(&bits, &mut frame);
 
         // 3シンボル分の信号が生成されている
         assert!(

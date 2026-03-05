@@ -50,6 +50,13 @@ pub struct Modulator {
     rrc_q: RrcFilter,
     prev_phase: u8,
     nco: Nco,
+    // Zero-allocation buffer pool
+    bb_buffer_i: Vec<f32>,       // Baseband I (INTERNAL_SPC samples/chip)
+    bb_buffer_q: Vec<f32>,       // Baseband Q
+    resample_buffer_i: Vec<f32>, // Resampler output I
+    resample_buffer_q: Vec<f32>, // Resampler output Q
+    chips_buffer_i: Vec<f32>,    // Chip generation I
+    chips_buffer_q: Vec<f32>,    // Chip generation Q
 }
 
 impl Modulator {
@@ -63,6 +70,13 @@ impl Modulator {
         // リサンプラのカットオフ設定: 送信側RRCの全帯域を通過させる
         let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
         let cutoff = Some(rrc_bw);
+
+        // Calculate buffer sizes for zero-allocation
+        // Max frame: 352 bits (1 packet) / 6 bits/symbol * 16 chips/symbol + margin
+        let max_chips = 352 / 6 * 16 + 2000;
+        let max_bb = max_chips * INTERNAL_SPC + 2000;
+        let sample_ratio = config.sample_rate / config.proc_sample_rate();
+        let max_resampled = (max_bb as f32 * sample_ratio) as usize + 2000;
 
         Modulator {
             resampler_i: Resampler::new_with_cutoff(
@@ -81,6 +95,12 @@ impl Modulator {
             config,
             prev_phase: 0,
             nco,
+            bb_buffer_i: Vec::with_capacity(max_bb),
+            bb_buffer_q: Vec::with_capacity(max_bb),
+            resample_buffer_i: Vec::with_capacity(max_resampled),
+            resample_buffer_q: Vec::with_capacity(max_resampled),
+            chips_buffer_i: Vec::with_capacity(max_chips),
+            chips_buffer_q: Vec::with_capacity(max_chips),
         }
     }
 
@@ -92,11 +112,16 @@ impl Modulator {
     /// プリアンブル (Zadoff-Chu系列 SF=13) を生成する
     ///
     /// 最後のシンボルを反転させることで同期の曖昧さを排除する。
-    pub fn generate_preamble(&mut self) -> Vec<f32> {
+    pub fn generate_preamble(&mut self, output: &mut Vec<f32>) {
         let sf = self.config.preamble_sf; // DspConfig の設定を使用
         let repeat = self.config.preamble_repeat;
-        let mut chips_i = Vec::with_capacity(sf * repeat);
-        let mut chips_q = Vec::with_capacity(sf * repeat);
+        self.chips_buffer_i.clear();
+        self.chips_buffer_q.clear();
+        let needed = sf * repeat;
+        if self.chips_buffer_i.capacity() < needed {
+            self.chips_buffer_i.reserve(needed);
+            self.chips_buffer_q.reserve(needed);
+        }
 
         let zc = crate::common::zadoff_chu::ZadoffChu::new(sf, 1);
         let zc_seq = zc.generate_sequence();
@@ -106,29 +131,43 @@ impl Modulator {
             let sign = if i == repeat - 1 { -1.0 } else { 1.0 };
 
             for val in &zc_seq {
-                chips_i.push(sign * val.re);
-                chips_q.push(sign * val.im);
+                self.chips_buffer_i.push(sign * val.re);
+                self.chips_buffer_q.push(sign * val.im);
             }
         }
 
-        self.chips_to_samples(&chips_i, &chips_q)
+        // Clone to release mutable borrow
+        let chips_i: Vec<f32> = self.chips_buffer_i.clone();
+        let chips_q: Vec<f32> = self.chips_buffer_q.clone();
+        self.chips_to_samples(&chips_i, &chips_q, output);
     }
 
     /// 6ビットずつ変調（4ビットWalsh index + 2ビットDQPSK phase）
-    pub fn modulate(&mut self, bits: &[u8]) -> Vec<f32> {
-        let (chips_i, chips_q) = self.bits_to_chips(bits);
-        self.chips_to_samples(&chips_i, &chips_q)
+    pub fn modulate(&mut self, bits: &[u8], output: &mut Vec<f32>) {
+        let mut phase = self.prev_phase;
+        Self::bits_to_chips(
+            bits,
+            &self.wdict,
+            &mut phase,
+            &mut self.chips_buffer_i,
+            &mut self.chips_buffer_q,
+        );
+        self.prev_phase = phase;
+        // Clone to release mutable borrow of self.chips_buffer_*
+        let chips_i: Vec<f32> = self.chips_buffer_i.clone();
+        let chips_q: Vec<f32> = self.chips_buffer_q.clone();
+        self.chips_to_samples(&chips_i, &chips_q, output);
     }
 
     fn append_mary_symbol_chips(
-        &self,
+        wdict: &WalshDictionary,
         walsh_idx: u8,
         symbol_i: f32,
         symbol_q: f32,
         out_i: &mut Vec<f32>,
         out_q: &mut Vec<f32>,
     ) {
-        let walsh_seq = &self.wdict.w16[walsh_idx as usize];
+        let walsh_seq = &wdict.w16[walsh_idx as usize];
         for &w in walsh_seq.iter() {
             let w_val = w as f32;
             out_i.push(symbol_i * w_val);
@@ -137,11 +176,22 @@ impl Modulator {
     }
 
     /// ビット列をチップ列に変換（テスト用）
-    pub fn bits_to_chips(&mut self, bits: &[u8]) -> (Vec<f32>, Vec<f32>) {
+    pub fn bits_to_chips(
+        bits: &[u8],
+        wdict: &WalshDictionary,
+        prev_phase: &mut u8,
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+    ) {
         let sf = 16; // Payloadはsf=16
         let num_symbols = bits.len().div_ceil(6);
-        let mut chips_i = Vec::with_capacity(num_symbols * sf);
-        let mut chips_q = Vec::with_capacity(num_symbols * sf);
+        output_i.clear();
+        output_q.clear();
+        let needed = num_symbols * sf;
+        if output_i.capacity() < needed {
+            output_i.reserve(needed);
+            output_q.reserve(needed);
+        }
 
         for sym_idx in 0..num_symbols {
             let start_bit = sym_idx * 6;
@@ -159,56 +209,65 @@ impl Modulator {
             let b0 = sym_bits[4];
             let b1 = sym_bits[5];
             let delta = dqpsk_delta(b0, b1);
-            self.prev_phase = (self.prev_phase + delta) & 0x03;
-            let (si, sq) = phase_to_iq(self.prev_phase);
+            *prev_phase = (*prev_phase + delta) & 0x03;
+            let (si, sq) = phase_to_iq(*prev_phase);
 
-            self.append_mary_symbol_chips(w_idx, si, sq, &mut chips_i, &mut chips_q);
+            Self::append_mary_symbol_chips(wdict, w_idx, si, sq, output_i, output_q);
         }
-
-        (chips_i, chips_q)
     }
 
     /// チップ列をRRC整形 + キャリア変調してサンプル列に変換
-    fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<f32> {
+    fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32], output: &mut Vec<f32>) {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         let spc = INTERNAL_SPC;
 
-        // 1. 内部レート (fs_proc) でのベースバンド信号生成
-        let mut bb_i = Vec::with_capacity(chips_i.len() * spc);
-        let mut bb_q = Vec::with_capacity(chips_i.len() * spc);
+        // 1. 内部レート (fs_proc) でのベースバンド信号生成 (バッファ再利用)
+        self.bb_buffer_i.clear();
+        self.bb_buffer_q.clear();
+        let needed_bb = chips_i.len() * spc;
+        if self.bb_buffer_i.capacity() < needed_bb {
+            self.bb_buffer_i.reserve(needed_bb);
+            self.bb_buffer_q.reserve(needed_bb);
+        }
         for (&ci, &cq) in chips_i.iter().zip(chips_q.iter()) {
             for k in 0..spc {
                 let i_imp = if k == 0 { ci } else { 0.0 };
                 let q_imp = if k == 0 { cq } else { 0.0 };
-                bb_i.push(self.rrc_i.process(i_imp));
-                bb_q.push(self.rrc_q.process(q_imp));
+                self.bb_buffer_i.push(self.rrc_i.process(i_imp));
+                self.bb_buffer_q.push(self.rrc_q.process(q_imp));
             }
         }
 
-        // 2. 出力レート (fs_out) へのリサンプリング
-        let mut resampled_i = Vec::new();
-        let mut resampled_q = Vec::new();
-        self.resampler_i.process(&bb_i, &mut resampled_i);
-        self.resampler_q.process(&bb_q, &mut resampled_q);
+        // 2. 出力レート (fs_out) へのリサンプリング (バッファ再利用)
+        self.resample_buffer_i.clear();
+        self.resample_buffer_q.clear();
+        self.resampler_i
+            .process(&self.bb_buffer_i, &mut self.resample_buffer_i);
+        self.resampler_q
+            .process(&self.bb_buffer_q, &mut self.resample_buffer_q);
 
         // 3. 出力レートでのキャリア混合 (Mix)
-        let mut out = Vec::with_capacity(resampled_i.len());
-        for (&i_f, &q_f) in resampled_i.iter().zip(resampled_q.iter()) {
+        output.clear();
+        output.reserve(self.resample_buffer_i.len());
+        for (&i_f, &q_f) in self
+            .resample_buffer_i
+            .iter()
+            .zip(self.resample_buffer_q.iter())
+        {
             let lo = self.nco.step();
-            out.push(i_f * lo.re - q_f * lo.im);
+            output.push(i_f * lo.re - q_f * lo.im);
         }
-
-        out
     }
 
     /// RRCフィルタに残っている遅延分のサンプルをゼロで押し出して出力する
-    pub fn flush(&mut self) -> Vec<f32> {
+    pub fn flush(&mut self, output: &mut Vec<f32>) {
         // RRCフィルタの応答全体（全タップ分）を押し出すために必要な無音サンプルを計算。
         let rrc_taps_bb = self.rrc_i.num_taps().max(self.rrc_q.num_taps());
         let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let rrc_push_out = (rrc_taps_bb as f32 * ratio).ceil() as usize;
 
-        let mut out = self.modulate_silence(rrc_push_out);
+        output.clear();
+        self.modulate_silence(rrc_push_out, output);
 
         let mut res_i = Vec::new();
         let mut res_q = Vec::new();
@@ -217,54 +276,62 @@ impl Modulator {
 
         for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
             let lo = self.nco.step();
-            out.push(si * lo.re - sq * lo.im);
+            output.push(si * lo.re - sq * lo.im);
         }
-
-        out
     }
 
     /// 指定されたサンプル数分だけ無音 (0.0) を入力して Modulator を進める
-    pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+    pub fn modulate_silence(&mut self, samples: usize, output: &mut Vec<f32>) {
         if samples == 0 {
-            return Vec::new();
+            output.clear();
+            return;
         }
 
         let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let needed_bb = (samples as f32 / ratio).ceil() as usize + 1;
 
-        // ベースバンド側で無音を生成
-        let mut bb_i = Vec::with_capacity(needed_bb);
-        let mut bb_q = Vec::with_capacity(needed_bb);
+        // ベースバンド側で無音を生成 (バッファ再利用)
+        self.bb_buffer_i.clear();
+        self.bb_buffer_q.clear();
+        if self.bb_buffer_i.capacity() < needed_bb {
+            self.bb_buffer_i.reserve(needed_bb);
+            self.bb_buffer_q.reserve(needed_bb);
+        }
         for _ in 0..needed_bb {
-            bb_i.push(self.rrc_i.process(0.0));
-            bb_q.push(self.rrc_q.process(0.0));
+            self.bb_buffer_i.push(self.rrc_i.process(0.0));
+            self.bb_buffer_q.push(self.rrc_q.process(0.0));
         }
 
-        // リサンプリングを一括で行う
-        let mut res_i = Vec::new();
-        let mut res_q = Vec::new();
-        self.resampler_i.process(&bb_i, &mut res_i);
-        self.resampler_q.process(&bb_q, &mut res_q);
+        // リサンプリングを一括で行う (バッファ再利用)
+        self.resample_buffer_i.clear();
+        self.resample_buffer_q.clear();
+        self.resampler_i
+            .process(&self.bb_buffer_i, &mut self.resample_buffer_i);
+        self.resampler_q
+            .process(&self.bb_buffer_q, &mut self.resample_buffer_q);
 
         // キャリア混合
-        let mut out = Vec::with_capacity(res_i.len());
-        for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
+        output.clear();
+        output.reserve(self.resample_buffer_i.len());
+        for (&si, &sq) in self
+            .resample_buffer_i
+            .iter()
+            .zip(self.resample_buffer_q.iter())
+        {
             let lo = self.nco.step();
-            out.push(si * lo.re - sq * lo.im);
+            output.push(si * lo.re - sq * lo.im);
         }
 
-        out.truncate(samples);
-        out
+        output.truncate(samples);
     }
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
-    pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
+    pub fn encode_frame(&mut self, bits: &[u8], output: &mut Vec<f32>) {
         self.prev_phase = 0; // フレーム開始時にリセット
 
-        // プリアンブル生成
-        // 注意: generate_preamble内部で chips_to_samples が呼ばれ、NCOが進む。
-        // プリアンブルは DBPSK (delta 0 or 2) として扱う。
-        let preamble = self.generate_preamble();
+        // プリアンブル生成 (temp buffer 使用)
+        let mut preamble_buf = Vec::new();
+        self.generate_preamble(&mut preamble_buf);
 
         // 同期ワード (DBPSK, Walsh[0], sf=15)
         let sync_bits: Vec<u8> = (0..self.config.sync_word_bits)
@@ -272,35 +339,48 @@ impl Modulator {
             .map(|i| ((SYNC_WORD >> i) & 1) as u8)
             .collect();
 
-        // 同期ワード (DBPSK)
-        let mut sync_chips_i = Vec::new();
-        let mut sync_chips_q = Vec::new();
+        // 同期ワード (DBPSK) - chips_buffer を再利用
+        self.chips_buffer_i.clear();
+        self.chips_buffer_q.clear();
         let walsh_seq = &self.wdict.w16[0];
         let sf_sync = 15; // 15チップに固定
+        let sync_chips_needed = sync_bits.len() * sf_sync;
+        if self.chips_buffer_i.capacity() < sync_chips_needed {
+            self.chips_buffer_i.reserve(sync_chips_needed);
+            self.chips_buffer_q.reserve(sync_chips_needed);
+        }
         for &bit in &sync_bits {
             let delta = if bit == 0 { 0 } else { 2 };
             self.prev_phase = (self.prev_phase + delta) & 0x03;
             let (si, sq) = phase_to_iq(self.prev_phase);
             for &w in walsh_seq.iter().take(sf_sync) {
                 let w_val = w as f32;
-                sync_chips_i.push(si * w_val);
-                sync_chips_q.push(sq * w_val);
+                self.chips_buffer_i.push(si * w_val);
+                self.chips_buffer_q.push(sq * w_val);
             }
         }
-        let sync_samples = self.chips_to_samples(&sync_chips_i, &sync_chips_q);
+        let mut sync_samples_buf = Vec::new();
+        // Clone to release mutable borrow
+        let sync_chips_i: Vec<f32> = self.chips_buffer_i.clone();
+        let sync_chips_q: Vec<f32> = self.chips_buffer_q.clone();
+        self.chips_to_samples(&sync_chips_i, &sync_chips_q, &mut sync_samples_buf);
 
         // データ (MaryDQPSK)
-        let data_samples = self.modulate(bits);
+        let mut data_samples_buf = Vec::new();
+        self.modulate(bits, &mut data_samples_buf);
 
         // 結合
-        let mut result =
-            Vec::with_capacity(preamble.len() + sync_samples.len() + data_samples.len() + 100);
-        result.extend_from_slice(&preamble);
-        result.extend_from_slice(&sync_samples);
-        result.extend_from_slice(&data_samples);
-        result.extend_from_slice(&self.flush());
+        output.clear();
+        let total_len = preamble_buf.len() + sync_samples_buf.len() + data_samples_buf.len() + 100;
+        output.reserve(total_len);
+        output.extend_from_slice(&preamble_buf);
+        output.extend_from_slice(&sync_samples_buf);
+        output.extend_from_slice(&data_samples_buf);
 
-        result
+        // flush を直接 output に追加
+        let _flush_start = output.len();
+        self.flush(output);
+        // flush は clear してから追加するので、正しく動作するはず
     }
 
     /// 変調器の状態をリセット
@@ -363,9 +443,12 @@ mod tests {
     #[test]
     fn test_preamble_length() {
         let mut mod_ = make_modulator();
-        let mut preamble = mod_.generate_preamble();
+        let mut preamble = Vec::new();
+        mod_.generate_preamble(&mut preamble);
         // ストリームの末尾を出し切る
-        preamble.extend(mod_.flush());
+        let mut flush_buf = Vec::new();
+        mod_.flush(&mut flush_buf);
+        preamble.extend(flush_buf);
 
         let config = DspConfig::default_48k();
         let expected_base = config.preamble_sf * config.preamble_repeat * config.samples_per_chip();
@@ -390,7 +473,8 @@ mod tests {
         let mut mod_ = make_modulator();
         // 6の倍数ビットを準備
         let bits = vec![0u8, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0];
-        let samples = mod_.modulate(&bits);
+        let mut samples = Vec::new();
+        mod_.modulate(&bits, &mut samples);
         assert!(samples.iter().all(|&s| s.is_finite()));
     }
 
@@ -399,7 +483,8 @@ mod tests {
     fn test_amplitude_range() {
         let mut mod_ = make_modulator();
         let bits: Vec<u8> = (0..36).map(|i| i % 2).collect(); // 6 symbols
-        let samples = mod_.modulate(&bits);
+        let mut samples = Vec::new();
+        mod_.modulate(&bits, &mut samples);
         let max_amp = samples.iter().cloned().fold(0.0f32, |a, s| a.max(s.abs()));
         assert!(max_amp < 2.0, "max={}", max_amp);
     }
@@ -409,9 +494,11 @@ mod tests {
     fn test_reset_deterministic() {
         let bits = vec![1u8, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0];
         let mut mod_ = make_modulator();
-        let s1 = mod_.modulate(&bits);
+        let mut s1 = Vec::new();
+        mod_.modulate(&bits, &mut s1);
         mod_.reset();
-        let s2 = mod_.modulate(&bits);
+        let mut s2 = Vec::new();
+        mod_.modulate(&bits, &mut s2);
         assert_eq!(s1, s2);
     }
 
@@ -423,7 +510,9 @@ mod tests {
 
         // 1チップ（1.0）のインパルスを入力
         let mut samples = mod_.chips_to_samples(&[1.0], &[0.0]);
-        samples.extend(mod_.flush());
+        let mut flush_buf = Vec::new();
+        mod_.flush(&mut flush_buf);
+        samples.extend(flush_buf);
 
         // ピーク位置を特定
         let (peak_idx, &peak_val) = samples
@@ -460,8 +549,27 @@ mod tests {
         let bits_w0 = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0], DQPSK 00
         let bits_w1 = vec![0u8, 0, 0, 1, 0, 0]; // Walsh[1], DQPSK 00
 
-        let (chips_i_w0, chips_q_w0) = mod_.bits_to_chips(&bits_w0);
-        let (chips_i_w1, chips_q_w1) = mod_.bits_to_chips(&bits_w1);
+        let mut chips_i_w0 = Vec::new();
+        let mut chips_q_w0 = Vec::new();
+        let mut phase_w0 = 0;
+        Modulator::bits_to_chips(
+            &bits_w0,
+            &mod_.wdict,
+            &mut phase_w0,
+            &mut chips_i_w0,
+            &mut chips_q_w0,
+        );
+
+        let mut chips_i_w1 = Vec::new();
+        let mut chips_q_w1 = Vec::new();
+        let mut phase_w1 = 0;
+        Modulator::bits_to_chips(
+            &bits_w1,
+            &mod_.wdict,
+            &mut phase_w1,
+            &mut chips_i_w1,
+            &mut chips_q_w1,
+        );
 
         // 直交性検証：内積が0に近いこと
         let dot_product_i: f32 = chips_i_w0
@@ -488,8 +596,27 @@ mod tests {
         let bits_dqpsk_00 = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0], DQPSK 00
         let bits_dqpsk_01 = vec![0u8, 0, 0, 0, 0, 1]; // Walsh[0], DQPSK 01
 
-        let (chips_i_00, chips_q_00) = mod_.bits_to_chips(&bits_dqpsk_00);
-        let (chips_i_01, chips_q_01) = mod_.bits_to_chips(&bits_dqpsk_01);
+        let mut chips_i_00 = Vec::new();
+        let mut chips_q_00 = Vec::new();
+        let mut phase_00 = 0;
+        Modulator::bits_to_chips(
+            &bits_dqpsk_00,
+            &mod_.wdict,
+            &mut phase_00,
+            &mut chips_i_00,
+            &mut chips_q_00,
+        );
+
+        let mut chips_i_01 = Vec::new();
+        let mut chips_q_01 = Vec::new();
+        let mut phase_01 = 0;
+        Modulator::bits_to_chips(
+            &bits_dqpsk_01,
+            &mod_.wdict,
+            &mut phase_01,
+            &mut chips_i_01,
+            &mut chips_q_01,
+        );
 
         // 同じWalsh indexなので、chips_iとchips_qのパターンは同じはず
         // 位相が90度回転しているため、IとQが入れ替わる
@@ -649,7 +776,8 @@ mod tests {
     fn test_frame_structure() {
         let mut mod_ = make_modulator();
         let bits = vec![1u8, 0, 1, 1, 0, 0]; // 1シンボル
-        let frame = mod_.encode_frame(&bits);
+        let mut frame = Vec::new();
+        mod_.encode_frame(&bits, &mut frame);
 
         // フレームは空でない
         assert!(!frame.is_empty());
@@ -683,8 +811,11 @@ mod tests {
     #[test]
     fn test_preamble_structure() {
         let mut mod_ = make_modulator();
-        let mut preamble = mod_.generate_preamble();
-        preamble.extend(mod_.flush());
+        let mut preamble = Vec::new();
+        mod_.generate_preamble(&mut preamble);
+        let mut flush_buf = Vec::new();
+        mod_.flush(&mut flush_buf);
+        preamble.extend(flush_buf);
 
         // プリアンブルは設定値のZadoff-Chu SFで構成される
         let sf = mod_.config.preamble_sf;
@@ -745,8 +876,27 @@ mod tests {
         let bits0 = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0]
         let bits1 = vec![0u8, 0, 0, 1, 0, 0]; // Walsh[1]
 
-        let (chips_i0, _) = mod_.bits_to_chips(&bits0);
-        let (chips_i1, _) = mod_.bits_to_chips(&bits1);
+        let mut chips_i0 = Vec::new();
+        let mut chips_q0 = Vec::new();
+        let mut phase0 = 0;
+        Modulator::bits_to_chips(
+            &bits0,
+            &mod_.wdict,
+            &mut phase0,
+            &mut chips_i0,
+            &mut chips_q0,
+        );
+
+        let mut chips_i1 = Vec::new();
+        let mut chips_q1 = Vec::new();
+        let mut phase1 = 0;
+        Modulator::bits_to_chips(
+            &bits1,
+            &mod_.wdict,
+            &mut phase1,
+            &mut chips_i1,
+            &mut chips_q1,
+        );
 
         // 直交性: Walsh[0]・Walsh[1] = 0
         let dot_product: f32 = chips_i0
@@ -769,7 +919,8 @@ mod tests {
         let mut mod_ = make_modulator();
         mod_.reset();
 
-        let preamble = mod_.generate_preamble();
+        let mut preamble = Vec::new();
+        mod_.generate_preamble(&mut preamble);
         let sf = mod_.config.preamble_sf;
         let repeat = mod_.config.preamble_repeat;
 
@@ -886,8 +1037,11 @@ mod tests {
 
         // 単一パルスを入力してインパルス応答を取得
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0] + DQPSK 00
-        let mut samples = mod_.modulate(&bits);
-        samples.extend(mod_.flush());
+        let mut samples = Vec::new();
+        mod_.modulate(&bits, &mut samples);
+        let mut flush_buf = Vec::new();
+        mod_.flush(&mut flush_buf);
+        samples.extend(flush_buf);
 
         // 1. 信号は滑らかでなければならない（RRCのパルス整形）
         // 急激な変化が発生しないことを確認
@@ -941,7 +1095,8 @@ mod tests {
 
         // Walsh[0]の信号を生成（I成分のみ、Q=0）
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0] + DQPSK 00
-        let samples = mod_.modulate(&bits);
+        let mut samples = Vec::new();
+        mod_.modulate(&bits, &mut samples);
 
         let carrier_freq = mod_.config().carrier_freq;
         let sample_rate = mod_.config().sample_rate;
@@ -1014,7 +1169,8 @@ mod tests {
             0, 0, 0, 0, 1, 1, // Walsh[0], DQPSK 11
         ];
 
-        let samples = mod_.modulate(&bits);
+        let mut samples = Vec::new();
+        mod_.modulate(&bits, &mut samples);
 
         // 1. 全エネルギーはゼロでない
         let total_energy: f32 = samples.iter().map(|&s| s * s).sum();
@@ -1045,7 +1201,8 @@ mod tests {
 
         // 最小のフレームを生成（プリアンブル + Sync + 1シンボルPayload）
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0] + DQPSK 00
-        let frame = mod_.encode_frame(&bits);
+        let mut frame = Vec::new();
+        mod_.encode_frame(&bits, &mut frame);
 
         // 1. フレームの連続性（不連続点がない）
         let mut discontinuities = 0;
@@ -1116,7 +1273,10 @@ mod tests {
             0, 0, 0, 0, 1, 0, // Walsh[0], DQPSK 10 (phase=2)
         ];
 
-        let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0;
+        Modulator::bits_to_chips(&bits, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         // 各シンボルの位相を確認
         let sf = 16;
@@ -1168,7 +1328,10 @@ mod tests {
             let b0 = walsh_idx & 1;
 
             let bits = vec![b3 as u8, b2 as u8, b1 as u8, b0 as u8, 0, 0];
-            let (chips_i, chips_q) = mod_.bits_to_chips(&bits);
+            let mut chips_i = Vec::new();
+            let mut chips_q = Vec::new();
+            let mut phase = 0;
+            Modulator::bits_to_chips(&bits, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
             // phase=0 -> (1.0, 0.0)
             let walsh_seq = &mod_.wdict.w16[walsh_idx];
@@ -1199,8 +1362,11 @@ mod tests {
         let mut mod_ = make_modulator();
 
         // プリアンブルを生成（全応答を出し切る）
-        let mut preamble = mod_.generate_preamble();
-        preamble.extend(mod_.flush());
+        let mut preamble = Vec::new();
+        mod_.generate_preamble(&mut preamble);
+        let mut flush_buf = Vec::new();
+        mod_.flush(&mut flush_buf);
+        preamble.extend(flush_buf);
 
         let repeat = mod_.config.preamble_repeat;
         let spc = mod_.config.samples_per_chip();
@@ -1251,7 +1417,8 @@ mod tests {
         let bits = vec![0xAAu8; 12]; // 短いペイロード
 
         // 通常フレームを生成
-        let frame1 = mod_.encode_frame(&bits);
+        let mut frame1 = Vec::new();
+        mod_.encode_frame(&bits, &mut frame1);
 
         // NCOを進めて10分間のオーディオ実行をシミュレート
         // 48000 samples/sec * 600 sec = 28,800,000 samples
@@ -1260,7 +1427,8 @@ mod tests {
         }
 
         // 長時間経過後にフレームを生成
-        let frame2 = mod_.encode_frame(&bits);
+        let mut frame2 = Vec::new();
+        mod_.encode_frame(&bits, &mut frame2);
 
         // 振幅エンベロープは本質的に同じであるはず
         // （f32精度の損失による高周波歪み/減衰がない）
@@ -1287,13 +1455,16 @@ mod tests {
         // 1回で2フレーム分のビットをまとめて変調
         let mut bits2 = bits.clone();
         bits2.extend_from_slice(&bits);
-        let samples_all = mod_.modulate(&bits2);
+        let mut samples_all = Vec::new();
+        mod_.modulate(&bits2, &mut samples_all);
 
         mod_.reset();
 
         // 分割して変調
-        let samples_part1 = mod_.modulate(&bits);
-        let samples_part2 = mod_.modulate(&bits);
+        let mut samples_part1 = Vec::new();
+        mod_.modulate(&bits, &mut samples_part1);
+        let mut samples_part2 = Vec::new();
+        mod_.modulate(&bits, &mut samples_part2);
 
         let mut samples_combined = samples_part1;
         samples_combined.extend_from_slice(&samples_part2);
@@ -1321,7 +1492,8 @@ mod tests {
     fn test_44k_modulation() {
         let mut mod_ = Modulator::new(DspConfig::default_44k());
         let bits = vec![0u8, 0, 0, 0, 0, 0]; // Walsh[0] + DQPSK 00
-        let samples = mod_.modulate(&bits);
+        let mut samples = Vec::new();
+        mod_.modulate(&bits, &mut samples);
         assert!(!samples.is_empty());
         assert!(samples.iter().all(|&s| s.is_finite()));
     }

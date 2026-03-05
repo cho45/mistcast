@@ -48,6 +48,7 @@ pub struct Encoder {
     padded_buffer: Vec<u8>,
     interleaved_buffer: Vec<u8>,
     burst_bits_buffer: Vec<u8>,
+    modulator_output: Vec<f32>, // Modulator 出力バッファ
 }
 
 impl Encoder {
@@ -64,6 +65,14 @@ impl Encoder {
         let interleaved_size = rows * cols;
         let mary_aligned_size = interleaved_size.div_ceil(6) * 6;
 
+        // Modulator 出力バッファサイズ (最大フレームサンプル数)
+        let max_bits = mary_aligned_size * packets_per_sync_burst;
+        let max_symbols = max_bits.div_ceil(6);
+        let max_chips = max_symbols * 16 + 2000;
+        let dsp_ref = &config.dsp;
+        let max_samples =
+            (max_chips as f32 * (dsp_ref.sample_rate / dsp_ref.proc_sample_rate())) as usize + 5000;
+
         Encoder {
             config,
             modulator,
@@ -72,12 +81,12 @@ impl Encoder {
             padded_buffer: Vec::with_capacity(interleaved_size),
             interleaved_buffer: Vec::with_capacity(mary_aligned_size),
             burst_bits_buffer: Vec::with_capacity(mary_aligned_size * packets_per_sync_burst),
+            modulator_output: Vec::with_capacity(max_samples),
         }
     }
 
     pub fn with_config(config: EncoderConfig) -> Self {
         let packets_per_sync_burst = config.packets_per_sync_burst;
-        let modulator = Modulator::new(config.dsp.clone());
         // バッファサイズ計算
         let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
         let fec_bits = raw_bits * 2;
@@ -86,6 +95,16 @@ impl Encoder {
         let interleaved_size = rows * cols;
         let mary_aligned_size = interleaved_size.div_ceil(6) * 6;
 
+        // Modulator 出力バッファサイズ
+        let max_bits = mary_aligned_size * packets_per_sync_burst;
+        let max_symbols = max_bits.div_ceil(6);
+        let max_chips = max_symbols * 16 + 2000;
+        let dsp_ref = &config.dsp;
+        let max_samples =
+            (max_chips as f32 * (dsp_ref.sample_rate / dsp_ref.proc_sample_rate())) as usize + 5000;
+
+        let modulator = Modulator::new(config.dsp.clone());
+
         Encoder {
             config,
             modulator,
@@ -94,6 +113,7 @@ impl Encoder {
             padded_buffer: Vec::with_capacity(interleaved_size),
             interleaved_buffer: Vec::with_capacity(mary_aligned_size),
             burst_bits_buffer: Vec::with_capacity(mary_aligned_size * packets_per_sync_burst),
+            modulator_output: Vec::with_capacity(max_samples),
         }
     }
 
@@ -130,13 +150,19 @@ impl Encoder {
             let bits = self.encode_packet_bits(packet);
             self.burst_bits_buffer.extend_from_slice(&bits);
         }
-        self.modulator.encode_frame(&self.burst_bits_buffer)
+        self.modulator_output.clear();
+        self.modulator
+            .encode_frame(&self.burst_bits_buffer, &mut self.modulator_output);
+        self.modulator_output.clone()
     }
 
     /// パケットをエンコードする
     pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
         let bits = self.encode_packet_bits(packet);
-        self.modulator.encode_frame(&bits)
+        self.modulator_output.clear();
+        self.modulator
+            .encode_frame(&bits, &mut self.modulator_output);
+        self.modulator_output.clone()
     }
 
     /// パケットをビット列にエンコードする（テスト用）
@@ -192,12 +218,17 @@ impl Encoder {
 
     /// フラッシュ
     pub fn flush(&mut self) -> Vec<f32> {
-        self.modulator.flush()
+        self.modulator_output.clear();
+        self.modulator.flush(&mut self.modulator_output);
+        self.modulator_output.clone()
     }
 
     /// 無音を変調する
     pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
-        self.modulator.modulate_silence(samples)
+        self.modulator_output.clear();
+        self.modulator
+            .modulate_silence(samples, &mut self.modulator_output);
+        self.modulator_output.clone()
     }
 
     /// リセット
@@ -719,7 +750,9 @@ mod tests {
         assert!(expected_symbols > 0, "Should have at least one symbol");
 
         // modulatorで変調
-        let samples = encoder.modulator.modulate(&bits);
+        let mut samples_buf = Vec::new();
+        encoder.modulator.modulate(&bits, &mut samples_buf);
+        let samples = samples_buf;
 
         // 変調結果が妥当である
         assert!(!samples.is_empty(), "Modulator should produce samples");

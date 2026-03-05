@@ -741,7 +741,9 @@ mod tests {
     fn generate_signal(config: &DspConfig, offset: usize, amplitude: f32) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());
         let mut signal = vec![0.0; offset];
-        signal.extend(modulator.encode_frame(&[]).iter().map(|&s| s * amplitude));
+        let mut frame = Vec::new();
+        modulator.encode_frame(&[], &mut frame);
+        signal.extend(frame.iter().map(|&s| s * amplitude));
         // マージンを追加: MarySyncDetector はピークの後に 1シンボル分以上のサンプルを要求するため
         // さらにCIR推定などのために余分に必要
         // ダウンサンプリング（48kHz→24kHz）で半分になるため、十分なマージンを確保する
@@ -1351,7 +1353,9 @@ mod tests {
     ) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());
         let mut signal = vec![0.0; offset];
-        signal.extend(modulator.encode_frame(&[]).iter().copied());
+        let mut frame = Vec::new();
+        modulator.encode_frame(&[], &mut frame);
+        signal.extend(frame.iter().copied());
         signal.extend(vec![0.0; 500]);
 
         let (i_raw, q_raw) = downconvert(&signal, 0, config);
@@ -2022,7 +2026,8 @@ mod tests {
             config.preamble_sf = sf;
 
             let mut modulator = Modulator::new(config.clone());
-            let mut frame = modulator.encode_frame(&[]);
+            let mut frame = Vec::new();
+            modulator.encode_frame(&[], &mut frame);
             // フィルタ遅延によって波形が後ろにズレるため、受信十分なマージン（無音）を追加する
             frame.extend(vec![0.0; 4000]);
             let (i_ch, q_ch) = simulate_rx_frontend(&frame, &config);
@@ -2085,7 +2090,8 @@ mod tests {
         config.preamble_sf = sf;
 
         let mut modulator = Modulator::new(config.clone());
-        let mut frame = modulator.encode_frame(&[]);
+        let mut frame = Vec::new();
+        modulator.encode_frame(&[], &mut frame);
         frame.extend(vec![0.0; 8000]);
 
         // まずマルチパスをパスバンドでかける（本当はベースバンドでも良いが、モジュレータ出力はパスバンド）
