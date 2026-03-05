@@ -131,9 +131,12 @@ pub struct Decoder {
     pub(crate) mix_buffer_q: Vec<f32>,
     resample_buffer_i: Vec<f32>,
     resample_buffer_q: Vec<f32>,
+    rrc_filtered_i: Vec<f32>,
+    rrc_filtered_q: Vec<f32>,
     cir_buffer: Vec<Complex32>,
     complex_buffer: Vec<Complex32>,
     packet_llrs_buffer: Vec<f32>,
+    deinterleave_buffer: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -221,9 +224,12 @@ impl Decoder {
             mix_buffer_q: Vec::with_capacity(4096),
             resample_buffer_i: Vec::with_capacity(6144),
             resample_buffer_q: Vec::with_capacity(6144),
+            rrc_filtered_i: Vec::with_capacity(6144),
+            rrc_filtered_q: Vec::with_capacity(6144),
             cir_buffer: vec![Complex32::new(0.0, 0.0); cir_buffer_size],
             complex_buffer: Vec::with_capacity(16_000),
             packet_llrs_buffer: Vec::with_capacity(352),
+            deinterleave_buffer: Vec::with_capacity(352),
         }
     }
 
@@ -276,12 +282,26 @@ impl Decoder {
         self.resampler_q
             .process(&self.mix_buffer_q, &mut self.resample_buffer_q);
 
-        // 3. RRCフィルタ（既存API使用、アロケーションは残る）
-        let i_filtered = self.rrc_filter_i.process_block(&self.resample_buffer_i);
-        let q_filtered = self.rrc_filter_q.process_block(&self.resample_buffer_q);
+        // 3. RRCフィルタ（インプレースAPI使用）
+        self.rrc_filtered_i.clear();
+        self.rrc_filtered_q.clear();
+        self.rrc_filtered_i
+            .resize(self.resample_buffer_i.len(), 0.0);
+        self.rrc_filtered_q
+            .resize(self.resample_buffer_q.len(), 0.0);
+        self.rrc_filtered_i
+            .copy_from_slice(&self.resample_buffer_i);
+        self.rrc_filtered_q
+            .copy_from_slice(&self.resample_buffer_q);
+        self.rrc_filter_i
+            .process_block_in_place(&mut self.rrc_filtered_i);
+        self.rrc_filter_q
+            .process_block_in_place(&mut self.rrc_filtered_q);
 
-        self.sample_buffer_i.extend_from_slice(&i_filtered);
-        self.sample_buffer_q.extend_from_slice(&q_filtered);
+        self.sample_buffer_i
+            .extend_from_slice(&self.rrc_filtered_i);
+        self.sample_buffer_q
+            .extend_from_slice(&self.rrc_filtered_q);
 
         self.detect_and_process_frames()
     }
@@ -802,20 +822,27 @@ impl Decoder {
             let valid_llrs = &packet_llrs[..interleaved_bits];
 
             let interleaver = BlockInterleaver::new(rows, cols);
-            let mut deinterleaved_llr = interleaver.deinterleave_f32(valid_llrs);
+            // インプレースAPI使用
+            self.deinterleave_buffer
+                .resize(interleaved_bits, 0.0);
+            interleaver.deinterleave_f32_in_place(
+                valid_llrs,
+                &mut self.deinterleave_buffer[..interleaved_bits],
+            );
 
             let mut scrambler = Scrambler::default();
-            for llr in deinterleaved_llr.iter_mut() {
+            for llr in self.deinterleave_buffer[..interleaved_bits].iter_mut() {
                 if scrambler.next_bit() == 1 {
                     *llr = -*llr;
                 }
             }
 
             if let Some(ref mut callback) = self.llr_callback {
-                callback(&deinterleaved_llr);
+                callback(&self.deinterleave_buffer[..interleaved_bits]);
             }
 
-            let decoded_bits = fec::decode_soft(&deinterleaved_llr[..fec_bits]);
+            let decoded_bits =
+                fec::decode_soft(&self.deinterleave_buffer[..fec_bits]);
             if decoded_bits.len() < p_bits_len {
                 continue;
             }
@@ -1381,11 +1408,18 @@ mod tests {
         // リサンプリング
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
-        decoder.resampler_i.process(&decoder.mix_buffer_i, &mut i_resampled);
-        decoder.resampler_q.process(&decoder.mix_buffer_q, &mut q_resampled);
+        decoder
+            .resampler_i
+            .process(&decoder.mix_buffer_i, &mut i_resampled);
+        decoder
+            .resampler_q
+            .process(&decoder.mix_buffer_q, &mut q_resampled);
 
-        let i_filtered = decoder.rrc_filter_i.process_block(&i_resampled);
-        let q_filtered = decoder.rrc_filter_q.process_block(&q_resampled);
+        // RRCフィルタ（インプレースAPI使用）
+        let mut i_filtered = i_resampled.clone();
+        let mut q_filtered = q_resampled.clone();
+        decoder.rrc_filter_i.process_block_in_place(&mut i_filtered);
+        decoder.rrc_filter_q.process_block_in_place(&mut q_filtered);
 
         // 48k -> 24k (proc_rate) へのリサンプリング後の長さを算出
         let preamble_len_24k = preamble_len_48k / 2;
