@@ -43,26 +43,57 @@ pub struct Encoder {
     config: EncoderConfig,
     modulator: Modulator,
     fountain_encoder: Option<FountainEncoder>,
+    // ゼロアロケーション用バッファプール
+    fec_buffer: Vec<u8>,
+    padded_buffer: Vec<u8>,
+    interleaved_buffer: Vec<u8>,
+    burst_bits_buffer: Vec<u8>,
 }
 
 impl Encoder {
     /// 新しいエンコーダを作成する
     pub fn new(dsp_config: DspConfig) -> Self {
         let config = EncoderConfig::new(dsp_config);
+        let packets_per_sync_burst = config.packets_per_sync_burst;
         let modulator = Modulator::new(config.dsp.clone());
+        // バッファサイズ計算
+        let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
+        let fec_bits = raw_bits * 2;
+        let rows = 16;
+        let cols = fec_bits.div_ceil(rows);
+        let interleaved_size = rows * cols;
+        let mary_aligned_size = interleaved_size.div_ceil(6) * 6;
+
         Encoder {
             config,
             modulator,
             fountain_encoder: None,
+            fec_buffer: Vec::with_capacity(fec_bits),
+            padded_buffer: Vec::with_capacity(interleaved_size),
+            interleaved_buffer: Vec::with_capacity(mary_aligned_size),
+            burst_bits_buffer: Vec::with_capacity(mary_aligned_size * packets_per_sync_burst),
         }
     }
 
     pub fn with_config(config: EncoderConfig) -> Self {
+        let packets_per_sync_burst = config.packets_per_sync_burst;
         let modulator = Modulator::new(config.dsp.clone());
+        // バッファサイズ計算
+        let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
+        let fec_bits = raw_bits * 2;
+        let rows = 16;
+        let cols = fec_bits.div_ceil(rows);
+        let interleaved_size = rows * cols;
+        let mary_aligned_size = interleaved_size.div_ceil(6) * 6;
+
         Encoder {
             config,
             modulator,
             fountain_encoder: None,
+            fec_buffer: Vec::with_capacity(fec_bits),
+            padded_buffer: Vec::with_capacity(interleaved_size),
+            interleaved_buffer: Vec::with_capacity(mary_aligned_size),
+            burst_bits_buffer: Vec::with_capacity(mary_aligned_size * packets_per_sync_burst),
         }
     }
 
@@ -94,12 +125,12 @@ impl Encoder {
 
     /// バーストをエンコードする
     pub fn encode_burst(&mut self, packets: &[FountainPacket]) -> Vec<f32> {
-        let mut all_bits = Vec::new();
+        self.burst_bits_buffer.clear();
         for packet in packets {
             let bits = self.encode_packet_bits(packet);
-            all_bits.extend_from_slice(&bits);
+            self.burst_bits_buffer.extend_from_slice(&bits);
         }
-        self.modulator.encode_frame(&all_bits)
+        self.modulator.encode_frame(&self.burst_bits_buffer)
     }
 
     /// パケットをエンコードする
@@ -113,8 +144,12 @@ impl Encoder {
         let seq = (packet.seq % (u32::from(u16::MAX) + 1)) as u16;
         let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
         let pkt_bytes = pkt.serialize();
+
+        // FECエンコード（バッファ使用）
+        self.fec_buffer.clear();
         let bits = fec::bytes_to_bits(&pkt_bytes);
         let coded = fec::encode(&bits);
+        self.fec_buffer.extend_from_slice(&coded);
 
         // インターリーバのサイズを決定
         let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
@@ -122,22 +157,28 @@ impl Encoder {
         let rows = 16;
         let cols = fec_bits.div_ceil(rows);
 
-        // インターリーバの全スロットを埋めるようにパディング
-        let mut padded = coded;
-        padded.resize(rows * cols, 0);
+        // パディング（バッファ使用）
+        self.padded_buffer.clear();
+        self.padded_buffer.extend_from_slice(&self.fec_buffer);
+        self.padded_buffer.resize(rows * cols, 0);
 
         // スクランブル
         let mut scrambler = Scrambler::default();
-        scrambler.process_bits(&mut padded);
+        scrambler.process_bits(&mut self.padded_buffer);
 
-        // インターリーブ
+        // インターリーブ（インプレースAPI使用）
         let interleaver = BlockInterleaver::new(rows, cols);
-        let interleaved = interleaver.interleave(&padded);
+        self.interleaved_buffer.resize(rows * cols, 0);
+        interleaver.interleave_in_place(
+            &self.padded_buffer,
+            &mut self.interleaved_buffer[..rows * cols],
+        );
 
         // Maryシンボル（6ビット単位）の境界に揃えるようにパディング
-        let mut mary_bits = interleaved;
-        mary_bits.resize(mary_bits.len().div_ceil(6) * 6, 0);
-        mary_bits
+        let mary_aligned_size = (rows * cols).div_ceil(6) * 6;
+        self.interleaved_buffer.resize(mary_aligned_size, 0);
+
+        self.interleaved_buffer.clone()
     }
 
     /// Fountain Kを取得する
