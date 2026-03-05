@@ -413,11 +413,13 @@ mod tests {
         let mut filter1 = RrcFilter::from_config(&config.clone());
         let mut filter2 = RrcFilter::from_config(&config);
 
-        let input: Vec<f32> = (0..1000).map(|i| {
-            let t = i as f32 / config.sample_rate;
-            0.7 * (2.0 * std::f32::consts::PI * 800.0 * t).sin()
-                + 0.2 * (2.0 * std::f32::consts::PI * 2300.0 * t).cos()
-        }).collect();
+        let input: Vec<f32> = (0..1000)
+            .map(|i| {
+                let t = i as f32 / config.sample_rate;
+                0.7 * (2.0 * std::f32::consts::PI * 800.0 * t).sin()
+                    + 0.2 * (2.0 * std::f32::consts::PI * 2300.0 * t).cos()
+            })
+            .collect();
 
         // 通常の処理
         let expected = filter1.process_block(&input);
