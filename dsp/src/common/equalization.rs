@@ -81,7 +81,161 @@ pub struct FrequencyDomainEqualizer {
     scratch: Vec<Complex<f32>>,
 }
 
+/// フレームごとに呼ばれる MSE 予測用の固定長FFTインスタンス。
+/// `fft_size` ごとに使い回すことで `FftPlanner` の再生成コストを避ける。
+pub struct ChannelMsePredictor {
+    fft_size: usize,
+    fft: Arc<dyn Fft<f32>>,
+    h_spectrum: Vec<Complex<f32>>,
+    w_spectrum: Vec<Complex<f32>>,
+}
+
+impl ChannelMsePredictor {
+    pub fn new(fft_size: usize) -> Self {
+        assert!(
+            fft_size.is_multiple_of(4),
+            "fft_size must be a multiple of 4"
+        );
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        Self {
+            fft_size,
+            fft,
+            h_spectrum: vec![Complex::new(0.0, 0.0); fft_size],
+            w_spectrum: vec![Complex::new(0.0, 0.0); fft_size],
+        }
+    }
+
+    fn load_channel_spectrum(&mut self, cir: &[Complex<f32>]) {
+        assert!(
+            self.fft_size >= cir.len() * 2,
+            "fft_size must be at least twice the CIR length"
+        );
+        self.h_spectrum.fill(Complex::new(0.0, 0.0));
+        self.h_spectrum[..cir.len()].copy_from_slice(cir);
+        self.fft.process(&mut self.h_spectrum);
+    }
+
+    /// 線形モデル Y=H*X+N に基づく FDE 経路の予測MSEを返す。
+    /// スカラー比較のため、全周波数ビンの平均値を返す。
+    pub fn predict_mse_fde(
+        &mut self,
+        cir: &[Complex<f32>],
+        signal_var: f32,
+        noise_var: f32,
+        mmse: MmseSettings,
+    ) -> f32 {
+        let sx2 = signal_var.max(0.0);
+        let sn2 = noise_var.max(0.0);
+        self.load_channel_spectrum(cir);
+        FrequencyDomainEqualizer::mmse_weights_from_h_in_place(
+            &self.h_spectrum,
+            &mut self.w_spectrum,
+            mmse,
+        );
+
+        let mut mse_sum = 0.0f32;
+        for idx in 0..self.fft_size {
+            let wh_minus_1 = self.w_spectrum[idx] * self.h_spectrum[idx] - Complex::new(1.0, 0.0);
+            mse_sum += wh_minus_1.norm_sqr() * sx2 + self.w_spectrum[idx].norm_sqr() * sn2;
+        }
+        mse_sum / self.fft_size as f32
+    }
+
+    /// 線形モデル Y=H*X+N で、等化しない経路 (W=1) の予測MSEを返す。
+    /// 受信器の位相/ゲイン追従を反映するため、周波数一定の複素1タップ補償を最適化してから誤差を評価する。
+    pub fn predict_mse_raw(
+        &mut self,
+        cir: &[Complex<f32>],
+        signal_var: f32,
+        noise_var: f32,
+    ) -> f32 {
+        let sx2 = signal_var.max(0.0);
+        let sn2 = noise_var.max(0.0);
+        if sx2 <= 0.0 && sn2 <= 0.0 {
+            return 0.0;
+        }
+
+        self.load_channel_spectrum(cir);
+
+        // g = argmin E[|gY - X|^2] の閉形式。Y=H*X+N の下で
+        // g = sx2 * E[H*] / (sx2 * E[|H|^2] + sn2)
+        let n_inv = 1.0 / self.fft_size as f32;
+        let mut mean_h = Complex::new(0.0, 0.0);
+        let mut mean_h2 = 0.0f32;
+        for &h in &self.h_spectrum {
+            mean_h += h;
+            mean_h2 += h.norm_sqr();
+        }
+        mean_h *= n_inv;
+        mean_h2 *= n_inv;
+
+        let denom = sx2 * mean_h2 + sn2;
+        let g = if denom > 1e-12 && sx2 > 0.0 {
+            mean_h.conj() * (sx2 / denom)
+        } else {
+            Complex::new(0.0, 0.0)
+        };
+
+        let mut mse_sum = 0.0f32;
+        for &h_val in &self.h_spectrum {
+            let gh_minus_1 = g * h_val - Complex::new(1.0, 0.0);
+            mse_sum += gh_minus_1.norm_sqr() * sx2 + g.norm_sqr() * sn2;
+        }
+        mse_sum * n_inv
+    }
+}
+
 impl FrequencyDomainEqualizer {
+    fn mmse_weights_from_h_in_place(
+        h: &[Complex<f32>],
+        out: &mut [Complex<f32>],
+        mmse: MmseSettings,
+    ) {
+        assert_eq!(h.len(), out.len(), "h and out must have same length");
+        let lambda_eff = mmse.lambda_eff();
+        out.fill(Complex::new(0.0, 0.0));
+        for (idx, &h_val) in h.iter().enumerate() {
+            let mag_sq = h_val.norm_sqr();
+            let denom = mag_sq + lambda_eff;
+            if denom > 1e-12 {
+                let mut wi = h_val.conj() / denom;
+                if let Some(limit) = mmse.max_inv_gain {
+                    let n = wi.norm();
+                    if n > limit && n > 1e-12 {
+                        wi *= limit / n;
+                    }
+                }
+                out[idx] = wi;
+            }
+        }
+    }
+
+    /// 線形モデル Y=H*X+N に基づく FDE 経路の予測MSEを返す。
+    /// スカラー比較のため、全周波数ビンの平均値を返す。
+    pub fn predict_mse_fde(
+        cir: &[Complex<f32>],
+        fft_size: usize,
+        signal_var: f32,
+        noise_var: f32,
+        mmse: MmseSettings,
+    ) -> f32 {
+        let mut predictor = ChannelMsePredictor::new(fft_size);
+        predictor.predict_mse_fde(cir, signal_var, noise_var, mmse)
+    }
+
+    /// 線形モデル Y=H*X+N で、等化しない経路 (W=1) の予測MSEを返す。
+    /// スカラー比較のため、全周波数ビンの平均値を返す。
+    pub fn predict_mse_raw(
+        cir: &[Complex<f32>],
+        fft_size: usize,
+        signal_var: f32,
+        noise_var: f32,
+    ) -> f32 {
+        let mut predictor = ChannelMsePredictor::new(fft_size);
+        predictor.predict_mse_raw(cir, signal_var, noise_var)
+    }
+
     /// FDEの初期化と重み W(k) の事前計算を行う。
     ///
     /// # 引数
@@ -168,24 +322,7 @@ impl FrequencyDomainEqualizer {
         self.fft.process(&mut self.scratch);
 
         // 2. 理想的なMMSE重みの算出とIFFT (weightsバッファを一時的に利用)
-        let lambda_eff = mmse.lambda_eff();
-        for i in 0..self.fft_size {
-            let h_val = self.scratch[i];
-            let mag_sq = h_val.norm_sqr();
-            let denom = mag_sq + lambda_eff;
-            if denom > 1e-12 {
-                let mut w = h_val.conj() / denom;
-                if let Some(limit) = mmse.max_inv_gain {
-                    let n = w.norm();
-                    if n > limit && n > 1e-12 {
-                        w *= limit / n;
-                    }
-                }
-                self.weights[i] = w;
-            } else {
-                self.weights[i] = Complex::new(0.0, 0.0);
-            }
-        }
+        Self::mmse_weights_from_h_in_place(&self.scratch, &mut self.weights, mmse);
         self.ifft.process(&mut self.weights);
 
         // IFFTの正規化
@@ -307,6 +444,438 @@ impl FrequencyDomainEqualizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_close(actual: f32, expected: f32, tol: f32, label: &str) {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff <= tol,
+            "{}: actual={}, expected={}, diff={}, tol={}",
+            label,
+            actual,
+            expected,
+            diff,
+            tol
+        );
+    }
+
+    fn convolve(input: &[Complex<f32>], h: &[Complex<f32>]) -> Vec<Complex<f32>> {
+        let mut y = vec![Complex::new(0.0, 0.0); input.len()];
+        for i in 0..input.len() {
+            for j in 0..h.len() {
+                if i + j < y.len() {
+                    y[i + j] += input[i] * h[j];
+                }
+            }
+        }
+        y
+    }
+
+    fn mse(a: &[Complex<f32>], b: &[Complex<f32>]) -> f32 {
+        let n = a.len().min(b.len()).max(1);
+        let mut acc = 0.0f32;
+        for i in 0..n {
+            acc += (a[i] - b[i]).norm_sqr();
+        }
+        acc / n as f32
+    }
+
+    fn best_scalar_compensation(
+        reference: &[Complex<f32>],
+        observed: &[Complex<f32>],
+    ) -> Complex<f32> {
+        let n = reference.len().min(observed.len());
+        let mut num = Complex::new(0.0, 0.0);
+        let mut den = 0.0f32;
+        for i in 0..n {
+            num += reference[i] * observed[i].conj();
+            den += observed[i].norm_sqr();
+        }
+        if den > 1e-12 {
+            num / den
+        } else {
+            Complex::new(0.0, 0.0)
+        }
+    }
+
+    fn apply_scalar(input: &[Complex<f32>], g: Complex<f32>) -> Vec<Complex<f32>> {
+        input.iter().map(|&x| g * x).collect()
+    }
+
+    #[test]
+    fn test_predict_mse_identity_matches_closed_form() {
+        let cir = vec![Complex::new(1.0, 0.0)];
+        let fft_size = 64;
+        let signal_var = 1.3f32;
+        let noise_var = 0.2f32;
+        let mmse = MmseSettings::new(0.0, 0.0, 0.25, None); // lambda_eff = 0.25
+        let lambda_eff = mmse.lambda_eff();
+
+        let mse_fde =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, noise_var, mmse);
+        let mse_raw =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, noise_var);
+
+        let expected_fde =
+            (lambda_eff * lambda_eff * signal_var + noise_var) / (1.0 + lambda_eff).powi(2);
+        let expected_raw = signal_var * noise_var / (signal_var + noise_var);
+
+        assert_close(mse_fde, expected_fde, 1e-6, "mse_fde(identity)");
+        assert_close(mse_raw, expected_raw, 1e-6, "mse_raw(identity)");
+    }
+
+    #[test]
+    fn test_predict_mse_raw_matches_closed_form_flat_channel() {
+        let cir = vec![Complex::new(0.5, 0.0)];
+        let fft_size = 64;
+        let signal_var = 2.0f32;
+        let noise_var = 0.1f32;
+
+        let mse_raw =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, noise_var);
+        let h = cir[0];
+        let g = h.conj() * (signal_var / (signal_var * h.norm_sqr() + noise_var));
+        let expected =
+            (g * h - Complex::new(1.0, 0.0)).norm_sqr() * signal_var + g.norm_sqr() * noise_var;
+        assert_close(mse_raw, expected, 1e-6, "mse_raw(flat)");
+    }
+
+    #[test]
+    fn test_predict_mse_fde_noiseless_zero_lambda_recovers_channel() {
+        let cir = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.3, 0.0),
+            Complex::new(-0.1, 0.0),
+        ];
+        let fft_size = 128;
+        let signal_var = 1.0f32;
+        let noise_var = 0.0f32;
+        let mmse = MmseSettings::new(30.0, 0.0, 0.0, None); // lambda_eff = 0
+
+        let mse_fde =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, noise_var, mmse);
+        let mse_raw =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, noise_var);
+        assert!(
+            mse_fde < 1e-4,
+            "noiseless inversion should be near-perfect: {}",
+            mse_fde
+        );
+        assert!(
+            mse_fde < mse_raw,
+            "FDE should beat raw in noiseless ISI channel: fde={} raw={}",
+            mse_fde,
+            mse_raw
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_fde_is_not_worse_than_raw_with_matched_lambda() {
+        let cir = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.4, 0.2),
+            Complex::new(-0.2, 0.1),
+        ];
+        let fft_size = 128;
+        let signal_var = 1.0f32;
+        let noise_var = 0.1f32;
+        // lambda_eff = noise/signal = 0.1
+        let mmse = MmseSettings::new(10.0, 1.0, 0.0, None);
+
+        let mse_fde =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, noise_var, mmse);
+        let mse_raw =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, noise_var);
+        assert!(
+            mse_fde <= mse_raw + 1e-6,
+            "MMSE should not underperform raw in this model: fde={} raw={}",
+            mse_fde,
+            mse_raw
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_monotonic_with_noise_var() {
+        let cir = vec![Complex::new(1.0, 0.0), Complex::new(0.35, -0.1)];
+        let fft_size = 128;
+        let signal_var = 1.0f32;
+        let mmse = MmseSettings::new(10.0, 1.0, 0.0, None);
+
+        let mse_fde_lo =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, 0.01, mmse);
+        let mse_fde_hi =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, 0.1, mmse);
+        let mse_raw_lo =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, 0.01);
+        let mse_raw_hi = FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, 0.1);
+
+        assert!(
+            mse_fde_hi > mse_fde_lo,
+            "FDE MSE must increase with noise variance"
+        );
+        assert!(
+            mse_raw_hi > mse_raw_lo,
+            "RAW MSE must increase with noise variance"
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_finite_with_deep_notch_channel() {
+        let cir = vec![Complex::new(1.0, 0.0), Complex::new(-1.0, 0.0)]; // bin0に深いノッチ
+        let fft_size = 64;
+        let signal_var = 1.0f32;
+        let noise_var = 0.05f32;
+        let mmse = MmseSettings::new(20.0, 1.0, 1e-4, Some(2.0));
+
+        let mse_fde =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, noise_var, mmse);
+        let mse_raw =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, noise_var);
+        assert!(
+            mse_fde.is_finite() && mse_fde >= 0.0,
+            "mse_fde must be finite/non-negative"
+        );
+        assert!(
+            mse_raw.is_finite() && mse_raw >= 0.0,
+            "mse_raw must be finite/non-negative"
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_rank_matches_measured_mse_for_block_model() {
+        let cir = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.35, 0.15),
+            Complex::new(-0.1, 0.05),
+        ];
+        let fft_size = 256;
+        let signal_var = 1.0f32;
+        let noise_var = 0.03f32;
+        // lambda_eff ≈ noise/signal
+        let mmse = MmseSettings::new(15.0, 1.0, 0.0, None);
+
+        let pred_fde =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, noise_var, mmse);
+        let pred_raw =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir, fft_size, signal_var, noise_var);
+        assert!(
+            pred_fde < pred_raw,
+            "precondition failed: pred_fde={} pred_raw={}",
+            pred_fde,
+            pred_raw
+        );
+
+        let tx: Vec<Complex<f32>> = (0..fft_size)
+            .map(|i| {
+                let x = (i as f32 * 0.07).sin();
+                let y = (i as f32 * 0.11).cos();
+                Complex::new(x, y)
+            })
+            .collect();
+        let mut rx = convolve(&tx, &cir);
+        // deterministic pseudo-noise
+        for (i, r) in rx.iter_mut().enumerate() {
+            let n1 = ((i as f32 * 1.37).sin()) * (noise_var / 2.0).sqrt();
+            let n2 = ((i as f32 * 0.91).cos()) * (noise_var / 2.0).sqrt();
+            r.re += n1;
+            r.im += n2;
+        }
+
+        let mut fde = FrequencyDomainEqualizer::new(&cir, fft_size, 15.0);
+        let mut fde_out = Vec::new();
+        fde.process(&rx, &mut fde_out);
+        fde.flush(&mut fde_out);
+        fde_out.truncate(tx.len());
+
+        let g_raw = best_scalar_compensation(&tx, &rx);
+        let raw_out = apply_scalar(&rx, g_raw);
+        let mse_fde_meas = mse(&tx, &fde_out);
+        let mse_raw_meas = mse(&tx, &raw_out);
+        assert!(
+            mse_fde_meas <= mse_raw_meas * 1.15,
+            "measured rank mismatch: mse_fde_meas={} mse_raw_meas={}",
+            mse_fde_meas,
+            mse_raw_meas
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_raw_is_phase_invariant_for_unit_magnitude_channel() {
+        let fft_size = 64;
+        let signal_var = 1.0f32;
+        let noise_var = 0.01f32;
+
+        let cir_ref = vec![Complex::new(1.0, 0.0)];
+        let cir_rot = vec![Complex::new(0.0, 1.0)];
+        let mse_ref =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir_ref, fft_size, signal_var, noise_var);
+        let mse_rot =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir_rot, fft_size, signal_var, noise_var);
+        assert_close(mse_ref, mse_rot, 1e-6, "raw phase invariance");
+    }
+
+    #[test]
+    fn test_predict_mse_raw_rank_matches_measured_scalar_compensated_mse() {
+        let fft_size = 256;
+        let signal_var = 1.0f32;
+        let noise_var = 0.04f32;
+
+        let cir_good = vec![Complex::new(1.0, 0.0)];
+        let cir_bad = vec![Complex::new(0.35, 0.35)];
+        let pred_good =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir_good, fft_size, signal_var, noise_var);
+        let pred_bad =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir_bad, fft_size, signal_var, noise_var);
+        assert!(
+            pred_good < pred_bad,
+            "prediction precondition failed: pred_good={} pred_bad={}",
+            pred_good,
+            pred_bad
+        );
+
+        let tx: Vec<Complex<f32>> = (0..fft_size)
+            .map(|i| {
+                let x = (i as f32 * 0.07).sin();
+                let y = (i as f32 * 0.13).cos();
+                Complex::new(x, y)
+            })
+            .collect();
+
+        let mut rx_good = convolve(&tx, &cir_good);
+        let mut rx_bad = convolve(&tx, &cir_bad);
+        for i in 0..fft_size {
+            let n1 = ((i as f32 * 1.23).sin()) * (noise_var / 2.0).sqrt();
+            let n2 = ((i as f32 * 0.87).cos()) * (noise_var / 2.0).sqrt();
+            let n = Complex::new(n1, n2);
+            rx_good[i] += n;
+            rx_bad[i] += n;
+        }
+
+        let g_good = best_scalar_compensation(&tx, &rx_good);
+        let g_bad = best_scalar_compensation(&tx, &rx_bad);
+        let meas_good = mse(&tx, &apply_scalar(&rx_good, g_good));
+        let meas_bad = mse(&tx, &apply_scalar(&rx_bad, g_bad));
+        assert!(
+            meas_good < meas_bad,
+            "measured rank mismatch: meas_good={} meas_bad={}",
+            meas_good,
+            meas_bad
+        );
+    }
+
+    #[test]
+    fn test_predictor_reuse_matches_static_predict_functions() {
+        let fft_size = 128;
+        let signal_var = 1.0f32;
+        let noise_var = 0.05f32;
+        let mmse = MmseSettings::new(13.0, 1.0, 1e-4, Some(2.0));
+
+        let cir_a = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.3, 0.1),
+            Complex::new(-0.1, 0.05),
+        ];
+        let cir_b = vec![Complex::new(0.8, -0.2), Complex::new(0.1, 0.05)];
+
+        let mut predictor = ChannelMsePredictor::new(fft_size);
+
+        let fde_a_inst = predictor.predict_mse_fde(&cir_a, signal_var, noise_var, mmse);
+        let raw_a_inst = predictor.predict_mse_raw(&cir_a, signal_var, noise_var);
+        let fde_a_static = FrequencyDomainEqualizer::predict_mse_fde(
+            &cir_a, fft_size, signal_var, noise_var, mmse,
+        );
+        let raw_a_static =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir_a, fft_size, signal_var, noise_var);
+        assert_close(fde_a_inst, fde_a_static, 1e-6, "fde reuse/static (A)");
+        assert_close(raw_a_inst, raw_a_static, 1e-6, "raw reuse/static (A)");
+
+        let fde_b_inst = predictor.predict_mse_fde(&cir_b, signal_var, noise_var, mmse);
+        let raw_b_inst = predictor.predict_mse_raw(&cir_b, signal_var, noise_var);
+        let fde_b_static = FrequencyDomainEqualizer::predict_mse_fde(
+            &cir_b, fft_size, signal_var, noise_var, mmse,
+        );
+        let raw_b_static =
+            FrequencyDomainEqualizer::predict_mse_raw(&cir_b, fft_size, signal_var, noise_var);
+        assert_close(fde_b_inst, fde_b_static, 1e-6, "fde reuse/static (B)");
+        assert_close(raw_b_inst, raw_b_static, 1e-6, "raw reuse/static (B)");
+    }
+
+    #[test]
+    fn test_predict_mse_fde_max_inv_gain_trades_noise_and_bias_in_notch_channel() {
+        let cir = vec![Complex::new(1.0, 0.0), Complex::new(-1.0, 0.0)];
+        let fft_size = 64;
+        let signal_var = 1.0f32;
+        let noise_var = 1e-4f32;
+        let base = MmseSettings::new(20.0, 1.0, 1e-4, None);
+
+        let mse_unlimited =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, signal_var, noise_var, base);
+        let mse_limited = FrequencyDomainEqualizer::predict_mse_fde(
+            &cir,
+            fft_size,
+            signal_var,
+            noise_var,
+            MmseSettings {
+                max_inv_gain: Some(0.5),
+                ..base
+            },
+        );
+        assert!(
+            mse_limited >= mse_unlimited - 1e-6,
+            "low-noise notch should prefer unlimited inverse gain: limited={} unlimited={}",
+            mse_limited,
+            mse_unlimited
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_boundary_signal_and_noise_zero() {
+        let cir = vec![Complex::new(0.7, -0.2), Complex::new(0.1, 0.05)];
+        let fft_size = 64;
+        let mmse = MmseSettings::new(10.0, 1.0, 0.0, None);
+
+        let m00 = FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, 0.0, 0.0, mmse);
+        let m10 = FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, 1.0, 0.0, mmse);
+        let m01 = FrequencyDomainEqualizer::predict_mse_fde(&cir, fft_size, 0.0, 0.1, mmse);
+        assert!(m00.abs() < 1e-8, "mse(0,0) must be 0, got {}", m00);
+        assert!(
+            m10.is_finite() && m10 >= 0.0,
+            "mse(1,0) must be finite/non-negative"
+        );
+        assert!(
+            m01.is_finite() && m01 >= 0.0,
+            "mse(0,0.1) must be finite/non-negative"
+        );
+    }
+
+    #[test]
+    fn test_predict_mse_is_reasonably_stable_across_fft_size() {
+        let cir = vec![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.33, 0.18),
+            Complex::new(-0.12, 0.05),
+        ];
+        let signal_var = 1.0f32;
+        let noise_var = 0.05f32;
+        let mmse = MmseSettings::new(13.0, 1.0, 0.0, None);
+
+        let m64 = FrequencyDomainEqualizer::predict_mse_fde(&cir, 64, signal_var, noise_var, mmse);
+        let m128 =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, 128, signal_var, noise_var, mmse);
+        let m256 =
+            FrequencyDomainEqualizer::predict_mse_fde(&cir, 256, signal_var, noise_var, mmse);
+
+        let max_m = m64.max(m128).max(m256);
+        let min_m = m64.min(m128).min(m256);
+        let rel_span = (max_m - min_m) / max_m.max(1e-12);
+        assert!(
+            rel_span < 0.2,
+            "predict_mse_fde varies too much across fft_size: m64={} m128={} m256={} rel_span={}",
+            m64,
+            m128,
+            m256,
+            rel_span
+        );
+    }
 
     #[test]
     fn test_identity_channel() {
