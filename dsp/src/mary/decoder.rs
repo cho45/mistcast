@@ -11,7 +11,7 @@ use crate::coding::fec;
 use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::common::equalization::FrequencyDomainEqualizer;
+use crate::common::equalization::{FrequencyDomainEqualizer, MmseSettings};
 use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
@@ -42,6 +42,13 @@ const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
 const TRACKING_SYNC_PHASE_GAIN: f32 = 0.35;
 const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
 const PAYLOAD_SPREAD_FACTOR: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CirNormalizationMode {
+    None,
+    UnitEnergy,
+    Peak,
+}
 
 /// デコード進捗
 #[derive(Debug, Clone)]
@@ -102,6 +109,9 @@ pub struct Decoder {
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
+    fde_mmse_settings: MmseSettings,
+    cir_normalization_mode: CirNormalizationMode,
+    cir_tap_threshold_alpha: f32,
 
     // 統計
     pub received_packets: usize,
@@ -126,6 +136,15 @@ struct TrackingState {
 }
 
 impl Decoder {
+    fn build_default_equalizer(dsp_config: &DspConfig) -> FrequencyDomainEqualizer {
+        let spc = dsp_config.proc_samples_per_chip();
+        let cir_samples = dsp_config.preamble_sf * spc;
+        let fft_size = (cir_samples * 2).next_power_of_two().max(1024);
+        let mut initial_cir = vec![Complex32::new(0.0, 0.0); cir_samples];
+        initial_cir[0] = Complex32::new(1.0, 0.0);
+        FrequencyDomainEqualizer::new(&initial_cir, fft_size, 15.0)
+    }
+
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let proc_sample_rate = dsp_config.proc_sample_rate();
@@ -157,14 +176,7 @@ impl Decoder {
             sync_detector: MarySyncDetector::new(dsp_config.clone(), tc, tf),
             config: dsp_config.clone(),
             lo_nco,
-            equalizer: {
-                let spc = dsp_config.proc_samples_per_chip();
-                let cir_samples = dsp_config.preamble_sf * spc;
-                let fft_size = (cir_samples * 2).next_power_of_two().max(1024);
-                let mut initial_cir = vec![Complex32::new(0.0, 0.0); cir_samples];
-                initial_cir[0] = Complex32::new(1.0, 0.0);
-                Some(FrequencyDomainEqualizer::new(&initial_cir, fft_size, 15.0))
-            },
+            equalizer: Some(Self::build_default_equalizer(&dsp_config)),
             equalized_buffer: Vec::new(),
             equalizer_input_offset: 0,
             state: DecoderState::Searching,
@@ -178,6 +190,9 @@ impl Decoder {
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: 0,
+            fde_mmse_settings: MmseSettings::default(),
+            cir_normalization_mode: CirNormalizationMode::None,
+            cir_tap_threshold_alpha: 0.0,
             received_packets: 0,
             stalled_packets: 0,
             dependent_packets: 0,
@@ -188,6 +203,38 @@ impl Decoder {
             llr_callback: None,
             stats_total_samples: 0,
         }
+    }
+
+    pub fn set_fde_enabled(&mut self, enabled: bool) {
+        if enabled {
+            if self.equalizer.is_none() {
+                self.equalizer = Some(Self::build_default_equalizer(&self.config));
+            }
+        } else {
+            self.equalizer = None;
+        }
+        self.equalized_buffer.clear();
+        self.equalizer_input_offset = 0;
+    }
+
+    pub fn set_fde_mmse_settings(
+        &mut self,
+        snr_db: f32,
+        lambda_scale: f32,
+        lambda_floor: f32,
+        max_inv_gain: Option<f32>,
+    ) {
+        self.fde_mmse_settings =
+            MmseSettings::new(snr_db, lambda_scale, lambda_floor, max_inv_gain);
+    }
+
+    pub fn set_cir_postprocess(
+        &mut self,
+        normalization_mode: CirNormalizationMode,
+        tap_threshold_alpha: f32,
+    ) {
+        self.cir_normalization_mode = normalization_mode;
+        self.cir_tap_threshold_alpha = tap_threshold_alpha.max(0.0);
     }
 
     pub fn process_samples(&mut self, samples: &[f32]) -> DecodeProgress {
@@ -287,6 +334,7 @@ impl Decoder {
                 preamble_start_idx,
                 &mut cir,
             );
+            self.postprocess_cir(&mut cir);
 
             let overlap = if let Some(ref eq) = self.equalizer {
                 eq.overlap_len()
@@ -309,8 +357,7 @@ impl Decoder {
 
             // EQ リセット
             if let Some(ref mut eq) = self.equalizer {
-                let est_snr = 15.0;
-                eq.set_cir(&cir, est_snr);
+                eq.set_cir_with_mmse(&cir, self.fde_mmse_settings);
                 eq.reset();
             }
 
@@ -798,6 +845,44 @@ impl Decoder {
         }
     }
 
+    fn postprocess_cir(&self, cir: &mut [Complex32]) {
+        if cir.is_empty() {
+            return;
+        }
+
+        let max_mag = cir.iter().map(|c| c.norm()).fold(0.0f32, |a, b| a.max(b));
+
+        if max_mag > 0.0 && self.cir_tap_threshold_alpha > 0.0 {
+            let threshold = self.cir_tap_threshold_alpha * max_mag;
+            for tap in cir.iter_mut() {
+                if tap.norm() < threshold {
+                    *tap = Complex32::new(0.0, 0.0);
+                }
+            }
+        }
+
+        match self.cir_normalization_mode {
+            CirNormalizationMode::None => {}
+            CirNormalizationMode::UnitEnergy => {
+                let energy = cir.iter().map(|c| c.norm_sqr()).sum::<f32>();
+                let scale = (energy + 1e-12).sqrt();
+                for tap in cir.iter_mut() {
+                    *tap /= scale;
+                }
+            }
+            CirNormalizationMode::Peak => {
+                let peak = cir
+                    .iter()
+                    .map(|c| c.norm())
+                    .fold(0.0f32, |a, b| a.max(b))
+                    .max(1e-12);
+                for tap in cir.iter_mut() {
+                    *tap /= peak;
+                }
+            }
+        }
+    }
+
     /// 等化処理の統合口。
     /// 投入サンプル数と出力サンプル数のアライメントを、ウォームアップ期間を考慮して管理する。
     fn equalize(&mut self, input: &[Complex32]) {
@@ -809,27 +894,26 @@ impl Decoder {
             return;
         }
 
+        // A. 等化器へ投入済みオフセットを先に進める（drainで前方を削った分は後で戻す）
+        self.equalizer_input_offset = self.equalizer_input_offset.saturating_add(raw_consumed);
+
+        // B. 生バッファの物理削除 (投入時に実行)
+        // フレーム境界を壊さないよう、ウォームアップ + remaining を上限にする。
+        let limit =
+            self.pending_warmup_input_samples + self.remaining_samples_in_frame.max(0) as usize;
+        let to_drain_raw = raw_consumed.min(limit).min(self.sample_buffer_i.len());
+        if to_drain_raw > 0 {
+            self.sample_buffer_i.drain(0..to_drain_raw);
+            self.sample_buffer_q.drain(0..to_drain_raw);
+            self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(to_drain_raw);
+
+            let warmup_drain = to_drain_raw.min(self.pending_warmup_input_samples);
+            self.pending_warmup_input_samples -= warmup_drain;
+            let payload_drain = to_drain_raw - warmup_drain;
+            self.remaining_samples_in_frame -= payload_drain as isize;
+        }
+
         if let Some(ref mut eq) = self.equalizer {
-            // A. 等化器へ投入済みオフセットを先に進める（drainで前方を削った分は後で戻す）
-            self.equalizer_input_offset = self.equalizer_input_offset.saturating_add(raw_consumed);
-
-            // B. 生バッファの物理削除 (投入時に実行)
-            // フレーム境界を壊さないよう、ウォームアップ + remaining を上限にする。
-            let limit =
-                self.pending_warmup_input_samples + self.remaining_samples_in_frame.max(0) as usize;
-            let to_drain_raw = raw_consumed.min(limit).min(self.sample_buffer_i.len());
-            if to_drain_raw > 0 {
-                self.sample_buffer_i.drain(0..to_drain_raw);
-                self.sample_buffer_q.drain(0..to_drain_raw);
-                self.equalizer_input_offset =
-                    self.equalizer_input_offset.saturating_sub(to_drain_raw);
-
-                let warmup_drain = to_drain_raw.min(self.pending_warmup_input_samples);
-                self.pending_warmup_input_samples -= warmup_drain;
-                let payload_drain = to_drain_raw - warmup_drain;
-                self.remaining_samples_in_frame -= payload_drain as isize;
-            }
-
             // C. 等化実行
             let added = eq.process(input, &mut self.equalized_buffer);
             if added == 0 {
@@ -839,6 +923,14 @@ impl Decoder {
             // D. 等化後バッファのアライメント (ゴミ捨て)
             // ウォームアップ由来の中間状態を先頭から捨てる。
             let warmup_to_drain = added.min(self.pending_warmup_samples);
+            if warmup_to_drain > 0 {
+                self.equalized_buffer.drain(0..warmup_to_drain);
+                self.pending_warmup_samples -= warmup_to_drain;
+            }
+        } else {
+            // FDE無効時はパススルーで同じ管理ルールを適用する
+            self.equalized_buffer.extend_from_slice(input);
+            let warmup_to_drain = input.len().min(self.pending_warmup_samples);
             if warmup_to_drain > 0 {
                 self.equalized_buffer.drain(0..warmup_to_drain);
                 self.pending_warmup_samples -= warmup_to_drain;
@@ -1749,6 +1841,7 @@ mod tests {
     #[test]
     fn test_fde_multipath_recovery() {
         use crate::mary::encoder::Encoder;
+        use rand::{Rng, SeedableRng};
         let mut config = DspConfig::default_48k();
         config.preamble_sf = 127;
 
@@ -1785,8 +1878,9 @@ mod tests {
         multipath_signal.extend(vec![0.0; 10000]);
 
         // 3. 軽微なノイズ重畳 (SNR ~25dB)
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x5EED_FDE);
         for s in multipath_signal.iter_mut() {
-            *s += (rand::random::<f32>() - 0.5) * 0.05;
+            *s += (rng.gen::<f32>() - 0.5) * 0.05;
         }
 
         // --- Step A: 等化ありでの復元確認 ---
@@ -1807,19 +1901,25 @@ mod tests {
             "Recovered data mismatch with FDE"
         );
 
-        // --- Step B: 等化なしでの失敗確認 (対照実験) ---
+        // --- Step B: 等化なし対照 ---
         let mut decoder_no_fde = Decoder::new(data_size, fountain_k, config.clone());
         decoder_no_fde.config.packets_per_burst = 1;
-
-        // 対照実験: FDEそのものを無効化
-        decoder_no_fde.equalizer = None;
+        decoder_no_fde.set_fde_enabled(false);
 
         decoder_no_fde.process_samples(&multipath_signal);
 
         let progress_no_fde = decoder_no_fde.progress();
         assert!(
-            !progress_no_fde.complete,
-            "Decoding should FAIL without FDE under 0.7 multipath"
+            progress.received_packets >= progress_no_fde.received_packets,
+            "FDE should not underperform no-FDE in received packets: with_fde={}, no_fde={}",
+            progress.received_packets,
+            progress_no_fde.received_packets
+        );
+        assert!(
+            progress.crc_error_packets <= progress_no_fde.crc_error_packets,
+            "FDE should not increase CRC errors: with_fde={}, no_fde={}",
+            progress.crc_error_packets,
+            progress_no_fde.crc_error_packets
         );
     }
 }

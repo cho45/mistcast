@@ -1,7 +1,7 @@
 use dsp::coding::fec;
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
 use dsp::frame::packet::Packet;
-use dsp::mary::decoder::Decoder as MaryDecoder;
+use dsp::mary::decoder::{CirNormalizationMode, Decoder as MaryDecoder};
 use dsp::mary::encoder::Encoder as MaryEncoder;
 use dsp::params::PAYLOAD_SIZE;
 use dsp::{dsss::decoder::Decoder as DsssDecoder, DspConfig};
@@ -111,6 +111,13 @@ struct Cli {
     preamble_repeat: usize,
     packets_per_burst: usize,
     preamble_sf: usize,
+    mary_fde_enabled: bool,
+    mary_fde_snr_db: f32,
+    mary_fde_lambda_scale: f32,
+    mary_fde_lambda_floor: f32,
+    mary_fde_max_inv_gain: Option<f32>,
+    mary_cir_norm: String,
+    mary_cir_tap_alpha: f32,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -332,6 +339,23 @@ fn parse_list(arg: Option<String>, fallback: &[f32]) -> Vec<f32> {
     }
 }
 
+fn parse_bool_flag(value: &str, default: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" | "enabled" => true,
+        "0" | "false" | "off" | "no" | "disabled" => false,
+        _ => default,
+    }
+}
+
+fn parse_cir_norm(value: &str) -> CirNormalizationMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => CirNormalizationMode::None,
+        "unit_energy" | "unit-energy" | "unitenergy" => CirNormalizationMode::UnitEnergy,
+        "peak" | "peak_norm" | "peak-norm" | "peaknorm" => CirNormalizationMode::Peak,
+        _ => CirNormalizationMode::None,
+    }
+}
+
 fn parse_cli() -> Cli {
     let mut kv = HashMap::<String, String>::new();
     let mut args = env::args().skip(1);
@@ -491,6 +515,33 @@ fn parse_cli() -> Cli {
         .remove("preamble-sf")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(dsp::params::PREAMBLE_SF);
+    let mary_fde_enabled = kv
+        .remove("mary-fde")
+        .map(|v| parse_bool_flag(&v, true))
+        .unwrap_or(true);
+    let mary_fde_snr_db = kv
+        .remove("mary-fde-snr-db")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(15.0);
+    let mary_fde_lambda_scale = kv
+        .remove("mary-fde-k")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0);
+    let mary_fde_lambda_floor = kv
+        .remove("mary-fde-lambda-floor")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let mary_fde_max_inv_gain = kv
+        .remove("mary-fde-max-inv-gain")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| *v > 0.0);
+    let mary_cir_norm = kv
+        .remove("mary-cir-norm")
+        .unwrap_or_else(|| "none".to_string());
+    let mary_cir_tap_alpha = kv
+        .remove("mary-cir-tap-alpha")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.0);
 
     Cli {
         phy,
@@ -524,6 +575,13 @@ fn parse_cli() -> Cli {
         preamble_repeat,
         packets_per_burst,
         preamble_sf,
+        mary_fde_enabled,
+        mary_fde_snr_db,
+        mary_fde_lambda_scale,
+        mary_fde_lambda_floor,
+        mary_fde_max_inv_gain,
+        mary_cir_norm,
+        mary_cir_tap_alpha,
     }
 }
 
@@ -813,6 +871,14 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
     let mut decoder = MaryDecoder::new(payload.len(), k, rx_cfg);
     decoder.config.packets_per_burst = cli.packets_per_burst;
+    decoder.set_fde_enabled(cli.mary_fde_enabled);
+    decoder.set_fde_mmse_settings(
+        cli.mary_fde_snr_db,
+        cli.mary_fde_lambda_scale,
+        cli.mary_fde_lambda_floor,
+        cli.mary_fde_max_inv_gain,
+    );
+    decoder.set_cir_postprocess(parse_cir_norm(&cli.mary_cir_norm), cli.mary_cir_tap_alpha);
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;
@@ -1189,6 +1255,14 @@ fn print_help() {
              NAME: none|mild|medium|harsh\n\
              TAPS: \"0:1.0,9:0.4,23:0.2\"\n\
          --target-p F               (awgn_limit判定用)\n\n\
+         mary/FDE options:\n\
+         --mary-fde [on|off]        FDE有効/無効 (default: on)\n\
+         --mary-fde-snr-db F        MMSE換算SNR[dB] (default: 15)\n\
+         --mary-fde-k F             λ_eff = k*λ + λ_floor の k (default: 1.0)\n\
+         --mary-fde-lambda-floor F  λ_floor (default: 0.0)\n\
+         --mary-fde-max-inv-gain F  逆フィルタ利得上限(任意)\n\
+         --mary-cir-norm MODE       none|unit_energy|peak (default: none)\n\
+         --mary-cir-tap-alpha F     |h| < alpha*max|h| を0化 (default: 0)\n\n\
          sweep lists:\n\
          --sweep-awgn \"0,0.005,0.01\"\n\
          --sweep-ppm  \"-120,-80,0,80,120\"\n\
@@ -1322,6 +1396,13 @@ mod tests {
             preamble_repeat: 2,
             packets_per_burst: 1,
             preamble_sf: 13,
+            mary_fde_enabled: true,
+            mary_fde_snr_db: 15.0,
+            mary_fde_lambda_scale: 1.0,
+            mary_fde_lambda_floor: 0.0,
+            mary_fde_max_inv_gain: None,
+            mary_cir_norm: "none".to_string(),
+            mary_cir_tap_alpha: 0.0,
         };
 
         let res = run_trial_dsss_e2e(&cli.base, &cli, cli.seed);
@@ -1362,6 +1443,13 @@ mod tests {
             preamble_repeat: 2,
             packets_per_burst: 1,
             preamble_sf: 13,
+            mary_fde_enabled: true,
+            mary_fde_snr_db: 15.0,
+            mary_fde_lambda_scale: 1.0,
+            mary_fde_lambda_floor: 0.0,
+            mary_fde_max_inv_gain: None,
+            mary_cir_norm: "none".to_string(),
+            mary_cir_tap_alpha: 0.0,
         };
 
         let res = run_trial_mary_e2e(&cli.base, &cli, cli.seed);

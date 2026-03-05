@@ -2,6 +2,46 @@ use num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug)]
+pub struct MmseSettings {
+    pub snr_db: f32,
+    pub lambda_scale: f32,
+    pub lambda_floor: f32,
+    pub max_inv_gain: Option<f32>,
+}
+
+impl MmseSettings {
+    pub fn new(
+        snr_db: f32,
+        lambda_scale: f32,
+        lambda_floor: f32,
+        max_inv_gain: Option<f32>,
+    ) -> Self {
+        Self {
+            snr_db,
+            lambda_scale,
+            lambda_floor,
+            max_inv_gain,
+        }
+    }
+
+    pub fn lambda_eff(self) -> f32 {
+        let lambda = 10f32.powf(-self.snr_db / 10.0);
+        self.lambda_scale.max(0.0) * lambda + self.lambda_floor.max(0.0)
+    }
+}
+
+impl Default for MmseSettings {
+    fn default() -> Self {
+        Self {
+            snr_db: 15.0,
+            lambda_scale: 1.0,
+            lambda_floor: 0.0,
+            max_inv_gain: None,
+        }
+    }
+}
+
 /// Minimum Mean Square Error (MMSE) 基準を用いた周波数領域等化器 (FDE)。
 /// Overlap-Save法を用いて、連続するストリームデータに対して線形畳み込み（デコンボリューション）を数学的に正しく適用する。
 pub struct FrequencyDomainEqualizer {
@@ -56,7 +96,10 @@ impl FrequencyDomainEqualizer {
             fft_size >= cir.len() * 2,
             "fft_size must be at least twice the CIR length"
         );
-        assert!(fft_size.is_multiple_of(4), "fft_size must be a multiple of 4");
+        assert!(
+            fft_size.is_multiple_of(4),
+            "fft_size must be a multiple of 4"
+        );
 
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
@@ -101,6 +144,17 @@ impl FrequencyDomainEqualizer {
     /// # パニック
     /// * `cir.len() * 2 > fft_size` の場合。
     pub fn set_cir(&mut self, cir: &[Complex<f32>], snr_db: f32) {
+        self.set_cir_with_mmse(
+            cir,
+            MmseSettings {
+                snr_db,
+                ..MmseSettings::default()
+            },
+        );
+    }
+
+    /// `set_cir` の拡張版。MMSE正則化と逆フィルタ利得制限を細かく制御する。
+    pub fn set_cir_with_mmse(&mut self, cir: &[Complex<f32>], mmse: MmseSettings) {
         assert!(
             self.fft_size >= cir.len() * 2,
             "CIR length is too large for the configured fft_size"
@@ -114,13 +168,20 @@ impl FrequencyDomainEqualizer {
         self.fft.process(&mut self.scratch);
 
         // 2. 理想的なMMSE重みの算出とIFFT (weightsバッファを一時的に利用)
-        let sigma_sq = 10f32.powf(-snr_db / 10.0);
+        let lambda_eff = mmse.lambda_eff();
         for i in 0..self.fft_size {
             let h_val = self.scratch[i];
             let mag_sq = h_val.norm_sqr();
-            let denom = mag_sq + sigma_sq;
+            let denom = mag_sq + lambda_eff;
             if denom > 1e-12 {
-                self.weights[i] = h_val.conj() / denom;
+                let mut w = h_val.conj() / denom;
+                if let Some(limit) = mmse.max_inv_gain {
+                    let n = w.norm();
+                    if n > limit && n > 1e-12 {
+                        w *= limit / n;
+                    }
+                }
+                self.weights[i] = w;
             } else {
                 self.weights[i] = Complex::new(0.0, 0.0);
             }
