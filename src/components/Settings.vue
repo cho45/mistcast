@@ -18,10 +18,10 @@ watch(() => settings.value.randomizeSeq, (newValue) => {
   runtime.randomizeSeq.value = newValue;
 });
 
-// 初期同期（runtime の値を settings に反映）
+// 初期同期（保存された settings を runtime に反映）
 onMounted(() => {
-  settings.value.modemMode = runtime.modemMode.value;
-  settings.value.randomizeSeq = runtime.randomizeSeq.value;
+  runtime.modemMode.value = settings.value.modemMode;
+  runtime.randomizeSeq.value = settings.value.randomizeSeq;
 });
 </script>
 
