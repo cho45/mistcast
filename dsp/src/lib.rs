@@ -292,13 +292,14 @@ impl WasmMaryDecoder {
         console_error_panic_hook::set_once();
         let mut config = DspConfig::new(sample_rate);
         config.packets_per_burst = packets_per_burst;
-        WasmMaryDecoder {
-            inner: mary::decoder::Decoder::new(
-                params::FIXED_K * params::PAYLOAD_SIZE,
-                params::FIXED_K,
-                config,
-            ),
-        }
+        let mut inner = mary::decoder::Decoder::new(
+            params::FIXED_K * params::PAYLOAD_SIZE,
+            params::FIXED_K,
+            config,
+        );
+        inner.set_fde_enabled(true);
+        inner.set_fde_auto_path_select(true);
+        WasmMaryDecoder { inner }
     }
     pub fn process_samples(&mut self, samples: &[f32]) -> WasmMaryDecodeProgress {
         let progress = self.inner.process_samples(samples);

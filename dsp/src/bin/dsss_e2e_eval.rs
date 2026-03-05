@@ -111,13 +111,30 @@ struct Cli {
     preamble_repeat: usize,
     packets_per_burst: usize,
     preamble_sf: usize,
-    mary_fde_enabled: bool,
+    mary_fde_mode: MaryFdeMode,
     mary_fde_snr_db: f32,
     mary_fde_lambda_scale: f32,
     mary_fde_lambda_floor: f32,
     mary_fde_max_inv_gain: Option<f32>,
     mary_cir_norm: String,
     mary_cir_tap_alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaryFdeMode {
+    On,
+    Off,
+    Auto,
+}
+
+impl MaryFdeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -413,11 +430,29 @@ fn parse_list(arg: Option<String>, fallback: &[f32]) -> Vec<f32> {
     }
 }
 
-fn parse_bool_flag(value: &str, default: bool) -> bool {
+fn parse_mary_fde_mode(value: &str) -> Option<MaryFdeMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "on" | "yes" | "enabled" => true,
-        "0" | "false" | "off" | "no" | "disabled" => false,
-        _ => default,
+        "on" | "true" | "1" | "yes" | "enabled" => Some(MaryFdeMode::On),
+        "off" | "false" | "0" | "no" | "disabled" => Some(MaryFdeMode::Off),
+        "auto" => Some(MaryFdeMode::Auto),
+        _ => None,
+    }
+}
+
+fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
+    match mode {
+        MaryFdeMode::On => {
+            decoder.set_fde_enabled(true);
+            decoder.set_fde_auto_path_select(false);
+        }
+        MaryFdeMode::Off => {
+            decoder.set_fde_enabled(false);
+            decoder.set_fde_auto_path_select(false);
+        }
+        MaryFdeMode::Auto => {
+            decoder.set_fde_enabled(true);
+            decoder.set_fde_auto_path_select(true);
+        }
     }
 }
 
@@ -589,10 +624,13 @@ fn parse_cli() -> Cli {
         .remove("preamble-sf")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(dsp::params::PREAMBLE_SF);
-    let mary_fde_enabled = kv
+    let mary_fde_mode = kv
         .remove("mary-fde")
-        .map(|v| parse_bool_flag(&v, true))
-        .unwrap_or(true);
+        .map(|v| {
+            parse_mary_fde_mode(&v)
+                .unwrap_or_else(|| panic!("invalid --mary-fde value: {v} (expected: on|off|auto)"))
+        })
+        .unwrap_or(MaryFdeMode::On);
     let mary_fde_snr_db = kv
         .remove("mary-fde-snr-db")
         .and_then(|v| v.parse::<f32>().ok())
@@ -649,7 +687,7 @@ fn parse_cli() -> Cli {
         preamble_repeat,
         packets_per_burst,
         preamble_sf,
-        mary_fde_enabled,
+        mary_fde_mode,
         mary_fde_snr_db,
         mary_fde_lambda_scale,
         mary_fde_lambda_floor,
@@ -963,7 +1001,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
     let mut decoder = MaryDecoder::new(payload.len(), k, rx_cfg);
     decoder.config.packets_per_burst = cli.packets_per_burst;
-    decoder.set_fde_enabled(cli.mary_fde_enabled);
+    apply_mary_fde_mode(&mut decoder, cli.mary_fde_mode);
     decoder.set_fde_mmse_settings(
         cli.mary_fde_snr_db,
         cli.mary_fde_lambda_scale,
@@ -1174,7 +1212,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
 fn print_header() {
     println!(
-        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,multipath"
+        "scenario,phy,mary_fde_mode,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,multipath"
     );
 }
 
@@ -1198,6 +1236,7 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
     let cols = vec![
         scenario.to_string(),
         cli.phy.clone(),
+        cli.mary_fde_mode.as_str().to_string(),
         m.trials.to_string(),
         m.successes.to_string(),
         m.deadline_hits.to_string(),
@@ -1375,7 +1414,7 @@ fn print_help() {
              TAPS: \"0:1.0,9:0.4,23:0.2\"\n\
          --target-p F               (awgn_limit判定用)\n\n\
          mary/FDE options:\n\
-         --mary-fde [on|off]        FDE有効/無効 (default: on)\n\
+         --mary-fde [on|off|auto]   FDEモード (default: on)\n\
          --mary-fde-snr-db F        MMSE換算SNR[dB] (default: 15)\n\
          --mary-fde-k F             λ_eff = k*λ + λ_floor の k (default: 1.0)\n\
          --mary-fde-lambda-floor F  λ_floor (default: 0.0)\n\
@@ -1437,6 +1476,14 @@ mod tests {
         assert_eq!(p.max_delay(), 20);
 
         assert!(MultipathProfile::parse_custom("invalid").is_none());
+    }
+
+    #[test]
+    fn test_parse_mary_fde_mode() {
+        assert_eq!(parse_mary_fde_mode("on"), Some(MaryFdeMode::On));
+        assert_eq!(parse_mary_fde_mode("OFF"), Some(MaryFdeMode::Off));
+        assert_eq!(parse_mary_fde_mode("auto"), Some(MaryFdeMode::Auto));
+        assert_eq!(parse_mary_fde_mode("invalid"), None);
     }
 
     #[test]
@@ -1515,7 +1562,7 @@ mod tests {
             preamble_repeat: 2,
             packets_per_burst: 1,
             preamble_sf: 13,
-            mary_fde_enabled: true,
+            mary_fde_mode: MaryFdeMode::On,
             mary_fde_snr_db: 15.0,
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,
@@ -1562,7 +1609,7 @@ mod tests {
             preamble_repeat: 2,
             packets_per_burst: 1,
             preamble_sf: 13,
-            mary_fde_enabled: true,
+            mary_fde_mode: MaryFdeMode::On,
             mary_fde_snr_db: 15.0,
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,

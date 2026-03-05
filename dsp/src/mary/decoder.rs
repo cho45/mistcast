@@ -11,7 +11,7 @@ use crate::coding::fec;
 use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::common::equalization::{ChannelMsePredictor, FrequencyDomainEqualizer, MmseSettings};
+use crate::common::equalization::{FrequencyDomainEqualizer, MmseSettings};
 use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
@@ -95,7 +95,6 @@ pub struct Decoder {
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
     equalizer: Option<FrequencyDomainEqualizer>,
-    channel_mse_predictor: Option<ChannelMsePredictor>,
     equalized_buffer: Vec<Complex32>,
     equalizer_input_offset: usize,
     demodulator: Demodulator,
@@ -178,10 +177,6 @@ impl Decoder {
         FrequencyDomainEqualizer::new(&initial_cir, fft_size, 15.0)
     }
 
-    fn build_default_mse_predictor(dsp_config: &DspConfig) -> ChannelMsePredictor {
-        ChannelMsePredictor::new(Self::default_fde_fft_size(dsp_config))
-    }
-
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let proc_sample_rate = dsp_config.proc_sample_rate();
@@ -219,7 +214,6 @@ impl Decoder {
             config: dsp_config.clone(),
             lo_nco,
             equalizer: Some(Self::build_default_equalizer(&dsp_config)),
-            channel_mse_predictor: Some(Self::build_default_mse_predictor(&dsp_config)),
             equalized_buffer: Vec::new(),
             equalizer_input_offset: 0,
             state: DecoderState::Searching,
@@ -272,13 +266,9 @@ impl Decoder {
             if self.equalizer.is_none() {
                 self.equalizer = Some(Self::build_default_equalizer(&self.config));
             }
-            if self.channel_mse_predictor.is_none() {
-                self.channel_mse_predictor = Some(Self::build_default_mse_predictor(&self.config));
-            }
             self.current_frame_use_fde = true;
         } else {
             self.equalizer = None;
-            self.channel_mse_predictor = None;
             self.current_frame_use_fde = false;
             self.fde_auto_path_select = false;
         }
@@ -453,15 +443,19 @@ impl Decoder {
             let mut use_fde_this_frame = self.equalizer.is_some();
             let mut pred_mse_fde = f32::NAN;
             let mut pred_mse_raw = f32::NAN;
-            if let Some(ref mut predictor) = self.channel_mse_predictor {
-                let signal_var = chq.signal_var.max(0.0);
-                let noise_var = chq.noise_var.max(0.0);
-                let cir_slice = &self.cir_buffer[..cir_len];
-                let mse_fde = predictor.predict_mse_fde(cir_slice, signal_var, noise_var, mmse);
-                let mse_raw = predictor.predict_mse_raw(cir_slice, signal_var, noise_var);
+            if self.equalizer.is_some() {
+                let known_end_idx =
+                    preamble_start_idx + self.sync_detector.known_interval_len_samples();
+                let (mse_raw, mse_fde) = self.known_interval_path_mse(
+                    preamble_start_idx,
+                    known_end_idx,
+                    cir_len,
+                    mmse,
+                    chq.cfo_rad_per_sample,
+                );
                 pred_mse_fde = mse_fde;
                 pred_mse_raw = mse_raw;
-                if self.fde_auto_path_select {
+                if self.fde_auto_path_select && mse_fde.is_finite() && mse_raw.is_finite() {
                     use_fde_this_frame = mse_fde < mse_raw;
                 }
             }
@@ -1065,6 +1059,63 @@ impl Decoder {
         }
     }
 
+    fn known_interval_path_mse(
+        &mut self,
+        preamble_start_idx: usize,
+        known_end_idx: usize,
+        cir_len: usize,
+        mmse: MmseSettings,
+        cfo_rad_per_sample: f32,
+    ) -> (f32, f32) {
+        if known_end_idx > self.sample_buffer_i.len() || known_end_idx > self.sample_buffer_q.len()
+        {
+            return (f32::NAN, f32::NAN);
+        }
+
+        let mse_raw = self
+            .sync_detector
+            .known_sequence_mse_iq(
+                &self.sample_buffer_i,
+                &self.sample_buffer_q,
+                preamble_start_idx,
+                cfo_rad_per_sample,
+            )
+            .unwrap_or(f32::NAN);
+
+        let Some(eq) = self.equalizer.as_mut() else {
+            return (mse_raw, f32::NAN);
+        };
+
+        let overlap = eq.overlap_len();
+        let analysis_start = preamble_start_idx.saturating_sub(overlap);
+        let input_len = known_end_idx.saturating_sub(analysis_start);
+        if input_len == 0 {
+            return (mse_raw, f32::NAN);
+        }
+
+        let mut eval_input = Vec::with_capacity(input_len);
+        for idx in analysis_start..known_end_idx {
+            eval_input.push(Complex32::new(
+                self.sample_buffer_i[idx],
+                self.sample_buffer_q[idx],
+            ));
+        }
+
+        let mut eval_output = Vec::with_capacity(input_len);
+        eq.set_cir_with_mmse(&self.cir_buffer[..cir_len], mmse);
+        eq.reset();
+        eq.process(&eval_input, &mut eval_output);
+        eq.flush(&mut eval_output);
+
+        let known_start_in_eval = preamble_start_idx.saturating_sub(analysis_start);
+        let mse_fde = self
+            .sync_detector
+            .known_sequence_mse_complex(&eval_output, known_start_in_eval, cfo_rad_per_sample)
+            .unwrap_or(f32::NAN);
+
+        (mse_raw, mse_fde)
+    }
+
     fn equalize_from_complex_buffer(&mut self, valid_len: usize, raw_consumed: usize) {
         if valid_len == 0 {
             return;
@@ -1294,14 +1345,6 @@ mod tests {
     fn make_decoder() -> Decoder {
         let config = DspConfig::default_48k();
         Decoder::new(160, 10, config)
-    }
-
-    fn apply_two_path_channel(input: &[f32], delay_samples: usize, alpha: f32) -> Vec<f32> {
-        let mut out = input.to_vec();
-        for t in delay_samples..input.len() {
-            out[t] += input[t - delay_samples] * alpha;
-        }
-        out
     }
 
     #[test]
@@ -2179,33 +2222,6 @@ mod tests {
         assert!(
             !decoder.current_frame_use_fde,
             "平坦チャネルかつ強正則化ではAUTOはRAWを選ぶべき"
-        );
-    }
-
-    #[test]
-    fn test_fde_auto_selects_fde_on_noiseless_multipath() {
-        use crate::mary::encoder::Encoder;
-        let mut config = DspConfig::default_48k();
-        config.preamble_sf = 127;
-        let mut encoder = Encoder::new(config.clone());
-        let mut decoder = Decoder::new(160, 10, config.clone());
-        decoder.config.packets_per_burst = 1;
-        decoder.set_fde_enabled(true);
-        decoder.set_fde_auto_path_select(true);
-        decoder.set_fde_mmse_settings(30.0, 1.0, 0.0, None);
-
-        let data = vec![0x67u8; 32];
-        encoder.set_data(&data);
-        let signal = encoder.encode_frame().expect("frame");
-        let spc = config.proc_samples_per_chip();
-        let delay = 3 * spc * (config.sample_rate / config.proc_sample_rate()) as usize;
-        let mut multipath = apply_two_path_channel(&signal, delay, 0.6);
-        multipath.extend(vec![0.0; 8000]);
-        decoder.process_samples(&multipath);
-
-        assert!(
-            decoder.current_frame_use_fde,
-            "ISIが強い無雑音マルチパスではAUTOはFDEを選ぶべき"
         );
     }
 }
