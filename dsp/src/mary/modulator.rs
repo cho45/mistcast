@@ -89,26 +89,25 @@ impl Modulator {
         Self::new(DspConfig::default_48k())
     }
 
-    /// プリアンブル (Walsh[0]の [W, W, W, -W] パターン) を生成する
+    /// プリアンブル (Zadoff-Chu系列 SF=13) を生成する
     ///
     /// 最後のシンボルを反転させることで同期の曖昧さを排除する。
     pub fn generate_preamble(&mut self) -> Vec<f32> {
-        let sf = 15; // プリアンブルはsf=15
+        let sf = self.config.preamble_sf; // DspConfig の設定を使用
         let repeat = self.config.preamble_repeat;
         let mut chips_i = Vec::with_capacity(sf * repeat);
         let mut chips_q = Vec::with_capacity(sf * repeat);
 
-        for i in 0..repeat {
-            // 最後のシンボルのみ反転 (DBPSK delta=2)、それ以外はそのまま (delta=0)
-            let delta = if i == repeat - 1 { 2 } else { 0 };
-            self.prev_phase = (self.prev_phase + delta) & 0x03;
-            let (si, sq) = phase_to_iq(self.prev_phase);
+        let zc = crate::common::zadoff_chu::ZadoffChu::new(sf, 1);
+        let zc_seq = zc.generate_sequence();
 
-            let walsh_seq = &self.wdict.w16[0]; // Walsh[0]
-            for &w in walsh_seq.iter().take(sf) {
-                let w_val = w as f32;
-                chips_i.push(si * w_val);
-                chips_q.push(sq * w_val);
+        for i in 0..repeat {
+            // 最後のシンボルのみ反転
+            let sign = if i == repeat - 1 { -1.0 } else { 1.0 };
+
+            for val in &zc_seq {
+                chips_i.push(sign * val.re);
+                chips_q.push(sign * val.im);
             }
         }
 
@@ -260,6 +259,8 @@ impl Modulator {
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
+        self.prev_phase = 0; // フレーム開始時にリセット
+
         // プリアンブル生成
         // 注意: generate_preamble内部で chips_to_samples が呼ばれ、NCOが進む。
         // プリアンブルは DBPSK (delta 0 or 2) として扱う。
@@ -275,11 +276,12 @@ impl Modulator {
         let mut sync_chips_i = Vec::new();
         let mut sync_chips_q = Vec::new();
         let walsh_seq = &self.wdict.w16[0];
+        let sf_sync = 15; // 15チップに固定
         for &bit in &sync_bits {
             let delta = if bit == 0 { 0 } else { 2 };
             self.prev_phase = (self.prev_phase + delta) & 0x03;
             let (si, sq) = phase_to_iq(self.prev_phase);
-            for &w in walsh_seq.iter().take(15) {
+            for &w in walsh_seq.iter().take(sf_sync) {
                 let w_val = w as f32;
                 sync_chips_i.push(si * w_val);
                 sync_chips_q.push(sq * w_val);
@@ -366,7 +368,7 @@ mod tests {
         preamble.extend(mod_.flush());
 
         let config = DspConfig::default_48k();
-        let expected_base = 15 * config.preamble_repeat * config.samples_per_chip();
+        let expected_base = config.preamble_sf * config.preamble_repeat * config.samples_per_chip();
 
         // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
         // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
@@ -653,29 +655,27 @@ mod tests {
         assert!(!frame.is_empty());
         assert!(frame.iter().all(|&s| s.is_finite()));
 
-        // フレーム長の妥当性計算:
-        // 1. プリアンブル: sf=15, repeat=2, spc=6 -> 180
-        // 2. 同期ワード: sf=15, bits=16, spc=6 -> 1440
-        // 3. ペイロード: sf=16, symbols=1, spc=6 -> 96
-        // 4. マージン: sf=16, symbols=1, spc=6 -> 96
-        let preamble_len = 15 * 2 * 6;
-        let sync_len = 15 * 16 * 6;
+        // フレーム長の妥当性計算（設定値ベース）
+        let spc = mod_.config.samples_per_chip();
+        let preamble_len = mod_.config.preamble_sf * mod_.config.preamble_repeat * spc;
+        let sync_len = 15 * mod_.config.sync_word_bits * spc;
         let payload_len = 96;
         let margin_len = 96;
-        let expected_base = preamble_len + sync_len + payload_len + margin_len; // 1812
+        let expected_base = preamble_len + sync_len + payload_len + margin_len;
 
         // 物理的テール (32サンプル) を加算
         // encode_frame() 内部ですでに flush() が呼ばれており、RRCのテールは押し出されている。
         // リサンプラによる物理的な伸び（立ち上がり16 + 立ち下がり16）の 32 サンプルを加算する。
         let expected_total = expected_base + 32;
+        let diff = (frame.len() as i32 - expected_total as i32).abs();
 
         assert!(
-            (frame.len() as i32 - expected_total).abs() <= 5,
+            diff <= 5,
             "Frame length mismatch: actual={}, expected_total={}, base={}, diff={}",
             frame.len(),
             expected_total,
             expected_base,
-            (frame.len() as i32 - expected_total).abs()
+            diff
         );
     }
 
@@ -686,10 +686,10 @@ mod tests {
         let mut preamble = mod_.generate_preamble();
         preamble.extend(mod_.flush());
 
-        // プリアンブルはWalsh[0]で構成される
-        let sf = 15;
+        // プリアンブルは設定値のZadoff-Chu SFで構成される
+        let sf = mod_.config.preamble_sf;
         let repeat = mod_.config.preamble_repeat;
-        let expected_base = sf * repeat * mod_.config.samples_per_chip(); // 180
+        let expected_base = sf * repeat * mod_.config.samples_per_chip();
 
         // 物理的テール (130サンプル) を加算
         let expected_total = expected_base + 130;
@@ -763,14 +763,14 @@ mod tests {
 
     // ========== 厳密な信号処理テスト ==========
 
-    /// プリアンブルの数学的正しさ：sf=15, Walsh[0], 符号反転パターン
+    /// プリアンブルの数学的正しさ：設定SFのZadoff-Chu、符号反転パターン
     #[test]
     fn test_preamble_math_rigor() {
         let mut mod_ = make_modulator();
         mod_.reset();
 
         let preamble = mod_.generate_preamble();
-        let sf = 15;
+        let sf = mod_.config.preamble_sf;
         let repeat = mod_.config.preamble_repeat;
 
         // 根拠1: RRCフィルタの群遅延 (L-1)/2サンプル + リサンプラの補間遅延
@@ -1204,18 +1204,14 @@ mod tests {
 
         let repeat = mod_.config.preamble_repeat;
         let spc = mod_.config.samples_per_chip();
-        let symbol_len = 15 * spc;
+        let symbol_len = mod_.config.preamble_sf * spc;
         let delay = mod_.delay();
 
         // 各シンボルのエネルギーを、物理的な遅延を考慮した窓で計算
         let mut symbol_energies = Vec::new();
         for sym_idx in 0..repeat {
-            // 物理的根拠：
-            // Modulator::delay() は最初の入力 $x[0]$ がピークに達する時間である。
-            // ベースバンドRRCフィルタの遅延 (24) は出力レートで 48 サンプルに相当する。
-            // シンボルのエネルギー中心を正確に捉えるため、このオフセットを加味する。
-            let rrc_offset = 48;
-            let center = delay + sym_idx * symbol_len + rrc_offset;
+            // 設定依存のシンボル中心窓でエネルギーを評価する。
+            let center = delay + sym_idx * symbol_len + symbol_len / 2;
             let start = center.saturating_sub(symbol_len / 2);
             let end = center + symbol_len / 2;
 

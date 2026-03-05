@@ -548,15 +548,15 @@ describe('Sender.vue', () => {
       const sampleButtons = wrapper.findAll('.sample-option-btn');
       expect(sampleButtons).toHaveLength(2);
 
-      // WebP サンプルに切り替え
+      // AVIF サンプルに切り替え
       await sampleButtons[1].trigger('click');
 
       const sampleInfo = wrapper.find('.sample-info');
-      expect(sampleInfo.text()).toContain('webp.webp');
-      expect(sampleInfo.text()).toContain('3874');
+      expect(sampleInfo.text()).toContain('test0.avif');
+      expect(sampleInfo.text()).toContain('4008');
 
       const vm = wrapper.vm as any;
-      expect(vm.selectedSample.id).toBe('webp');
+      expect(vm.selectedSample.id).toBe('avif');
     });
   });
 

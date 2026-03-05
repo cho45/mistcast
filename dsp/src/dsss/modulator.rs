@@ -90,7 +90,7 @@ impl Modulator {
 
     /// デフォルト設定 (48kHz) で変調器を作成する
     pub fn default_48k() -> Self {
-        Self::new(DspConfig::default_48k())
+        Self::new(crate::dsss::params::dsp_config_48k())
     }
 
     /// プリアンブル (M系列の [M, M, M, -M] パターン) を生成する
@@ -403,7 +403,7 @@ mod tests {
         // ストリームの末尾を出し切る
         preamble.extend(mod_.flush());
 
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let expected_base =
             config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
 
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_modulate_length() {
         let mut mod_ = make_modulator();
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let bits = vec![0u8; 8];
         let mut samples = mod_.modulate(&bits);
         // ストリームの末尾を出し切る
@@ -592,7 +592,7 @@ mod tests {
     /// 44.1kHzでも動作すること
     #[test]
     fn test_44k_modulation() {
-        let mut mod_ = Modulator::new(DspConfig::default_44k());
+        let mut mod_ = Modulator::new(crate::dsss::params::dsp_config_44k());
         let bits = vec![0u8, 1, 0, 1];
         let samples = mod_.modulate(&bits);
         assert!(!samples.is_empty());

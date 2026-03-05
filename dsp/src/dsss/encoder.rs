@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn test_encode_burst_amortizes_sync_overhead() {
-        let config = DspConfig::default_48k();
+        let config = crate::dsss::params::dsp_config_48k();
         let mut enc = Encoder::new(EncoderConfig::new(config));
         let p0 = FountainPacket {
             seq: 0,

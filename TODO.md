@@ -1,7 +1,0 @@
-- [x] refs/radio を参考にwasmのビルド基盤を整える
-- [x] toplevel に vitest を導入する
-- [x] node + wasm でテストが実行できるようにする
-- [x] 48kHz を前提に node でパフォーマンステストをしリアルタイム余裕度を計測する
-- [x] vite でのビルド環境整備 (app / worker / audiworkletprocessor)
-- [x] refs/radio 実装を参考に AudioWorklet と Worker での MessagePort でのやりとりと実装 (バッファリサイクルのファイルはそのままもってきていい)
-- [x] デモ作成 (送信側 + 受信側 を同一ページでいい。マイク入力と内部接続2通り)

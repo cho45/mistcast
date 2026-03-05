@@ -89,6 +89,13 @@ impl Nco {
         val
     }
 
+    /// nサンプル分発振を進める。
+    pub fn skip(&mut self, n: usize) {
+        for _ in 0..n {
+            self.step();
+        }
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[inline]
     pub fn step8_interleaved(&mut self) -> (v128, v128, v128, v128) {

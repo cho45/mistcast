@@ -89,7 +89,13 @@
         "parse": "Packets that failed to parse (invalid format or structural error).",
         "inv_nbr": "Packets that failed consistency check between neighboring packets.",
         "last_seq": "Sequence number of the most recently received packet (-1 if none).",
-        "last_rank_up": "Sequence number of the packet that last increased the matrix rank (decoding progress indicator)."
+        "last_rank_up": "Sequence number of the packet that last increased the matrix rank (decoding progress indicator).",
+        "fde_selected_frames": "Number of frames processed using Frequency Domain Equalization (FDE) path.",
+        "raw_selected_frames": "Number of frames processed using raw time-domain path.",
+        "last_path_used": "Last selected decoding path (0=raw, 1=FDE).",
+        "last_pred_mse_fde": "Predicted Mean Squared Error for FDE path (lower is better).",
+        "last_pred_mse_raw": "Predicted Mean Squared Error for raw path (lower is better).",
+        "last_est_snr_db": "Estimated Signal-to-Noise Ratio in dB."
       }
     },
     "timing": {

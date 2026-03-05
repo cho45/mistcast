@@ -33,8 +33,9 @@ pub mod params {
     pub const RRC_ALPHA: f32 = 0.30;
     pub const CHIP_RATE: f32 = 8000.0;
     pub const PREAMBLE_REPEAT: usize = 2;
-    pub const SYNC_WORD_BITS: usize = 16;
+    pub const SYNC_WORD_BITS: usize = 8;
     pub const SYNC_WORD: u32 = 0xDEAD_BEEF;
+    pub const PREAMBLE_SF: usize = 71;
     pub const PACKETS_PER_SYNC_BURST: usize = 1;
     pub const PAYLOAD_SIZE: usize = 16;
     pub const FIXED_K: usize = 10;
@@ -57,6 +58,7 @@ pub struct DspConfig {
     pub preamble_repeat: usize,
     pub sync_word_bits: usize,
     pub packets_per_burst: usize,
+    pub preamble_sf: usize,
 }
 
 impl DspConfig {
@@ -71,13 +73,14 @@ impl DspConfig {
             preamble_repeat: params::PREAMBLE_REPEAT,
             sync_word_bits: params::SYNC_WORD_BITS,
             packets_per_burst: params::PACKETS_PER_SYNC_BURST,
+            preamble_sf: params::PREAMBLE_SF,
         }
     }
 
     pub fn default_48k() -> Self {
         Self::new(params::DEFAULT_SAMPLE_RATE)
     }
-    
+
     pub fn default_44k() -> Self {
         Self::new(44100.0)
     }
@@ -145,7 +148,7 @@ impl WasmDsssDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
         console_error_panic_hook::set_once();
-        let mut config = DspConfig::new(sample_rate);
+        let mut config = dsss::params::dsp_config(sample_rate);
         config.packets_per_burst = packets_per_burst;
         WasmDsssDecoder {
             inner: dsss::decoder::Decoder::new(
@@ -192,7 +195,7 @@ pub struct WasmDsssEncoder {
 impl WasmDsssEncoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
-        let mut config = DspConfig::new(sample_rate);
+        let mut config = dsss::params::dsp_config(sample_rate);
         config.packets_per_burst = packets_per_burst;
         let enc_config = dsss::encoder::EncoderConfig::new(config);
         WasmDsssEncoder {
@@ -259,6 +262,12 @@ pub struct WasmMaryDecodeProgress {
     pub last_rank_up_seq: i32,
     pub progress: f32,
     pub complete: bool,
+    pub fde_selected_frames: usize,
+    pub raw_selected_frames: usize,
+    pub last_path_used: i32,
+    pub last_pred_mse_fde: f32,
+    pub last_pred_mse_raw: f32,
+    pub last_est_snr_db: f32,
     #[wasm_bindgen(skip)]
     pub basis_matrix: Vec<u8>,
 }
@@ -283,13 +292,14 @@ impl WasmMaryDecoder {
         console_error_panic_hook::set_once();
         let mut config = DspConfig::new(sample_rate);
         config.packets_per_burst = packets_per_burst;
-        WasmMaryDecoder {
-            inner: mary::decoder::Decoder::new(
-                params::FIXED_K * params::PAYLOAD_SIZE,
-                params::FIXED_K,
-                config,
-            ),
-        }
+        let mut inner = mary::decoder::Decoder::new(
+            params::FIXED_K * params::PAYLOAD_SIZE,
+            params::FIXED_K,
+            config,
+        );
+        inner.set_fde_enabled(true);
+        inner.set_fde_auto_path_select(true);
+        WasmMaryDecoder { inner }
     }
     pub fn process_samples(&mut self, samples: &[f32]) -> WasmMaryDecodeProgress {
         let progress = self.inner.process_samples(samples);
@@ -307,6 +317,12 @@ impl WasmMaryDecoder {
             last_rank_up_seq: progress.last_rank_up_seq,
             progress: progress.progress,
             complete: progress.complete,
+            fde_selected_frames: progress.fde_selected_frames,
+            raw_selected_frames: progress.raw_selected_frames,
+            last_path_used: progress.last_path_used,
+            last_pred_mse_fde: progress.last_pred_mse_fde,
+            last_pred_mse_raw: progress.last_pred_mse_raw,
+            last_est_snr_db: progress.last_est_snr_db,
             basis_matrix: progress.basis_matrix,
         }
     }

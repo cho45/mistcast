@@ -20,7 +20,7 @@ const TOAST_DURATION_MS = 5000;
 const STORAGE_KEY = 'sender-send-mode';
 
 import sampleTestPng from '../assets/sample-files/test.png';
-import sampleWebpWebp from '../assets/sample-files/webp.webp';
+import sampleTest0Avif from '../assets/sample-files/test0.avif';
 
 interface SampleFile {
   id: string;
@@ -31,7 +31,7 @@ interface SampleFile {
 
 const SAMPLE_FILES: SampleFile[] = [
   { id: 'png', name: 'test.png', url: sampleTestPng, size: 921 },
-  { id: 'webp', name: 'webp.webp', url: sampleWebpWebp, size: 3874 },
+  { id: 'avif', name: 'test0.avif', url: sampleTest0Avif, size: 4008 },
 ];
 
 const selectedSample = ref<SampleFile>(SAMPLE_FILES[0]);
