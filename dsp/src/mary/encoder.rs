@@ -7,6 +7,7 @@ use crate::coding::fountain::{FountainEncoder, FountainPacket};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::Packet;
+use crate::mary::interleaver_config;
 use crate::mary::modulator::Modulator;
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
@@ -24,16 +25,11 @@ pub struct EncoderConfig {
 
 impl EncoderConfig {
     pub fn new(dsp: DspConfig) -> Self {
-        use crate::frame::packet::PACKET_BYTES;
-        let raw_bits = PACKET_BYTES * 8 + 6; // テールビット(6)含む
-        let fec_bits = raw_bits * 2;
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows);
         EncoderConfig {
             fountain_k: 10,
             packets_per_sync_burst: dsp.packets_per_burst,
-            il_rows: rows,
-            il_cols: cols,
+            il_rows: interleaver_config::INTERLEAVER_ROWS,
+            il_cols: interleaver_config::INTERLEAVER_COLS,
             dsp,
         }
     }
@@ -57,13 +53,10 @@ impl Encoder {
         let config = EncoderConfig::new(dsp_config);
         let packets_per_sync_burst = config.packets_per_sync_burst;
         let modulator = Modulator::new(config.dsp.clone());
-        // バッファサイズ計算
-        let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
-        let fec_bits = raw_bits * 2;
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows);
-        let interleaved_size = rows * cols;
-        let mary_aligned_size = interleaved_size.div_ceil(6) * 6;
+        // バッファサイズ計算（interleaver_config使用）
+        let fec_bits = interleaver_config::fec_bits();
+        let interleaved_size = interleaver_config::interleaved_bits();
+        let mary_aligned_size = interleaver_config::mary_aligned_bits();
 
         // Modulator 出力バッファサイズ (最大フレームサンプル数)
         let max_bits = mary_aligned_size * packets_per_sync_burst;
@@ -87,13 +80,10 @@ impl Encoder {
 
     pub fn with_config(config: EncoderConfig) -> Self {
         let packets_per_sync_burst = config.packets_per_sync_burst;
-        // バッファサイズ計算
-        let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
-        let fec_bits = raw_bits * 2;
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows);
-        let interleaved_size = rows * cols;
-        let mary_aligned_size = interleaved_size.div_ceil(6) * 6;
+        // バッファサイズ計算（interleaver_config使用）
+        let fec_bits = interleaver_config::fec_bits();
+        let interleaved_size = interleaver_config::interleaved_bits();
+        let mary_aligned_size = interleaver_config::mary_aligned_bits();
 
         // Modulator 出力バッファサイズ
         let max_bits = mary_aligned_size * packets_per_sync_burst;
@@ -177,16 +167,15 @@ impl Encoder {
         let coded = fec::encode(&bits);
         self.fec_buffer.extend_from_slice(&coded);
 
-        // インターリーバのサイズを決定
-        let raw_bits = crate::frame::packet::PACKET_BYTES * 8 + 6;
-        let fec_bits = raw_bits * 2;
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows);
+        // インターリーバのサイズ（interleaver_config使用）
+        let rows = interleaver_config::INTERLEAVER_ROWS; // 29
+        let cols = interleaver_config::INTERLEAVER_COLS; // 12
+        let interleaved_size = rows * cols; // 348 = fec_bits
 
         // パディング（バッファ使用）
         self.padded_buffer.clear();
         self.padded_buffer.extend_from_slice(&self.fec_buffer);
-        self.padded_buffer.resize(rows * cols, 0);
+        self.padded_buffer.resize(interleaved_size, 0);
 
         // スクランブル
         let mut scrambler = Scrambler::default();
@@ -194,15 +183,15 @@ impl Encoder {
 
         // インターリーブ（インプレースAPI使用）
         let interleaver = BlockInterleaver::new(rows, cols);
-        self.interleaved_buffer.resize(rows * cols, 0);
+        self.interleaved_buffer.resize(interleaved_size, 0);
         interleaver.interleave_in_place(
             &self.padded_buffer,
-            &mut self.interleaved_buffer[..rows * cols],
+            &mut self.interleaved_buffer[..interleaved_size],
         );
 
-        // Maryシンボル（6ビット単位）の境界に揃えるようにパディング
-        let mary_aligned_size = (rows * cols).div_ceil(6) * 6;
-        self.interleaved_buffer.resize(mary_aligned_size, 0);
+        // Maryシンボル境界（6ビット単位）に揃える
+        // 348は6で割り切れるのでパディング不要
+        self.interleaved_buffer.resize(interleaved_size, 0);
 
         self.interleaved_buffer.clone()
     }
@@ -764,22 +753,21 @@ mod tests {
 
     /// encode_packet_bitsのビット数を検証
     ///
-    /// 既存のDQPSK実装と同じインターリーバ設定を使用していることを確認
-    /// 根拠：既存DQPSKは2ビット/シンボルで352ビット（176シンボル）
-    ///       MaryDQPSKは6ビット/シンボルで352ビットは割り切れない（58.66...シンボル）
-    ///       最後の4ビットはパディングとして扱う
+    /// インターリーバサイズ最適化後の設定を検証
+    /// 根拠：FECビット数(348)とインターリーバサイズ(29×12=348)が完全一致
+    ///       348は6で割り切れるため、Maryシンボル境界に追加のパディングが不要
+    ///       58シンボルで無駄なく伝送できる
     #[test]
     fn test_encode_packet_bits_bit_count() {
-        use crate::frame::packet::PACKET_BYTES;
-
         let mut encoder = make_encoder();
         let data = vec![0xCCu8; 16];
         encoder.set_data(&data);
 
         // ビット数の計算
         // 1. PACKET_BYTES * 8 = 21 * 8 = 168ビット（元のパケット）
-        // 2. fec::encode()で2倍化 = 336ビット
-        // 3. インターリーバパディングでrows * colsに調整
+        // 2. fec::encode()で2倍化 = 348ビット（テールビット6含む）
+        // 3. インターリーバサイズ 29×12 = 348ビット（FECビット数と一致）
+        // 4. 348は6で割り切れる → 58シンボル（パディング不要）
         let packet_data = vec![0xDDu8; crate::params::PAYLOAD_SIZE];
         let packet = FountainPacket {
             seq: 0,
@@ -788,29 +776,27 @@ mod tests {
         };
         let bits = encoder.encode_packet_bits(&packet);
 
-        // インターリーバサイズ計算（既存DQPSKと同じ）
-        let raw_bits = PACKET_BYTES * 8 + 6; // 168 + 6 = 174（テールビット含む）
-        let fec_bits = raw_bits * 2; // 348
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows); // 348 / 16 = 21.75 → 22
-        let interleaved_bits = rows * cols; // 16 * 22 = 352
-
-        // Maryシンボル境界（6ビット）にパディングした後の期待されるビット数
-        let expected_mary_bits = interleaved_bits.div_ceil(6) * 6; // 354
+        // インターリーバサイズ計算（interleaver_config使用）
+        let expected_bits = interleaver_config::interleaved_bits(); // 348
+        let expected_symbols = interleaver_config::mary_symbols(); // 58
 
         assert_eq!(
             bits.len(),
-            expected_mary_bits,
-            "encode_packet_bits should produce {} bits (6-bit aligned), got {}",
-            expected_mary_bits,
+            expected_bits,
+            "encode_packet_bits should produce {} bits (no padding needed), got {}",
+            expected_bits,
             bits.len()
         );
 
         // MaryDQPSKシンボル数（6ビット/シンボル）
-        let full_symbols = bits.len() / 6; // 59
-        assert_eq!(full_symbols, 59, "Should have 59 full symbols");
+        let full_symbols = bits.len() / 6;
+        assert_eq!(full_symbols, expected_symbols, "Should have {} full symbols", expected_symbols);
 
-        // 注：最後の4ビットはmodulatorで無視されるか、パディングとして扱われる
-        // decoderでも同様にパディングを無視する必要がある
+        // パディング不要であることを確認
+        assert_eq!(
+            bits.len(),
+            interleaver_config::fec_bits(),
+            "ビット数はFECビット数と一致すべき（パディングなし）"
+        );
     }
 }

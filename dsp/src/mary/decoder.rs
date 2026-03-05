@@ -17,6 +17,7 @@ use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::frame::packet::Packet;
 use crate::mary::demodulator::Demodulator;
+use crate::mary::interleaver_config;
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
@@ -255,8 +256,8 @@ impl Decoder {
             rrc_filtered_q: Vec::with_capacity(6144),
             cir_buffer: vec![Complex32::new(0.0, 0.0); cir_buffer_size],
             complex_buffer: Vec::with_capacity(16_000),
-            packet_llrs_buffer: Vec::with_capacity(352),
-            deinterleave_buffer: Vec::with_capacity(352),
+            packet_llrs_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
+            deinterleave_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
         }
     }
 
@@ -405,7 +406,7 @@ impl Decoder {
             let repeat = self.config.preamble_repeat;
             let sync_word_bits = self.config.sync_word_bits;
             let packets_per_frame = self.config.packets_per_burst;
-            let expected_symbols = (352usize).div_ceil(6);
+            let expected_symbols = interleaver_config::mary_symbols();
 
             let sync_start = s.peak_sample_idx.saturating_sub(spc / 2);
             let preamble_len = sf_preamble * repeat * spc;
@@ -750,8 +751,7 @@ impl Decoder {
         }
 
         // 3. パケット復調
-        let interleaved_bits: usize = 352;
-        let expected_symbols = interleaved_bits.div_ceil(6);
+        let expected_symbols = interleaver_config::mary_symbols();
         let packet_samples = expected_symbols * sf_payload * spc;
         let max_packets = self.config.packets_per_burst;
         let packets_decoded = self.packets_processed_in_burst.saturating_sub(1);
@@ -815,8 +815,8 @@ impl Decoder {
     fn process_packet_core(&mut self) -> (f32, bool, bool) {
         let spc = self.config.proc_samples_per_chip().max(1);
         let sf_payload = PAYLOAD_SPREAD_FACTOR;
-        let interleaved_bits: usize = 352;
-        let expected_symbols = interleaved_bits.div_ceil(6);
+        let interleaved_bits = interleaver_config::interleaved_bits();
+        let expected_symbols = interleaver_config::mary_symbols();
 
         let mut st = self
             .tracking_state
@@ -924,13 +924,12 @@ impl Decoder {
 
     fn decode_llrs(&mut self, llrs: &[f32]) -> usize {
         let p_bits_len = crate::frame::packet::PACKET_BYTES * 8;
-        let raw_bits = p_bits_len + 6;
-        let fec_bits = raw_bits * 2;
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows);
-        let interleaved_bits = rows * cols;
+        let fec_bits = interleaver_config::fec_bits();
+        let rows = interleaver_config::INTERLEAVER_ROWS; // 29
+        let cols = interleaver_config::INTERLEAVER_COLS; // 12
+        let interleaved_bits = interleaver_config::interleaved_bits(); // 348
 
-        let packet_chunk_bits = interleaved_bits.div_ceil(6) * 6;
+        let packet_chunk_bits = interleaver_config::mary_aligned_bits(); // 348（パディングなし）
         let mut success_count = 0;
 
         for packet_llrs in llrs.chunks(packet_chunk_bits) {
