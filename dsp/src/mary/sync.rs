@@ -63,8 +63,8 @@ impl MarySyncDetector {
         }
 
         // Sync Word bits (16 bits)
-        // Modulator.encode_frame: uses prev_phase (starts at 0) and DBPSK delta
-        let mut current_phase_factor = 1.0f32; // prev_phase = 0 -> factor 1.0
+        // Modulator.encode_frame: maintains its own prev_phase (reset to 0 at start)
+        let mut current_phase_factor = 1.0; 
         let word = crate::params::SYNC_WORD;
         for i in 0..config.sync_word_bits {
             let bit = (word >> (config.sync_word_bits - 1 - i)) & 1;
@@ -107,7 +107,6 @@ impl MarySyncDetector {
         let sync_part_len = self.sync_sym_len * self.config.sync_word_bits;
         let required_len = preamble_len + sync_part_len;
         let spc = self.spc;
-        let coarse_step = 1;
 
         // プリアンブル + SYNC_WORD 分まで見えてから同期確定する。
         if i_ch.len() < start_offset + required_len {
@@ -115,6 +114,7 @@ impl MarySyncDetector {
         } else {
             let search_range_end = i_ch.len() - required_len;
             let mut provisional_best: Option<(SyncResult, usize)> = None;
+            let coarse_step = 1;
 
             // --- 1. 粗同期 & 精密同期 ---
             for n in (start_offset..=search_range_end).step_by(coarse_step) {
@@ -311,6 +311,10 @@ impl MarySyncDetector {
             let (ci, cq, _) = self.correlate_one_symbol(i_ch, q_ch, n + d * self.spc, true);
             out[d] = Complex32::new(ci, cq) / sf as f32;
         }
+    }
+
+    pub fn sync_symbols(&self) -> &[f32] {
+        &self.sync_symbols
     }
 }
 

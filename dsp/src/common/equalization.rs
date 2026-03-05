@@ -141,6 +141,10 @@ impl FrequencyDomainEqualizer {
         self.reset();
     }
 
+    pub fn overlap_len(&self) -> usize {
+        self.overlap_len
+    }
+
     /// 任意の長さのストリーム入力サンプルを受け取り、等化処理を行う。
     /// 内部バッファにデータが蓄積され、ブロックサイズに達するごとに出力バッファへ追記される。
     pub fn process(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) {
@@ -211,6 +215,11 @@ impl FrequencyDomainEqualizer {
         self.total_input_samples = original_total_input;
 
         output.extend_from_slice(&temp_out);
+    }
+
+    /// フィルタリングによって生じる内部遅延サンプル数を返す。
+    pub fn filter_delay(&self) -> usize {
+        self.filter_delay
     }
 
     /// 等化器の内部状態をリセットし、新しいパケットの受信に備える。

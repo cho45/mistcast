@@ -259,6 +259,8 @@ impl Modulator {
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
+        self.prev_phase = 0; // フレーム開始時にリセット
+
         // プリアンブル生成
         // 注意: generate_preamble内部で chips_to_samples が呼ばれ、NCOが進む。
         // プリアンブルは DBPSK (delta 0 or 2) として扱う。
@@ -274,11 +276,12 @@ impl Modulator {
         let mut sync_chips_i = Vec::new();
         let mut sync_chips_q = Vec::new();
         let walsh_seq = &self.wdict.w16[0];
+        let sf_sync = 15; // 15チップに固定
         for &bit in &sync_bits {
             let delta = if bit == 0 { 0 } else { 2 };
             self.prev_phase = (self.prev_phase + delta) & 0x03;
             let (si, sq) = phase_to_iq(self.prev_phase);
-            for &w in walsh_seq.iter().take(15) {
+            for &w in walsh_seq.iter().take(sf_sync) {
                 let w_val = w as f32;
                 sync_chips_i.push(si * w_val);
                 sync_chips_q.push(sq * w_val);
