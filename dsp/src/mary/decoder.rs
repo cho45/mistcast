@@ -72,6 +72,7 @@ pub struct DecodeProgress {
     pub last_pred_mse_fde: f32,
     pub last_pred_mse_raw: f32,
     pub last_est_snr_db: f32,
+    pub ebn0_approx_db: f32,
     pub basis_matrix: Vec<u8>,
 }
 
@@ -1044,6 +1045,7 @@ impl Decoder {
     fn progress(&self) -> DecodeProgress {
         let needed = self.fountain_decoder.params().k;
         let progress = self.fountain_decoder.progress();
+        let ebn0_approx_db = estimate_ebn0_approx_db(&self.config, self.last_est_snr_db);
 
         DecodeProgress {
             received_packets: self.received_packets,
@@ -1065,6 +1067,7 @@ impl Decoder {
             last_pred_mse_fde: self.last_pred_mse_fde,
             last_pred_mse_raw: self.last_pred_mse_raw,
             last_est_snr_db: self.last_est_snr_db,
+            ebn0_approx_db,
             basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
     }
@@ -1387,6 +1390,22 @@ fn update_phase_rate(phase_rate: f32, phase_err: f32) -> f32 {
 fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
     (phase_rate + TRACKING_PHASE_PROP_GAIN * phase_err)
         .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
+}
+
+#[inline]
+fn estimate_ebn0_approx_db(config: &DspConfig, est_snr_db_internal: f32) -> f32 {
+    if !est_snr_db_internal.is_finite() {
+        return f32::NAN;
+    }
+
+    let chip_rate = config.chip_rate.max(1e-6);
+    let symbol_rate = chip_rate / PAYLOAD_SPREAD_FACTOR as f32;
+    let coded_bit_rate = symbol_rate * 6.0;
+    let code_rate = (crate::frame::packet::PACKET_BYTES as f32 * 8.0)
+        / interleaver_config::interleaved_bits() as f32;
+    let rb_info = (coded_bit_rate * code_rate).max(1e-6);
+    let beq = chip_rate; // 近似: 等価雑音帯域幅 B ≈ Rc
+    est_snr_db_internal + 10.0 * (beq / rb_info).log10()
 }
 
 #[cfg(test)]

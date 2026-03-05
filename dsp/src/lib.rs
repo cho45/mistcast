@@ -268,6 +268,7 @@ pub struct WasmMaryDecodeProgress {
     pub last_pred_mse_fde: f32,
     pub last_pred_mse_raw: f32,
     pub last_est_snr_db: f32,
+    pub ebn0_approx_db: f32,
     #[wasm_bindgen(skip)]
     pub basis_matrix: Vec<u8>,
 }
@@ -323,6 +324,7 @@ impl WasmMaryDecoder {
             last_pred_mse_fde: progress.last_pred_mse_fde,
             last_pred_mse_raw: progress.last_pred_mse_raw,
             last_est_snr_db: progress.last_est_snr_db,
+            ebn0_approx_db: progress.ebn0_approx_db,
             basis_matrix: progress.basis_matrix,
         }
     }
