@@ -134,6 +134,20 @@ impl RrcFilter {
         samples.iter().map(|&s| self.process(s)).collect()
     }
 
+    /// サンプル列をインプレースで処理する（ゼロアロケーション）
+    ///
+    /// # 引数
+    /// - `samples`: 処理するサンプル列（入出力兼用）
+    ///
+    /// # 注意
+    /// 入力サンプルは上書きされます。元の値を保持する必要がある場合は、
+    /// 事前にコピーを作成してください。
+    pub fn process_block_in_place(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            *s = self.process(*s);
+        }
+    }
+
     /// フィルタ状態をリセットする
     pub fn reset(&mut self) {
         self.buffer.iter_mut().for_each(|v| *v = 0.0);
@@ -362,6 +376,66 @@ mod tests {
         assert_eq!(output.len(), input.len());
         let max = output.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         assert!(max > 0.0);
+    }
+
+    /// process_block_in_place の動作確認
+    #[test]
+    fn test_process_block_in_place() {
+        let config = test_config();
+        let mut filter = RrcFilter::from_config(&config);
+
+        // 入力をコピー
+        let input: Vec<f32> = (0..200).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let mut buffer = input.clone();
+
+        // インプレース処理
+        filter.process_block_in_place(&mut buffer);
+
+        // 通常の処理と比較
+        let expected = filter.process_block(&input);
+
+        assert_eq!(buffer.len(), expected.len());
+        for (i, (&actual, &exp)) in buffer.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-6,
+                "index {}: {} != {}",
+                i,
+                actual,
+                exp
+            );
+        }
+    }
+
+    /// process_block_in_place が process_block と同じ結果を出すこと
+    #[test]
+    fn test_process_block_in_place_matches_process_block() {
+        let config = test_config();
+        let mut filter1 = RrcFilter::from_config(&config.clone());
+        let mut filter2 = RrcFilter::from_config(&config);
+
+        let input: Vec<f32> = (0..1000).map(|i| {
+            let t = i as f32 / config.sample_rate;
+            0.7 * (2.0 * std::f32::consts::PI * 800.0 * t).sin()
+                + 0.2 * (2.0 * std::f32::consts::PI * 2300.0 * t).cos()
+        }).collect();
+
+        // 通常の処理
+        let expected = filter1.process_block(&input);
+
+        // インプレース処理
+        let mut buffer = input.clone();
+        filter2.process_block_in_place(&mut buffer);
+
+        assert_eq!(buffer.len(), expected.len());
+        for (i, (&actual, &exp)) in buffer.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-5,
+                "index {}: {} != {}",
+                i,
+                actual,
+                exp
+            );
+        }
     }
 
     #[test]

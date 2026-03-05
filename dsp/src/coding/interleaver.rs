@@ -38,6 +38,34 @@ impl BlockInterleaver {
         out
     }
 
+    /// インターリーブ処理 (送信側, インプレース版)
+    ///
+    /// # 引数
+    /// - `input`: 入力ビット列
+    /// - `output`: 出力バッファ（十分なサイズが必要）
+    ///
+    /// # パニック
+    /// output.len() < input.len() の場合パニックします
+    pub fn interleave_in_place(&self, input: &[u8], output: &mut [u8]) {
+        let total = self.rows * self.cols;
+        assert!(output.len() >= input.len(), "output buffer too small");
+
+        // 行列に書き込み（列優先で読み出すため、まず行優先で格納）
+        let mut matrix = vec![0u8; total];
+        for (i, &bit) in input.iter().enumerate().take(total) {
+            matrix[i] = bit;
+        }
+
+        // 列優先で読み出し
+        let mut k = 0;
+        for col in 0..self.cols {
+            for row in 0..self.rows {
+                output[k] = matrix[row * self.cols + col];
+                k += 1;
+            }
+        }
+    }
+
     /// デインターリーブ処理 (受信側)
     pub fn deinterleave(&self, bits: &[u8]) -> Vec<u8> {
         let total = self.rows * self.cols;
@@ -50,6 +78,30 @@ impl BlockInterleaver {
         matrix
     }
 
+    /// デインターリーブ処理 (受信側, インプレース版)
+    ///
+    /// # 引数
+    /// - `input`: 入力ビット列
+    /// - `output`: 出力バッファ（十分なサイズが必要）
+    ///
+    /// # パニック
+    /// output.len() < input.len() の場合パニックします
+    pub fn deinterleave_in_place(&self, input: &[u8], output: &mut [u8]) {
+        let total = self.rows * self.cols;
+        assert!(output.len() >= input.len(), "output buffer too small");
+
+        // 一時的な行列バッファ
+        let mut matrix = vec![0u8; total];
+        for (k, &bit) in input.iter().enumerate().take(total) {
+            let col = k / self.rows;
+            let row = k % self.rows;
+            matrix[row * self.cols + col] = bit;
+        }
+
+        // 行列を出力にコピー
+        output[..total].copy_from_slice(&matrix);
+    }
+
     /// デインターリーブ処理 (受信側, f32値)
     pub fn deinterleave_f32(&self, values: &[f32]) -> Vec<f32> {
         let total = self.rows * self.cols;
@@ -60,6 +112,30 @@ impl BlockInterleaver {
             matrix[row * self.cols + col] = value;
         }
         matrix
+    }
+
+    /// デインターリーブ処理 (受信側, f32値, インプレース版)
+    ///
+    /// # 引数
+    /// - `input`: 入力f32値列
+    /// - `output`: 出力バッファ（十分なサイズが必要）
+    ///
+    /// # パニック
+    /// output.len() < input.len() の場合パニックします
+    pub fn deinterleave_f32_in_place(&self, input: &[f32], output: &mut [f32]) {
+        let total = self.rows * self.cols;
+        assert!(output.len() >= input.len(), "output buffer too small");
+
+        // 一時的な行列バッファ
+        let mut matrix = vec![0.0f32; total];
+        for (k, &value) in input.iter().enumerate().take(total) {
+            let col = k / self.rows;
+            let row = k % self.rows;
+            matrix[row * self.cols + col] = value;
+        }
+
+        // 行列を出力にコピー
+        output[..total].copy_from_slice(&matrix);
     }
 
     pub fn reset(&mut self) {}
@@ -94,5 +170,102 @@ mod tests {
         }
         let recovered = il.deinterleave_f32(&interleaved);
         assert_eq!(recovered, input);
+    }
+
+    /// インプレースAPIのテスト: interleave_in_place
+    #[test]
+    fn test_interleave_in_place() {
+        let il = BlockInterleaver::new(4, 8);
+        let input: Vec<u8> = (0..32u8).collect();
+
+        // 通常の処理
+        let expected = il.interleave(&input);
+
+        // インプレース処理
+        let mut output = vec![0u8; expected.len()];
+        il.interleave_in_place(&input, &mut output);
+
+        assert_eq!(output, expected);
+    }
+
+    /// インプレースAPIのテスト: deinterleave_in_place
+    #[test]
+    fn test_deinterleave_in_place() {
+        let il = BlockInterleaver::new(4, 8);
+        let input: Vec<u8> = (0..32u8).collect();
+
+        // インターリーブ
+        let interleaved = il.interleave(&input);
+
+        // 通常のデインターリーブ
+        let expected = il.deinterleave(&interleaved);
+
+        // インプレースデインターリーブ
+        let mut output = vec![0u8; expected.len()];
+        il.deinterleave_in_place(&interleaved, &mut output);
+
+        assert_eq!(output, expected);
+    }
+
+    /// インプレースAPIのテスト: deinterleave_f32_in_place
+    #[test]
+    fn test_deinterleave_f32_in_place() {
+        let il = BlockInterleaver::new(4, 8);
+        let input: Vec<f32> = (0..32).map(|i| i as f32 * 0.25 - 3.0).collect();
+
+        // インターリーブ
+        let mut interleaved = Vec::with_capacity(input.len());
+        for col in 0..il.cols() {
+            for row in 0..il.rows() {
+                interleaved.push(input[row * il.cols() + col]);
+            }
+        }
+
+        // 通常のデインターリーブ
+        let expected = il.deinterleave_f32(&interleaved);
+
+        // インプレースデインターリーブ
+        let mut output = vec![0.0f32; expected.len()];
+        il.deinterleave_f32_in_place(&interleaved, &mut output);
+
+        assert_eq!(output, expected);
+    }
+
+    /// インプレースAPIの往復テスト
+    #[test]
+    fn test_roundtrip_in_place() {
+        let il = BlockInterleaver::new(4, 8);
+        let input: Vec<u8> = (0..32u8).collect();
+
+        let mut temp1 = vec![0u8; input.len()];
+        let mut temp2 = vec![0u8; input.len()];
+
+        // インターリーブ -> デインターリーブ
+        il.interleave_in_place(&input, &mut temp1);
+        il.deinterleave_in_place(&temp1, &mut temp2);
+
+        assert_eq!(&temp2[..input.len()], &input[..]);
+    }
+
+    /// インプレースAPIのf32往復テスト
+    #[test]
+    fn test_f32_roundtrip_in_place() {
+        let il = BlockInterleaver::new(4, 8);
+        let input: Vec<f32> = (0..32).map(|i| i as f32 * 0.25 - 3.0).collect();
+
+        let mut interleaved = vec![0.0f32; input.len()];
+        let mut output = vec![0.0f32; input.len()];
+
+        // インターリーブ（手動で、インターリーバにはf32版のinterleaveがないため）
+        for col in 0..il.cols() {
+            for row in 0..il.rows() {
+                interleaved[col * il.rows() + row] = input[row * il.cols() + col];
+            }
+        }
+
+        // デインターリーブ
+        il.deinterleave_f32_in_place(&interleaved, &mut output);
+
+        assert_eq!(&output[..input.len()], &input[..]);
     }
 }
