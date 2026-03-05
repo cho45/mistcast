@@ -119,6 +119,8 @@ struct TrialResult {
     completion_sec: Option<f32>,
     elapsed_sec: f32,
     attempts: usize,
+    /// 同期済みフレーム数（CRCミスを含む）
+    synced_frames: usize,
     first_attempt_success: bool,
     bit_errors: usize,
     bits_compared: usize,
@@ -139,6 +141,7 @@ struct Metrics {
     deadline_hits: usize,
     first_attempt_successes: usize,
     total_attempts: usize,
+    total_synced_frames: usize,
     total_bit_errors: usize,
     total_bits_compared: usize,
     total_elapsed_sec: f32,
@@ -157,6 +160,7 @@ impl Metrics {
         self.trials += 1;
         self.total_elapsed_sec += t.elapsed_sec;
         self.total_attempts += t.attempts;
+        self.total_synced_frames += t.synced_frames;
         self.total_bit_errors += t.bit_errors;
         self.total_bits_compared += t.bits_compared;
         self.dropped_attempts += t.dropped_attempts;
@@ -189,6 +193,10 @@ impl Metrics {
 
     fn p_complete_deadline(&self) -> f32 {
         ratio(self.deadline_hits, self.trials)
+    }
+
+    fn synced_frame_ratio(&self) -> f32 {
+        ratio(self.total_synced_frames, self.total_attempts)
     }
 
     fn ber(&self) -> f32 {
@@ -482,7 +490,7 @@ fn parse_cli() -> Cli {
     let preamble_sf = kv
         .remove("preamble-sf")
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(13); // Default 13
+        .unwrap_or(dsp::params::PREAMBLE_SF);
 
     Cli {
         phy,
@@ -708,6 +716,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     completion_sec: Some(elapsed_sec),
                     elapsed_sec,
                     attempts,
+                    synced_frames: progress.received_packets + progress.crc_error_packets,
                     first_attempt_success: attempts == 1 && errs == 0,
                     bit_errors: errs,
                     bits_compared,
@@ -743,6 +752,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         completion_sec: Some(elapsed_sec),
                         elapsed_sec,
                         attempts,
+                        synced_frames: progress.received_packets + progress.crc_error_packets,
                         first_attempt_success: attempts == 1 && errs == 0,
                         bit_errors: errs,
                         bits_compared,
@@ -761,11 +771,13 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
     let bits_compared = payload.len() * 8;
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
+    let final_progress = decoder.process_samples(&[]);
     TrialResult {
         success: false,
         completion_sec: None,
         elapsed_sec,
         attempts,
+        synced_frames: final_progress.received_packets + final_progress.crc_error_packets,
         first_attempt_success: false,
         bit_errors,
         bits_compared,
@@ -905,6 +917,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     completion_sec: Some(elapsed_sec),
                     elapsed_sec,
                     attempts,
+                    synced_frames: progress.received_packets + progress.crc_error_packets,
                     first_attempt_success: attempts == 1 && errs == 0,
                     bit_errors: errs,
                     bits_compared,
@@ -942,6 +955,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         completion_sec: Some(elapsed_sec),
                         elapsed_sec,
                         attempts,
+                        synced_frames: progress.received_packets + progress.crc_error_packets,
                         first_attempt_success: attempts == 1 && errs == 0,
                         bit_errors: errs,
                         bits_compared,
@@ -962,11 +976,13 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
     let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
     let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
+    let final_progress = decoder.process_samples(&[]);
     TrialResult {
         success: false,
         completion_sec: None,
         elapsed_sec,
         attempts,
+        synced_frames: final_progress.received_packets + final_progress.crc_error_packets,
         first_attempt_success: false,
         bit_errors,
         bits_compared,
@@ -982,7 +998,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
 fn print_header() {
     println!(
-        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,multipath"
+        "scenario,phy,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,multipath"
     );
 }
 
@@ -1004,7 +1020,7 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         format!("{raw_ber:.6}")
     };
     println!(
-        "{scenario},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{:.2},{},{},{}",
+        "{scenario},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.3},{:.6},{:.6},{:.6},{:.3},{},{},{},{},{},{:.6},{},{:.2},{},{},{}",
         cli.phy,
         m.trials,
         m.successes,
@@ -1026,6 +1042,8 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         fmt_opt(m.p95_completion_sec()),
         fmt_opt(m.mean_completion_sec()),
         m.total_attempts,
+        m.total_synced_frames,
+        m.synced_frame_ratio(),
         m.dropped_attempts,
         m.avg_process_time_per_sample_ns(),
         fmt_opt(m.avg_cir_nmse()),
