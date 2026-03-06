@@ -196,6 +196,32 @@ const DEFAULT_COLUMNS: &[&str] = &[
     "avg_last_est_snr_db",
     "multipath",
 ];
+const ALL_COLUMNS: &[&str] = &[
+    "scenario",
+    "phy",
+    "mary_fde_mode",
+    "trials",
+    "awgn_snr_db",
+    "p_complete",
+    "ber",
+    "raw_ber",
+    "goodput_effective_bps",
+    "goodput_success_mean_bps",
+    "p95_complete_s",
+    "mean_complete_s",
+    "avg_proc_ns_sample",
+    "synced_frame_ratio",
+    "crc_pass_ratio",
+    "phase_gate_on_ratio",
+    "phase_innovation_reject_ratio",
+    "phase_err_abs_mean_rad",
+    "phase_err_abs_ge_0p5_ratio",
+    "phase_err_abs_ge_1p0_ratio",
+    "avg_last_est_snr_db",
+    "multipath",
+    "raw_err_run_mean",
+    "raw_err_run_max",
+];
 
 fn parse_positive_f32(value: &str) -> Result<f32, String> {
     let parsed = value
@@ -321,7 +347,7 @@ struct Cli {
     #[arg(
         long = "columns",
         value_delimiter = ',',
-        value_parser = PossibleValuesParser::new(DEFAULT_COLUMNS)
+        value_parser = PossibleValuesParser::new(ALL_COLUMNS)
     )]
     columns: Option<Vec<String>>,
     #[arg(long = "output", value_enum, default_value_t = OutputFormat::Csv)]
@@ -363,6 +389,9 @@ struct TrialResult {
     /// FEC符号化ビットのハード判定BER（Fountain符号の外側の生BER）
     raw_bit_errors: usize,
     raw_bits_compared: usize,
+    raw_error_runs: usize,
+    raw_error_run_bits: usize,
+    raw_error_run_max: usize,
     last_est_snr_db: f32,
     phase_gate_on_symbols: usize,
     phase_gate_off_symbols: usize,
@@ -392,6 +421,9 @@ struct Metrics {
     completion_secs: Vec<f32>,
     total_raw_bit_errors: usize,
     total_raw_bits_compared: usize,
+    total_raw_error_runs: usize,
+    total_raw_error_run_bits: usize,
+    max_raw_error_run_len: usize,
     sum_last_est_snr_db: f64,
     count_last_est_snr_db: usize,
     total_phase_gate_on_symbols: usize,
@@ -416,6 +448,9 @@ impl Metrics {
         self.dropped_attempts += t.dropped_attempts;
         self.total_raw_bit_errors += t.raw_bit_errors;
         self.total_raw_bits_compared += t.raw_bits_compared;
+        self.total_raw_error_runs += t.raw_error_runs;
+        self.total_raw_error_run_bits += t.raw_error_run_bits;
+        self.max_raw_error_run_len = self.max_raw_error_run_len.max(t.raw_error_run_max);
         self.total_tx_signal_energy += t.tx_signal_energy_sum;
         self.total_tx_signal_samples += t.tx_signal_samples;
         self.total_process_time_ns += t.process_time_ns;
@@ -518,6 +553,22 @@ impl Metrics {
             f32::NAN
         } else {
             self.total_raw_bit_errors as f32 / self.total_raw_bits_compared as f32
+        }
+    }
+
+    fn raw_err_run_mean(&self) -> Option<f32> {
+        if self.total_raw_error_runs == 0 {
+            None
+        } else {
+            Some(self.total_raw_error_run_bits as f32 / self.total_raw_error_runs as f32)
+        }
+    }
+
+    fn raw_err_run_max(&self) -> Option<usize> {
+        if self.max_raw_error_run_len == 0 {
+            None
+        } else {
+            Some(self.max_raw_error_run_len)
         }
     }
 
@@ -826,6 +877,9 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     process_time_ns: total_process_ns,
                     raw_bit_errors: 0,
                     raw_bits_compared: 0,
+                    raw_error_runs: 0,
+                    raw_error_run_bits: 0,
+                    raw_error_run_max: 0,
                     last_est_snr_db: f32::NAN,
                     phase_gate_on_symbols: 0,
                     phase_gate_off_symbols: 0,
@@ -871,6 +925,9 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         process_time_ns: total_process_ns,
                         raw_bit_errors: 0,
                         raw_bits_compared: 0,
+                        raw_error_runs: 0,
+                        raw_error_run_bits: 0,
+                        raw_error_run_max: 0,
                         last_est_snr_db: f32::NAN,
                         phase_gate_on_symbols: 0,
                         phase_gate_off_symbols: 0,
@@ -905,6 +962,9 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         process_time_ns: total_process_ns,
         raw_bit_errors: 0,
         raw_bits_compared: 0,
+        raw_error_runs: 0,
+        raw_error_run_bits: 0,
+        raw_error_run_max: 0,
         last_est_snr_db: f32::NAN,
         phase_gate_on_symbols: 0,
         phase_gate_off_symbols: 0,
@@ -968,10 +1028,16 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let raw_bit_errors_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_bits_compared_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let raw_error_runs_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let raw_error_run_bits_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let raw_error_run_max_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     {
         let efb = Arc::clone(&expected_fec_bits);
         let rbe = Arc::clone(&raw_bit_errors_acc);
         let rbc = Arc::clone(&raw_bits_compared_acc);
+        let rer = Arc::clone(&raw_error_runs_acc);
+        let rrb = Arc::clone(&raw_error_run_bits_acc);
+        let rrm = Arc::clone(&raw_error_run_max_acc);
         decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
             // LLR から復号して seq を推定できた場合のみ raw BER を積算する。
             let decoded_bits = fec::decode_soft(llrs);
@@ -989,15 +1055,35 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
             };
             let compare_len = expected.len().min(llrs.len());
             let mut errors = 0usize;
+            let mut runs = 0usize;
+            let mut run_bits = 0usize;
+            let mut run_max = 0usize;
+            let mut cur_run = 0usize;
             for j in 0..compare_len {
                 let bit = expected[j];
                 let llr = llrs[j];
-                if (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0) {
+                let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
+                if is_err {
                     errors += 1;
+                    cur_run += 1;
+                } else if cur_run > 0 {
+                    runs += 1;
+                    run_bits += cur_run;
+                    run_max = run_max.max(cur_run);
+                    cur_run = 0;
                 }
+            }
+            if cur_run > 0 {
+                runs += 1;
+                run_bits += cur_run;
+                run_max = run_max.max(cur_run);
             }
             *rbe.lock().unwrap() += errors;
             *rbc.lock().unwrap() += compare_len;
+            *rer.lock().unwrap() += runs;
+            *rrb.lock().unwrap() += run_bits;
+            let mut max_guard = rrm.lock().unwrap();
+            *max_guard = (*max_guard).max(run_max);
         }));
     }
 
@@ -1043,6 +1129,9 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let bits_compared = payload.len() * 8;
                 let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
                 let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
+                let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
+                let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
+                let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
                 return TrialResult {
                     success: errs == 0,
                     completion_sec: Some(elapsed_sec),
@@ -1060,6 +1149,9 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     process_time_ns: total_process_ns,
                     raw_bit_errors,
                     raw_bits_compared,
+                    raw_error_runs,
+                    raw_error_run_bits,
+                    raw_error_run_max,
                     last_est_snr_db: progress.last_est_snr_db,
                     phase_gate_on_symbols: progress.phase_gate_on_symbols,
                     phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1090,6 +1182,9 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     let bits_compared = payload.len() * 8;
                     let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
                     let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
+                    let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
+                    let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
+                    let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
                     return TrialResult {
                         success: errs == 0,
                         completion_sec: Some(elapsed_sec),
@@ -1107,6 +1202,9 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         process_time_ns: total_process_ns,
                         raw_bit_errors,
                         raw_bits_compared,
+                        raw_error_runs,
+                        raw_error_run_bits,
+                        raw_error_run_max,
                         last_est_snr_db: progress.last_est_snr_db,
                         phase_gate_on_symbols: progress.phase_gate_on_symbols,
                         phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1125,6 +1223,9 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
     let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
     let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
+    let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
+    let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
+    let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
     let final_progress = decoder.process_samples(&[]);
     TrialResult {
         success: false,
@@ -1143,6 +1244,9 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         process_time_ns: total_process_ns,
         raw_bit_errors,
         raw_bits_compared,
+        raw_error_runs,
+        raw_error_run_bits,
+        raw_error_run_max,
         last_est_snr_db: final_progress.last_est_snr_db,
         phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
         phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
@@ -1194,6 +1298,11 @@ fn render_column(
                 format!("{raw_ber:.6}")
             }
         }
+        "raw_err_run_mean" => fmt_opt(m.raw_err_run_mean()),
+        "raw_err_run_max" => m
+            .raw_err_run_max()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "NaN".to_string()),
         "goodput_effective_bps" => format!("{:.3}", m.goodput_effective_bps(cli.payload_bytes * 8)),
         "goodput_success_mean_bps" => fmt_opt(m.goodput_success_mean_bps(cli.payload_bytes * 8)),
         "p95_complete_s" => fmt_opt(m.p95_completion_sec()),
@@ -1488,6 +1597,9 @@ mod tests {
             first_attempt_success: true,
             bit_errors: 0,
             bits_compared: 128,
+            raw_error_runs: 0,
+            raw_error_run_bits: 0,
+            raw_error_run_max: 0,
             ..Default::default()
         });
 
@@ -1499,6 +1611,9 @@ mod tests {
             first_attempt_success: false,
             bit_errors: 10,
             bits_compared: 128,
+            raw_error_runs: 0,
+            raw_error_run_bits: 0,
+            raw_error_run_max: 0,
             ..Default::default()
         });
 
