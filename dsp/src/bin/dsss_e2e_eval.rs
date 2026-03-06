@@ -227,6 +227,16 @@ const ALL_COLUMNS: &[&str] = &[
     "err_w_cw_p99",
     "err_w_cw_max",
     "err_w_cw_hist",
+    "post_ber",
+    "post_decode_match_ratio",
+    "post_err_run_mean",
+    "post_err_run_max",
+    "post_err_w_cw_mean",
+    "post_err_w_cw_p50",
+    "post_err_w_cw_p90",
+    "post_err_w_cw_p99",
+    "post_err_w_cw_max",
+    "post_err_w_cw_hist",
 ];
 
 fn parse_positive_f32(value: &str) -> Result<f32, String> {
@@ -402,6 +412,17 @@ struct TrialResult {
     codeword_error_sum: usize,
     codeword_error_max: usize,
     codeword_error_weights: Vec<usize>,
+    post_bit_errors: usize,
+    post_bits_compared: usize,
+    post_error_runs: usize,
+    post_error_run_bits: usize,
+    post_error_run_max: usize,
+    post_codeword_count: usize,
+    post_codeword_error_sum: usize,
+    post_codeword_error_max: usize,
+    post_codeword_error_weights: Vec<usize>,
+    post_decode_attempts: usize,
+    post_decode_matched: usize,
     last_est_snr_db: f32,
     phase_gate_on_symbols: usize,
     phase_gate_off_symbols: usize,
@@ -438,6 +459,17 @@ struct Metrics {
     total_codeword_error_sum: usize,
     max_codeword_error: usize,
     codeword_error_weights: Vec<usize>,
+    total_post_bit_errors: usize,
+    total_post_bits_compared: usize,
+    total_post_error_runs: usize,
+    total_post_error_run_bits: usize,
+    max_post_error_run_len: usize,
+    total_post_codewords: usize,
+    total_post_codeword_error_sum: usize,
+    max_post_codeword_error: usize,
+    post_codeword_error_weights: Vec<usize>,
+    total_post_decode_attempts: usize,
+    total_post_decode_matched: usize,
     sum_last_est_snr_db: f64,
     count_last_est_snr_db: usize,
     total_phase_gate_on_symbols: usize,
@@ -469,6 +501,18 @@ impl Metrics {
         self.total_codeword_error_sum += t.codeword_error_sum;
         self.max_codeword_error = self.max_codeword_error.max(t.codeword_error_max);
         self.codeword_error_weights.extend(t.codeword_error_weights);
+        self.total_post_bit_errors += t.post_bit_errors;
+        self.total_post_bits_compared += t.post_bits_compared;
+        self.total_post_error_runs += t.post_error_runs;
+        self.total_post_error_run_bits += t.post_error_run_bits;
+        self.max_post_error_run_len = self.max_post_error_run_len.max(t.post_error_run_max);
+        self.total_post_codewords += t.post_codeword_count;
+        self.total_post_codeword_error_sum += t.post_codeword_error_sum;
+        self.max_post_codeword_error = self.max_post_codeword_error.max(t.post_codeword_error_max);
+        self.post_codeword_error_weights
+            .extend(t.post_codeword_error_weights);
+        self.total_post_decode_attempts += t.post_decode_attempts;
+        self.total_post_decode_matched += t.post_decode_matched;
         self.total_tx_signal_energy += t.tx_signal_energy_sum;
         self.total_tx_signal_samples += t.tx_signal_samples;
         self.total_process_time_ns += t.process_time_ns;
@@ -619,41 +663,70 @@ impl Metrics {
     }
 
     fn err_w_cw_hist(&self) -> Option<String> {
-        if self.codeword_error_weights.is_empty() {
-            return None;
+        error_weight_hist(&self.codeword_error_weights)
+    }
+
+    fn post_ber(&self) -> f32 {
+        if self.total_post_bits_compared == 0 {
+            f32::NAN
+        } else {
+            self.total_post_bit_errors as f32 / self.total_post_bits_compared as f32
         }
-        let mut b0 = 0usize;
-        let mut b1 = 0usize;
-        let mut b2 = 0usize;
-        let mut b3_4 = 0usize;
-        let mut b5_8 = 0usize;
-        let mut b9_16 = 0usize;
-        let mut b17_32 = 0usize;
-        let mut b33p = 0usize;
-        for &w in &self.codeword_error_weights {
-            match w {
-                0 => b0 += 1,
-                1 => b1 += 1,
-                2 => b2 += 1,
-                3..=4 => b3_4 += 1,
-                5..=8 => b5_8 += 1,
-                9..=16 => b9_16 += 1,
-                17..=32 => b17_32 += 1,
-                _ => b33p += 1,
-            }
+    }
+
+    fn post_decode_match_ratio(&self) -> f32 {
+        ratio(
+            self.total_post_decode_matched,
+            self.total_post_decode_attempts,
+        )
+    }
+
+    fn post_err_run_mean(&self) -> Option<f32> {
+        if self.total_post_error_runs == 0 {
+            None
+        } else {
+            Some(self.total_post_error_run_bits as f32 / self.total_post_error_runs as f32)
         }
-        let n = self.codeword_error_weights.len() as f32;
-        Some(format!(
-            "0:{:.3}|1:{:.3}|2:{:.3}|3-4:{:.3}|5-8:{:.3}|9-16:{:.3}|17-32:{:.3}|33+:{:.3}",
-            b0 as f32 / n,
-            b1 as f32 / n,
-            b2 as f32 / n,
-            b3_4 as f32 / n,
-            b5_8 as f32 / n,
-            b9_16 as f32 / n,
-            b17_32 as f32 / n,
-            b33p as f32 / n,
-        ))
+    }
+
+    fn post_err_run_max(&self) -> Option<usize> {
+        if self.max_post_error_run_len == 0 {
+            None
+        } else {
+            Some(self.max_post_error_run_len)
+        }
+    }
+
+    fn post_err_w_cw_mean(&self) -> Option<f32> {
+        if self.total_post_codewords == 0 {
+            None
+        } else {
+            Some(self.total_post_codeword_error_sum as f32 / self.total_post_codewords as f32)
+        }
+    }
+
+    fn post_err_w_cw_p50(&self) -> Option<f32> {
+        quantile_usize(&self.post_codeword_error_weights, 0.5)
+    }
+
+    fn post_err_w_cw_p90(&self) -> Option<f32> {
+        quantile_usize(&self.post_codeword_error_weights, 0.9)
+    }
+
+    fn post_err_w_cw_p99(&self) -> Option<f32> {
+        quantile_usize(&self.post_codeword_error_weights, 0.99)
+    }
+
+    fn post_err_w_cw_max(&self) -> Option<usize> {
+        if self.max_post_codeword_error == 0 && self.total_post_codewords == 0 {
+            None
+        } else {
+            Some(self.max_post_codeword_error)
+        }
+    }
+
+    fn post_err_w_cw_hist(&self) -> Option<String> {
+        error_weight_hist(&self.post_codeword_error_weights)
     }
 
     fn avg_last_est_snr_db(&self) -> Option<f32> {
@@ -743,6 +816,44 @@ fn quantile_usize(values: &[usize], q: f32) -> Option<f32> {
     v.get(idx).map(|&x| x as f32)
 }
 
+fn error_weight_hist(weights: &[usize]) -> Option<String> {
+    if weights.is_empty() {
+        return None;
+    }
+    let mut b0 = 0usize;
+    let mut b1 = 0usize;
+    let mut b2 = 0usize;
+    let mut b3_4 = 0usize;
+    let mut b5_8 = 0usize;
+    let mut b9_16 = 0usize;
+    let mut b17_32 = 0usize;
+    let mut b33p = 0usize;
+    for &w in weights {
+        match w {
+            0 => b0 += 1,
+            1 => b1 += 1,
+            2 => b2 += 1,
+            3..=4 => b3_4 += 1,
+            5..=8 => b5_8 += 1,
+            9..=16 => b9_16 += 1,
+            17..=32 => b17_32 += 1,
+            _ => b33p += 1,
+        }
+    }
+    let n = weights.len() as f32;
+    Some(format!(
+        "0:{:.3}|1:{:.3}|2:{:.3}|3-4:{:.3}|5-8:{:.3}|9-16:{:.3}|17-32:{:.3}|33+:{:.3}",
+        b0 as f32 / n,
+        b1 as f32 / n,
+        b2 as f32 / n,
+        b3_4 as f32 / n,
+        b5_8 as f32 / n,
+        b9_16 as f32 / n,
+        b17_32 as f32 / n,
+        b33p as f32 / n,
+    ))
+}
+
 fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
     match mode {
         MaryFdeMode::On => {
@@ -786,6 +897,68 @@ fn count_bit_errors_bytes(tx: &[u8], rx: Option<&[u8]>) -> usize {
         errs += (b ^ rb).count_ones() as usize;
     }
     errs
+}
+
+fn bit_errors_and_runs_from_llr(
+    expected: &[u8],
+    llrs: &[f32],
+) -> (usize, usize, usize, usize, usize) {
+    let compare_len = expected.len().min(llrs.len());
+    let mut errors = 0usize;
+    let mut runs = 0usize;
+    let mut run_bits = 0usize;
+    let mut run_max = 0usize;
+    let mut cur_run = 0usize;
+    for j in 0..compare_len {
+        let bit = expected[j];
+        let llr = llrs[j];
+        let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
+        if is_err {
+            errors += 1;
+            cur_run += 1;
+        } else if cur_run > 0 {
+            runs += 1;
+            run_bits += cur_run;
+            run_max = run_max.max(cur_run);
+            cur_run = 0;
+        }
+    }
+    if cur_run > 0 {
+        runs += 1;
+        run_bits += cur_run;
+        run_max = run_max.max(cur_run);
+    }
+    (errors, compare_len, runs, run_bits, run_max)
+}
+
+fn bit_errors_and_runs_from_bits(
+    expected: &[u8],
+    observed: &[u8],
+) -> (usize, usize, usize, usize, usize) {
+    let compare_len = expected.len().min(observed.len());
+    let mut errors = 0usize;
+    let mut runs = 0usize;
+    let mut run_bits = 0usize;
+    let mut run_max = 0usize;
+    let mut cur_run = 0usize;
+    for j in 0..compare_len {
+        let is_err = expected[j] != observed[j];
+        if is_err {
+            errors += 1;
+            cur_run += 1;
+        } else if cur_run > 0 {
+            runs += 1;
+            run_bits += cur_run;
+            run_max = run_max.max(cur_run);
+            cur_run = 0;
+        }
+    }
+    if cur_run > 0 {
+        runs += 1;
+        run_bits += cur_run;
+        run_max = run_max.max(cur_run);
+    }
+    (errors, compare_len, runs, run_bits, run_max)
 }
 
 fn add_awgn_with_rng(samples: &mut [f32], sigma: f32, rng: &mut StdRng) {
@@ -979,6 +1152,17 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     codeword_error_sum: 0,
                     codeword_error_max: 0,
                     codeword_error_weights: Vec::new(),
+                    post_bit_errors: 0,
+                    post_bits_compared: 0,
+                    post_error_runs: 0,
+                    post_error_run_bits: 0,
+                    post_error_run_max: 0,
+                    post_codeword_count: 0,
+                    post_codeword_error_sum: 0,
+                    post_codeword_error_max: 0,
+                    post_codeword_error_weights: Vec::new(),
+                    post_decode_attempts: 0,
+                    post_decode_matched: 0,
                     last_est_snr_db: f32::NAN,
                     phase_gate_on_symbols: 0,
                     phase_gate_off_symbols: 0,
@@ -1031,6 +1215,17 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         codeword_error_sum: 0,
                         codeword_error_max: 0,
                         codeword_error_weights: Vec::new(),
+                        post_bit_errors: 0,
+                        post_bits_compared: 0,
+                        post_error_runs: 0,
+                        post_error_run_bits: 0,
+                        post_error_run_max: 0,
+                        post_codeword_count: 0,
+                        post_codeword_error_sum: 0,
+                        post_codeword_error_max: 0,
+                        post_codeword_error_weights: Vec::new(),
+                        post_decode_attempts: 0,
+                        post_decode_matched: 0,
                         last_est_snr_db: f32::NAN,
                         phase_gate_on_symbols: 0,
                         phase_gate_off_symbols: 0,
@@ -1072,6 +1267,17 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         codeword_error_sum: 0,
         codeword_error_max: 0,
         codeword_error_weights: Vec::new(),
+        post_bit_errors: 0,
+        post_bits_compared: 0,
+        post_error_runs: 0,
+        post_error_run_bits: 0,
+        post_error_run_max: 0,
+        post_codeword_count: 0,
+        post_codeword_error_sum: 0,
+        post_codeword_error_max: 0,
+        post_codeword_error_weights: Vec::new(),
+        post_decode_attempts: 0,
+        post_decode_matched: 0,
         last_est_snr_db: f32::NAN,
         phase_gate_on_symbols: 0,
         phase_gate_off_symbols: 0,
@@ -1129,64 +1335,61 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let mut fountain_encoder =
         dsp::coding::fountain::FountainEncoder::new(&payload, fountain_params);
 
-    // FECレベルの生BER計測: 送信パケットのFEC符号化ビットを seq -> bits で記録し、
-    // 受信側LLRから復元した seq と照合してハード判定エラーを集計する。
-    // 到着順インデックスのズレに起因する過大評価を避ける。
+    // FEC前/後のBER計測用: 送信時の期待ビット列を seq -> bits で記録し、
+    // 受信側LLRから復元した seq と照合して到着順ズレの影響を避けて集計する。
     let expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let raw_bit_errors_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_bits_compared_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_error_runs_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_error_run_bits_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_error_run_max_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let codeword_error_weights_acc: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let post_bit_errors_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let post_bits_compared_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let post_error_runs_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let post_error_run_bits_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let post_error_run_max_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let post_codeword_error_weights_acc: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let post_decode_attempts_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let post_decode_matched_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     {
         let efb = Arc::clone(&expected_fec_bits);
+        let epb = Arc::clone(&expected_packet_bits);
         let rbe = Arc::clone(&raw_bit_errors_acc);
         let rbc = Arc::clone(&raw_bits_compared_acc);
         let rer = Arc::clone(&raw_error_runs_acc);
         let rrb = Arc::clone(&raw_error_run_bits_acc);
         let rrm = Arc::clone(&raw_error_run_max_acc);
         let cew = Arc::clone(&codeword_error_weights_acc);
+        let pbe = Arc::clone(&post_bit_errors_acc);
+        let pbc = Arc::clone(&post_bits_compared_acc);
+        let per = Arc::clone(&post_error_runs_acc);
+        let prb = Arc::clone(&post_error_run_bits_acc);
+        let prm = Arc::clone(&post_error_run_max_acc);
+        let pcew = Arc::clone(&post_codeword_error_weights_acc);
+        let pda = Arc::clone(&post_decode_attempts_acc);
+        let pdm = Arc::clone(&post_decode_matched_acc);
         decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
-            // LLR から復号して seq を推定できた場合のみ raw BER を積算する。
             let decoded_bits = fec::decode_soft(llrs);
             let p_bits_len = PACKET_BYTES * 8;
             if decoded_bits.len() < p_bits_len {
                 return;
             }
             let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-            let Ok(packet) = Packet::deserialize(&decoded_bytes) else {
+            if decoded_bytes.len() < 3 {
                 return;
-            };
-            let expected = match efb.lock().unwrap().get(&packet.lt_seq) {
+            }
+            *pda.lock().unwrap() += 1;
+            // CRC検証は通さず、ヘッダ先頭3byteから seq を直接復元して照合する。
+            let seq = u16::from_be_bytes([decoded_bytes[1], decoded_bytes[2]]);
+            let expected_raw = match efb.lock().unwrap().get(&seq) {
                 Some(bits) => bits.clone(),
                 None => return,
             };
-            let compare_len = expected.len().min(llrs.len());
-            let mut errors = 0usize;
-            let mut runs = 0usize;
-            let mut run_bits = 0usize;
-            let mut run_max = 0usize;
-            let mut cur_run = 0usize;
-            for j in 0..compare_len {
-                let bit = expected[j];
-                let llr = llrs[j];
-                let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
-                if is_err {
-                    errors += 1;
-                    cur_run += 1;
-                } else if cur_run > 0 {
-                    runs += 1;
-                    run_bits += cur_run;
-                    run_max = run_max.max(cur_run);
-                    cur_run = 0;
-                }
-            }
-            if cur_run > 0 {
-                runs += 1;
-                run_bits += cur_run;
-                run_max = run_max.max(cur_run);
-            }
+            let (errors, compare_len, runs, run_bits, run_max) =
+                bit_errors_and_runs_from_llr(&expected_raw, llrs);
             *rbe.lock().unwrap() += errors;
             *rbc.lock().unwrap() += compare_len;
             *rer.lock().unwrap() += runs;
@@ -1194,6 +1397,21 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
             let mut max_guard = rrm.lock().unwrap();
             *max_guard = (*max_guard).max(run_max);
             cew.lock().unwrap().push(errors);
+
+            let expected_post = match epb.lock().unwrap().get(&seq) {
+                Some(bits) => bits.clone(),
+                None => return,
+            };
+            *pdm.lock().unwrap() += 1;
+            let (post_errors, post_compare_len, post_runs, post_run_bits, post_run_max) =
+                bit_errors_and_runs_from_bits(&expected_post, &decoded_bits[..p_bits_len]);
+            *pbe.lock().unwrap() += post_errors;
+            *pbc.lock().unwrap() += post_compare_len;
+            *per.lock().unwrap() += post_runs;
+            *prb.lock().unwrap() += post_run_bits;
+            let mut post_max_guard = prm.lock().unwrap();
+            *post_max_guard = (*post_max_guard).max(post_run_max);
+            pcew.lock().unwrap().push(post_errors);
         }));
     }
 
@@ -1212,6 +1430,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let pkt = Packet::new(seq, k, &fp.data);
                 let bits = fec::bytes_to_bits(&pkt.serialize());
                 let fec_encoded = fec::encode(&bits);
+                expected_packet_bits.lock().unwrap().insert(seq, bits);
                 expected_fec_bits.lock().unwrap().insert(seq, fec_encoded);
             }
             packets.push(fp);
@@ -1246,6 +1465,22 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let codeword_count = codeword_error_weights.len();
                 let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
                 let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
+                let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
+                let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
+                let post_error_runs = *post_error_runs_acc.lock().unwrap();
+                let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
+                let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
+                let post_codeword_error_weights =
+                    post_codeword_error_weights_acc.lock().unwrap().clone();
+                let post_codeword_count = post_codeword_error_weights.len();
+                let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
+                let post_codeword_error_max = post_codeword_error_weights
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+                let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
+                let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
                 return TrialResult {
                     success: errs == 0,
                     completion_sec: Some(elapsed_sec),
@@ -1270,6 +1505,17 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     codeword_error_sum,
                     codeword_error_max,
                     codeword_error_weights,
+                    post_bit_errors,
+                    post_bits_compared,
+                    post_error_runs,
+                    post_error_run_bits,
+                    post_error_run_max,
+                    post_codeword_count,
+                    post_codeword_error_sum,
+                    post_codeword_error_max,
+                    post_codeword_error_weights,
+                    post_decode_attempts,
+                    post_decode_matched,
                     last_est_snr_db: progress.last_est_snr_db,
                     phase_gate_on_symbols: progress.phase_gate_on_symbols,
                     phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1308,6 +1554,22 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
                     let codeword_error_max =
                         codeword_error_weights.iter().copied().max().unwrap_or(0);
+                    let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
+                    let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
+                    let post_error_runs = *post_error_runs_acc.lock().unwrap();
+                    let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
+                    let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
+                    let post_codeword_error_weights =
+                        post_codeword_error_weights_acc.lock().unwrap().clone();
+                    let post_codeword_count = post_codeword_error_weights.len();
+                    let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
+                    let post_codeword_error_max = post_codeword_error_weights
+                        .iter()
+                        .copied()
+                        .max()
+                        .unwrap_or(0);
+                    let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
+                    let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
                     return TrialResult {
                         success: errs == 0,
                         completion_sec: Some(elapsed_sec),
@@ -1332,6 +1594,17 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         codeword_error_sum,
                         codeword_error_max,
                         codeword_error_weights,
+                        post_bit_errors,
+                        post_bits_compared,
+                        post_error_runs,
+                        post_error_run_bits,
+                        post_error_run_max,
+                        post_codeword_count,
+                        post_codeword_error_sum,
+                        post_codeword_error_max,
+                        post_codeword_error_weights,
+                        post_decode_attempts,
+                        post_decode_matched,
                         last_est_snr_db: progress.last_est_snr_db,
                         phase_gate_on_symbols: progress.phase_gate_on_symbols,
                         phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1357,6 +1630,21 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let codeword_count = codeword_error_weights.len();
     let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
     let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
+    let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
+    let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
+    let post_error_runs = *post_error_runs_acc.lock().unwrap();
+    let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
+    let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
+    let post_codeword_error_weights = post_codeword_error_weights_acc.lock().unwrap().clone();
+    let post_codeword_count = post_codeword_error_weights.len();
+    let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
+    let post_codeword_error_max = post_codeword_error_weights
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
+    let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
     let final_progress = decoder.process_samples(&[]);
     TrialResult {
         success: false,
@@ -1382,6 +1670,17 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         codeword_error_sum,
         codeword_error_max,
         codeword_error_weights,
+        post_bit_errors,
+        post_bits_compared,
+        post_error_runs,
+        post_error_run_bits,
+        post_error_run_max,
+        post_codeword_count,
+        post_codeword_error_sum,
+        post_codeword_error_max,
+        post_codeword_error_weights,
+        post_decode_attempts,
+        post_decode_matched,
         last_est_snr_db: final_progress.last_est_snr_db,
         phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
         phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
@@ -1447,6 +1746,29 @@ fn render_column(
             .map(|v| v.to_string())
             .unwrap_or_else(|| "NaN".to_string()),
         "err_w_cw_hist" => m.err_w_cw_hist().unwrap_or_else(|| "NaN".to_string()),
+        "post_ber" => {
+            let post_ber = m.post_ber();
+            if post_ber.is_nan() {
+                "NaN".to_string()
+            } else {
+                format!("{post_ber:.6}")
+            }
+        }
+        "post_decode_match_ratio" => format!("{:.6}", m.post_decode_match_ratio()),
+        "post_err_run_mean" => fmt_opt(m.post_err_run_mean()),
+        "post_err_run_max" => m
+            .post_err_run_max()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "NaN".to_string()),
+        "post_err_w_cw_mean" => fmt_opt(m.post_err_w_cw_mean()),
+        "post_err_w_cw_p50" => fmt_opt(m.post_err_w_cw_p50()),
+        "post_err_w_cw_p90" => fmt_opt(m.post_err_w_cw_p90()),
+        "post_err_w_cw_p99" => fmt_opt(m.post_err_w_cw_p99()),
+        "post_err_w_cw_max" => m
+            .post_err_w_cw_max()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "NaN".to_string()),
+        "post_err_w_cw_hist" => m.post_err_w_cw_hist().unwrap_or_else(|| "NaN".to_string()),
         "goodput_effective_bps" => format!("{:.3}", m.goodput_effective_bps(cli.payload_bytes * 8)),
         "goodput_success_mean_bps" => fmt_opt(m.goodput_success_mean_bps(cli.payload_bytes * 8)),
         "p95_complete_s" => fmt_opt(m.p95_completion_sec()),
