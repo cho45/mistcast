@@ -142,11 +142,13 @@ impl Decoder {
                 dsp_config.sample_rate as u32,
                 proc_sample_rate as u32,
                 cutoff,
+                Some(dsp_config.rx_resampler_taps),
             ),
             resampler_q: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
                 proc_sample_rate as u32,
                 cutoff,
+                Some(dsp_config.rx_resampler_taps),
             ),
             rrc_filter_i: RrcFilter::from_config(&dsp_config),
             rrc_filter_q: RrcFilter::from_config(&dsp_config),
@@ -707,11 +709,13 @@ impl Decoder {
             self.config.sample_rate as u32,
             self.config.proc_sample_rate() as u32,
             Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
+            Some(self.config.rx_resampler_taps),
         );
         self.resampler_q.reconfigure(
             self.config.sample_rate as u32,
             self.config.proc_sample_rate() as u32,
             Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
+            Some(self.config.rx_resampler_taps),
         );
         self.rrc_filter_i.reset();
         self.rrc_filter_q.reset();

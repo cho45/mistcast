@@ -10,9 +10,42 @@ pub struct Resampler {
 }
 
 impl Resampler {
+    const MIN_TAPS_PER_PHASE: usize = 17;
+    const MAX_TAPS_PER_PHASE: usize = 257;
+
+    fn normalize_taps_per_phase(taps: usize) -> usize {
+        taps.clamp(Self::MIN_TAPS_PER_PHASE, Self::MAX_TAPS_PER_PHASE) | 1
+    }
+
+    fn design_taps_per_phase(source_rate: u32, target_rate: u32, cutoff_hz: f64) -> usize {
+        let source_nyquist = 0.5 * source_rate as f64;
+        let available_transition_hz = (source_nyquist - cutoff_hz).max(50.0);
+
+        // passband の 35% を基準に遷移帯を置き、実現可能範囲にクランプ。
+        let desired_transition_hz = (cutoff_hz * 0.35).max(200.0);
+        let transition_hz = desired_transition_hz
+            .min(available_transition_hz * 0.95)
+            .max(50.0);
+        let delta_f = (transition_hz / source_rate as f64).max(1e-6);
+
+        // Blackman窓の経験式: N ≈ 5.5 / Δf（cycles/sample）
+        let base_taps = (5.5 / delta_f).ceil() as usize;
+
+        // 強いデシメーション時は stopband 抑圧を優先して係数を増やす。
+        let decimation_factor = (source_rate as f64 / target_rate as f64).max(1.0);
+        let scale = decimation_factor.sqrt().ceil() as usize;
+        base_taps.saturating_mul(scale.max(1))
+    }
+
     /// `cutoff_hz` を指定した場合、リサンプラ内LPFのカットオフを明示できる。
     /// 指定しない場合は従来どおり target_rate ベースの自動値を使う。
-    pub fn new_with_cutoff(source_rate: u32, target_rate: u32, cutoff_hz: Option<f32>) -> Self {
+    /// `taps_per_phase` を指定した場合は固定タップ数として使用する。
+    pub fn new_with_cutoff(
+        source_rate: u32,
+        target_rate: u32,
+        cutoff_hz: Option<f32>,
+        taps_per_phase: Option<usize>,
+    ) -> Self {
         assert!(source_rate > 0, "source_rate must be > 0");
         assert!(target_rate > 0, "target_rate must be > 0");
 
@@ -20,23 +53,20 @@ impl Resampler {
         let step = source_rate as f64 / target_rate as f64;
 
         let num_phases = 256;
-        // step ≈ 1 で 17 タップ、step ≈ 4.2 で ~85 タップ。
-        let taps_per_phase = {
-            let raw = (step.ceil() as usize * 17).max(17);
-            raw | 1 // 奇数保証
-        };
-        let mut coeffs = vec![vec![0.0; taps_per_phase]; num_phases];
 
         // source 側正規化周波数（Nyquist=0.5）
         // - 指定なし: target_rate に合わせた従来値
         // - 指定あり: min(source/2, target/2, cutoff_hz) にクランプして利用
-        let default_cutoff_hz = 0.5f64 * target_rate as f64 * 0.95;
+        let default_cutoff_hz = 0.45f64 * source_rate.min(target_rate) as f64;
         let max_cutoff_hz = 0.49f64 * (source_rate.min(target_rate) as f64);
         let cutoff_hz = cutoff_hz
             .map(|v| v as f64)
             .unwrap_or(default_cutoff_hz)
             .min(max_cutoff_hz)
             .max(1.0);
+        let default_taps = Self::design_taps_per_phase(source_rate, target_rate, cutoff_hz);
+        let taps_per_phase = Self::normalize_taps_per_phase(taps_per_phase.unwrap_or(default_taps));
+        let mut coeffs = vec![vec![0.0; taps_per_phase]; num_phases];
         let cutoff = cutoff_hz / source_rate as f64;
         let center = (taps_per_phase - 1) as f64 / 2.0;
 
@@ -141,8 +171,14 @@ impl Resampler {
         self.phase = 0.0;
     }
 
-    pub fn reconfigure(&mut self, source_rate: u32, target_rate: u32, cutoff_hz: Option<f32>) {
-        *self = Self::new_with_cutoff(source_rate, target_rate, cutoff_hz);
+    pub fn reconfigure(
+        &mut self,
+        source_rate: u32,
+        target_rate: u32,
+        cutoff_hz: Option<f32>,
+        taps_per_phase: Option<usize>,
+    ) {
+        *self = Self::new_with_cutoff(source_rate, target_rate, cutoff_hz, taps_per_phase);
     }
 
     /// 残っている履歴をすべて出力し、内部状態をリセットする。
@@ -217,7 +253,7 @@ mod tests {
         }
 
         // リサンプラに通す
-        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
         let mut output = Vec::new();
         resampler.process(&input, &mut output);
         resampler.flush(&mut output);
@@ -260,8 +296,8 @@ mod tests {
         // 連続的にバッファを渡した場合に、履歴(history)と位相が正しく接続されるかを検証
         let source_rate = 10_000;
         let target_rate = 8_000;
-        let mut resampler_chunks = Resampler::new_with_cutoff(source_rate, target_rate, None);
-        let mut resampler_whole = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut resampler_chunks = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
+        let mut resampler_whole = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
 
         let input: Vec<f32> = (0..4_000)
             .map(|i| {
@@ -307,7 +343,7 @@ mod tests {
         // 十分に減衰されることを確認する。
         let source_rate = 200_000u32;
         let target_rate = 48_000u32;
-        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
 
         // 30kHz (ナイキスト超) の正弦波を入力
         let len = 50_000;
@@ -338,7 +374,7 @@ mod tests {
     fn test_long_run_output_count_tracks_ratio_50k_to_48k() {
         let source_rate = 50_000u32;
         let target_rate = 48_000u32;
-        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
 
         let total_input = 500_000usize; // 10秒相当
         let input: Vec<f32> = (0..total_input)
@@ -381,7 +417,7 @@ mod tests {
     fn test_long_run_output_count_tracks_ratio_200k_to_48k() {
         let source_rate = 200_000u32;
         let target_rate = 48_000u32;
-        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
 
         let total_input = 2_000_000usize; // 10秒相当
         let input: Vec<f32> = (0..total_input)
@@ -433,8 +469,9 @@ mod tests {
             })
             .collect();
 
-        let mut default_rs = Resampler::new_with_cutoff(source_rate, target_rate, None);
-        let mut low_cut_rs = Resampler::new_with_cutoff(source_rate, target_rate, Some(5_000.0));
+        let mut default_rs = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
+        let mut low_cut_rs =
+            Resampler::new_with_cutoff(source_rate, target_rate, Some(5_000.0), None);
         let mut out_default = Vec::new();
         let mut out_low_cut = Vec::new();
         default_rs.process(&input, &mut out_default);
@@ -462,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_negative_phase_drift_repro() {
-        let mut rs = Resampler::new_with_cutoff(24000, 48000, None);
+        let mut rs = Resampler::new_with_cutoff(24000, 48000, None, None);
         println!("\nInitial phase: {}", rs.phase);
 
         let mut total_output = 0;
@@ -486,7 +523,7 @@ mod tests {
     #[test]
     fn test_resampler_latency_and_timing_accuracy() {
         // 24kHz -> 48kHz (ratio 2.0)
-        let mut rs = Resampler::new_with_cutoff(24000, 48000, None);
+        let mut rs = Resampler::new_with_cutoff(24000, 48000, None, None);
         let expected_delay_out = rs.delay();
 
         // 0番目にインパルスを入力
@@ -515,5 +552,176 @@ mod tests {
             "Resampler peak position mismatch with delay()"
         );
         assert!(peak_val > 0.5, "Impulse response peak is too weak");
+    }
+
+    #[test]
+    fn test_explicit_taps_override_is_applied() {
+        let auto = Resampler::new_with_cutoff(24_000, 48_000, None, None);
+        let explicit = Resampler::new_with_cutoff(24_000, 48_000, None, Some(73));
+
+        assert_eq!(explicit.taps_per_phase, 73);
+        assert_ne!(auto.taps_per_phase, explicit.taps_per_phase);
+    }
+
+    #[test]
+    fn test_explicit_taps_are_normalized_to_odd_and_clamped() {
+        let min_norm = Resampler::new_with_cutoff(24_000, 48_000, None, Some(16));
+        let odd_norm = Resampler::new_with_cutoff(24_000, 48_000, None, Some(40));
+        let max_norm = Resampler::new_with_cutoff(24_000, 48_000, None, Some(400));
+
+        assert_eq!(min_norm.taps_per_phase, 17);
+        assert_eq!(odd_norm.taps_per_phase, 41);
+        assert_eq!(max_norm.taps_per_phase, 257);
+    }
+
+    #[test]
+    fn test_48k_to_24k_taps_and_aliasing() {
+        // 48kHz -> 24kHz ダウンサンプリング時のタップ数とエイリアzing特性を確認
+        let source_rate = 48_000u32;
+        let target_rate = 24_000u32;
+
+        // 現在の実装で自動計算されるタップ数を確認
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None, None);
+
+        println!("\n=== 48kHz -> 24kHz リサンプラ評価 ===");
+        println!("  source_rate: {} Hz", source_rate);
+        println!("  target_rate: {} Hz", target_rate);
+        println!(
+            "  decimation_factor: {:.2}",
+            source_rate as f64 / target_rate as f64
+        );
+        println!("  taps_per_phase: {}", resampler.taps_per_phase);
+        println!("  delay (output samples): {}", resampler.delay());
+
+        // 設計パラメータの詳細を計算して表示
+        let source_nyquist = 0.5 * source_rate as f64;
+        let default_cutoff_hz = 0.45f64 * source_rate.min(target_rate) as f64;
+        let cutoff_hz = default_cutoff_hz
+            .min(0.49 * (source_rate.min(target_rate) as f64))
+            .max(1.0);
+        let available_transition_hz = (source_nyquist - cutoff_hz).max(50.0);
+        let desired_transition_hz = (cutoff_hz * 0.35).max(200.0);
+        let transition_hz = desired_transition_hz
+            .min(available_transition_hz * 0.95)
+            .max(50.0);
+        let delta_f = (transition_hz / source_rate as f64).max(1e-6);
+        let base_taps = (5.5 / delta_f).ceil() as usize;
+        let decimation_factor = source_rate as f64 / target_rate as f64;
+        let scale = decimation_factor.sqrt().ceil() as usize;
+
+        println!("\n設計パラメータ:");
+        println!("  cutoff_hz: {:.1} Hz", cutoff_hz);
+        println!("  source_nyquist: {:.1} Hz", source_nyquist);
+        println!("  target_nyquist: {:.1} Hz", target_rate as f64 / 2.0);
+        println!("  transition_hz: {:.1} Hz", transition_hz);
+        println!("  passband edge: {:.1} Hz", cutoff_hz);
+        println!("  stopband start: {:.1} Hz", cutoff_hz + transition_hz);
+        println!("  delta_f: {:.6}", delta_f);
+        println!("  base_taps (5.5/Δf): {}", base_taps);
+        println!("  scale (sqrt(decimation)): {}", scale);
+
+        // エイリアシング解析
+        println!("\nエイリアシング解析:");
+        let stopband_start = cutoff_hz + transition_hz;
+        println!("  stopband開始: {:.1} Hz", stopband_start);
+        println!(
+            "  エイリアzing源帯域: {:.1} Hz - {:.1} Hz",
+            stopband_start, source_nyquist
+        );
+
+        let alias_fold_to_start =
+            (target_rate as f64 / 2.0) - (source_nyquist - target_rate as f64 / 2.0);
+        let alias_fold_to_end =
+            (target_rate as f64 / 2.0) - (stopband_start - target_rate as f64 / 2.0);
+        println!(
+            "  折り返し先帯域: {:.1} Hz - {:.1} Hz",
+            alias_fold_to_start.max(0.0),
+            alias_fold_to_end
+        );
+
+        // 高域信号のエイリアzing抑制を確認
+        // 15kHz (stopband内) の信号が十分に減衰されるかテスト
+        let test_freq = 15_000.0f32;
+        let len = source_rate as usize; // 1秒
+        let input: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                (2.0 * PI * test_freq * t).sin()
+            })
+            .collect();
+
+        let mut output = Vec::new();
+        resampler.process(&input, &mut output);
+
+        // FIR 過渡を除いてパワーを計算
+        let skip = resampler.taps_per_phase * 2;
+        let skip = skip.min(output.len().saturating_sub(1));
+        let power = if output.len() > skip {
+            output[skip..].iter().map(|v| v * v).sum::<f32>() / (output.len() - skip) as f32
+        } else {
+            0.0
+        };
+
+        // 入力パワーは 0.5 (sin^2平均)
+        let attenuation_db = 10.0 * (power / 0.5).log10();
+        println!("\n{} Hz 信号のエイリアzing抑制:", test_freq);
+        println!("  入力パワー: {:.3} (0.5 期待)", 0.5);
+        println!("  出力パワー: {:.6}", power);
+        println!("  減衰量: {:.1} dB", attenuation_db);
+
+        // Blackman窓の理論上のサイドローブレベルは約-58dBから-74dB
+        // 実際のフィルタでは-60dB以下が望ましい
+        let attenuation_acceptable = power < 0.001; // -30dB = 0.001
+        let attenuation_good = power < 0.0001; // -40dB = 0.0001
+
+        if attenuation_good {
+            println!("  ✓ エイリアzing抑制: 良好 (< -40dB)");
+        } else if attenuation_acceptable {
+            println!("  △ エイリアzing抑制: 許容範囲 (< -30dB)");
+        } else {
+            println!("  ✗ エイリアzing抑制: 不十分 (> -30dB)");
+        }
+
+        // タップ数の妥当性を検証
+        println!("\nタップ数評価:");
+        println!("  現在のタップ数: {}", resampler.taps_per_phase);
+
+        // 計算上の最小タップ数 (エイリアzingを避けるための理論値)
+        // Nyquistの基準では、過渡帯幅 Δf と必要な減衰量 A からタップ数が決まる
+        // Blackman窓では約 -74dB のサイドローブ
+        // Δf = 3780/48000 = 0.07875 の場合
+        // N ≈ 5.5/0.07875 ≈ 70 がベース
+        // これに decimation factor の sqrt を掛けて 140 -> 141
+
+        // 遷移帯を狭くした場合の試算 (より厳密なエイリアzing抑制)
+        let tighter_transition = transition_hz * 0.7; // 70%に
+        let delta_f_tight = (tighter_transition / source_rate as f64).max(1e-6);
+        let base_taps_tight = (5.5 / delta_f_tight).ceil() as usize;
+        let taps_tight = base_taps_tight.saturating_mul(scale.max(1));
+        let taps_tight_norm = if taps_tight % 2 == 0 {
+            taps_tight + 1
+        } else {
+            taps_tight
+        };
+
+        println!("  遷移帯を70%にした場合: {} taps (推定)", taps_tight_norm);
+
+        // 遷移帯を広くした場合の試算 (計算量削減)
+        let wider_transition = (transition_hz * 1.3).min(available_transition_hz);
+        let delta_f_wide = (wider_transition / source_rate as f64).max(1e-6);
+        let base_taps_wide = (5.5 / delta_f_wide).ceil() as usize;
+        let taps_wide = base_taps_wide.saturating_mul(scale.max(1));
+        let taps_wide_norm = if taps_wide % 2 == 0 {
+            taps_wide + 1
+        } else {
+            taps_wide
+        };
+
+        println!("  遷移帯を130%にした場合: {} taps (推定)", taps_wide_norm);
+
+        assert!(
+            attenuation_acceptable,
+            "15kHz signal should be attenuated sufficiently"
+        );
     }
 }

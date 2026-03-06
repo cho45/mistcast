@@ -348,11 +348,13 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut resampler_q = Resampler::new_with_cutoff(
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
@@ -646,18 +648,37 @@ mod tests {
         };
 
         // --- ステップ3: H1 スコア収集 ---
-        // 理論的な同期位置 (48k offset 500 -> 24k offset 250)
-        // mod delay(32) + resample delay(4) + rrc delay(24) - spc/2(1) = 59
-        // signal_start = 250 + 59 = 309
-        let signal_start_in_proc: usize = 309;
+        // 検索中心は、送信オフセットと送受の群遅延から動的に算出する。
+        let tx_offset_input_samples = 500usize;
+        let tx_offset_proc = ((tx_offset_input_samples as f32)
+            * (config.proc_sample_rate() / config.sample_rate))
+            .round() as usize;
+        let mod_ = Modulator::new(config.clone());
+        let rate_ratio = config.sample_rate / config.proc_sample_rate();
+        let mod_delay_proc = (mod_.delay() as f32 / rate_ratio).round() as usize;
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+        let rx_resampler = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+            Some(config.rx_resampler_taps),
+        );
+        let rx_resampler_delay = rx_resampler.delay();
+        let rx_rrc_delay = (config.rrc_num_taps() - 1) / 2;
+        let signal_start_in_proc =
+            tx_offset_proc + mod_delay_proc + rx_resampler_delay + rx_rrc_delay - (spc / 2);
         let total_symbols_for_fine = config.preamble_repeat + config.sync_word_bits;
 
         let mut h1_scores_by_snr: Vec<Vec<f32>> = Vec::new();
         for &snr_db in snr_db_list {
             let mut scores = Vec::new();
             for trial in 0..NUM_TRIALS {
-                let (i, q) =
-                    generate_signal_with_awgn_seeded(&config, 500, snr_db, trial as u64 + 100);
+                let (i, q) = generate_signal_with_awgn_seeded(
+                    &config,
+                    tx_offset_input_samples,
+                    snr_db,
+                    trial as u64 + 100,
+                );
 
                 let mut best_score = 0.0f32;
                 for offset in
@@ -782,6 +803,7 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let rx_resampler_delay = rx_resampler.delay();
         // 3. 受信側 RRC 遅延 (24kHz)
@@ -887,11 +909,13 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut resampler_q = Resampler::new_with_cutoff(
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();

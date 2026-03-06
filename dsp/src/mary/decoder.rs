@@ -198,11 +198,13 @@ impl Decoder {
                 dsp_config.sample_rate as u32,
                 proc_sample_rate as u32,
                 cutoff,
+                Some(dsp_config.rx_resampler_taps),
             ),
             resampler_q: Resampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
                 proc_sample_rate as u32,
                 cutoff,
+                Some(dsp_config.rx_resampler_taps),
             ),
             rrc_filter_i: RrcFilter::from_config(&dsp_config),
             rrc_filter_q: RrcFilter::from_config(&dsp_config),
@@ -1653,14 +1655,22 @@ mod tests {
         if let Some(s) = sync_opt {
             // peak_sample_idx は同期語 0 番目の最初のチップの中央
             // 期待値 = (プリアンブル終了点) + (チップ 0 の半分) + (受信側遅延) + (送信側遅延)
-            // 送信側 (Modulator) も内部で RRC フィルタを通しているため、その分 (16 samples) 遅延する。
             let rx_delay = decoder.resampler_i.delay() + decoder.rrc_filter_i.delay();
             let detector_delay = decoder.sync_detector.filter_delay();
-            let tx_delay = 16; // Modulator's RRC filter delay at 48k? Wait, it is at 48k.
+            // 同期位置は「送信側RRC群遅延」ではなく、TX resampler の遅延寄与で整合する。
+            let tx_rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+            let tx_resampler = crate::common::resample::Resampler::new_with_cutoff(
+                config.proc_sample_rate() as u32,
+                config.sample_rate as u32,
+                Some(tx_rrc_bw),
+                Some(config.tx_resampler_taps),
+            );
+            let tx_delay_24k = (tx_resampler.delay() as f32
+                / (config.sample_rate / config.proc_sample_rate()))
+            .round() as usize;
 
-            // 48kレートでの遅延 16 は、24kレートでは 8 サンプル。
             let expected_peak =
-                preamble_len_24k + (spc / 2) + rx_delay + (tx_delay / 2) + detector_delay;
+                preamble_len_24k + (spc / 2) + rx_delay + tx_delay_24k + detector_delay;
             let diff = s.peak_sample_idx as i32 - expected_peak as i32;
             println!(
                 "[GT] Detected peak: {}, Expected peak: {}, Diff: {}, Delay: rx={}, tx_adj={}",
@@ -1668,7 +1678,7 @@ mod tests {
                 expected_peak,
                 diff,
                 rx_delay + detector_delay,
-                tx_delay / 2
+                tx_delay_24k
             );
 
             // 許容誤差範囲内で整合性を確認する

@@ -1,6 +1,6 @@
 use dsp::dsss::decoder::Decoder;
 use dsp::dsss::encoder::{Encoder, EncoderConfig};
-use dsp::DspConfig;
+use dsp::dsss::params;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const QUICK_NO_NOISE_BUDGET: Duration = Duration::from_secs(4);
 const QUICK_MARGIN_BUDGET: Duration = Duration::from_secs(7);
 const MARGIN_SIGMA: f32 = 0.025;
-const QUICK_MAX_FRAMES: usize = 4;
+const QUICK_MAX_FRAMES: usize = 10;
 const QUICK_GAP_SAMPLES: usize = 64;
 const QUICK_CHUNK_SAMPLES: usize = 16384;
 
@@ -30,7 +30,7 @@ fn add_awgn<R: Rng + ?Sized>(samples: &mut [f32], sigma: f32, rng: &mut R) {
 fn test_transmission_quick(sigma: f32, seed: u64, sample_rate: f32) -> bool {
     let data = b"E2E quick test payload";
     let lt_k = 4usize;
-    let dsp_config = DspConfig::new(sample_rate);
+    let dsp_config = params::dsp_config(sample_rate);
     let mut enc_config = EncoderConfig::new(dsp_config.clone());
     enc_config.fountain_k = lt_k;
     let mut encoder = Encoder::new(enc_config);

@@ -757,11 +757,13 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut resampler_q = Resampler::new_with_cutoff(
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
@@ -1242,6 +1244,7 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let rx_resampler_delay = rx_resampler.delay();
         let rx_rrc_delay = (config.rrc_num_taps() - 1) / 2;
@@ -1366,11 +1369,13 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut resampler_q = Resampler::new_with_cutoff(
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
@@ -1422,11 +1427,13 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut resampler_q = Resampler::new_with_cutoff(
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut i_res = Vec::new();
         let mut q_res = Vec::new();

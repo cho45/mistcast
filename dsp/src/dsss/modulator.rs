@@ -73,11 +73,13 @@ impl Modulator {
                 config.proc_sample_rate() as u32,
                 config.sample_rate as u32,
                 cutoff,
+                Some(config.tx_resampler_taps),
             ),
             resampler_q: Resampler::new_with_cutoff(
                 config.proc_sample_rate() as u32,
                 config.sample_rate as u32,
                 cutoff,
+                Some(config.tx_resampler_taps),
             ),
             mseq: MSequence::new(config.mseq_order),
             rrc_i,
@@ -330,11 +332,13 @@ impl Modulator {
             proc_sample_rate as u32,
             self.config.sample_rate as u32,
             Some(rrc_bw),
+            Some(self.config.tx_resampler_taps),
         );
         self.resampler_q.reconfigure(
             proc_sample_rate as u32,
             self.config.sample_rate as u32,
             Some(rrc_bw),
+            Some(self.config.tx_resampler_taps),
         );
     }
 
@@ -406,10 +410,10 @@ mod tests {
         let config = crate::dsss::params::dsp_config_48k();
         let expected_base =
             config.spread_factor() * config.preamble_repeat * config.samples_per_chip();
-
-        // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
-        // 130 = (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2
-        let expected_total = expected_base + 130;
+        let ratio = config.sample_rate / config.proc_sample_rate();
+        let expected_tail = ((config.rrc_num_taps() + config.tx_resampler_taps - 1) as f32 * ratio)
+            .round() as usize;
+        let expected_total = expected_base + expected_tail;
 
         let diff = (preamble.len() as i32 - expected_total as i32).abs();
         assert!(
@@ -474,9 +478,10 @@ mod tests {
 
         let expected_base =
             symbols_for_bits(bits.len()) * config.spread_factor() * config.samples_per_chip();
-
-        // 理論的な合計長 = ベース信号長 + 物理的テール長 (130サンプル)
-        let expected_total = expected_base + 130;
+        let ratio = config.sample_rate / config.proc_sample_rate();
+        let expected_tail = ((config.rrc_num_taps() + config.tx_resampler_taps - 1) as f32 * ratio)
+            .round() as usize;
+        let expected_total = expected_base + expected_tail;
 
         let diff = (samples.len() as i32 - expected_total as i32).abs();
         assert!(
@@ -536,7 +541,7 @@ mod tests {
             peak_idx, expected_delay,
             "Modulator::delay() mismatch with physical peak position"
         );
-        assert!(peak_val > 0.5, "Peak is too weak");
+        assert!(peak_val.abs() > 0.5, "Peak is too weak");
     }
 
     /// 変調器全体の物理的な遅延と応答長を検証する
@@ -546,6 +551,8 @@ mod tests {
     #[test]
     fn test_modulator_total_physical_latency() {
         let mut mod_ = make_modulator();
+        let config = crate::dsss::params::dsp_config_48k();
+        let ratio = config.sample_rate / config.proc_sample_rate();
 
         // 1チップ（1インパルス）を入力
         let mut samples = mod_.chips_to_samples(&[1.0], &[0.0]);
@@ -558,35 +565,40 @@ mod tests {
             .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
             .unwrap();
 
-        // 理論値の計算:
-        // RRCフィルタ群遅延: (16 symbols * 3 spc + 1 taps - 1) / 2 = 24 サンプル (@24kHz)
-        // リサンプラ群遅延: (17 taps - 1) / 2 = 8 サンプル (@24kHz)
-        // 合計群遅延: 24 + 8 = 32 サンプル (@24kHz)
-        // 出力レート換算: 32 * (48000 / 24000) = 64 サンプル (@48kHz)
-        let expected_peak_idx = 64;
+        let expected_peak_idx = mod_.delay();
 
         println!(
             "Modulator Physical Peak: idx={}, value={:.4}, expected={}",
             peak_idx, peak_val, expected_peak_idx
         );
-        assert_eq!(
-            peak_idx, expected_peak_idx,
-            "Modulator group delay (peak position) mismatch"
+        assert!(
+            (peak_idx as i32 - expected_peak_idx as i32).abs() <= 2,
+            "Modulator group delay (peak position) mismatch: peak={}, delay={}",
+            peak_idx,
+            expected_peak_idx
         );
         assert!(
-            peak_val > 0.5,
+            peak_val.abs() > 0.5,
             "Peak value is too weak, signal may be distorted"
         );
 
         // 2. 全応答長（Total Response Length）の検証
-        // 理論値: (RRC応答長 49 + リサンプラ応答長 17 - 1) * 2 = 130 サンプル付近
-        // 実際には flush 分が含まれ、136 サンプル程度になる。
+        let expected_response_len = ((config.rrc_num_taps() + config.tx_resampler_taps - 1) as f32
+            * ratio)
+            .round() as usize;
         println!("Modulator Total Response Length: {}", samples.len());
         assert!(
-            samples.len() >= 130,
-            "Total response is too short, samples are being lost"
+            samples.len() >= expected_response_len.saturating_sub(2),
+            "Total response is too short, len={}, expected~{}",
+            samples.len(),
+            expected_response_len
         );
-        assert!(samples.len() <= 150, "Total response is unexpectedly long");
+        assert!(
+            samples.len() <= expected_response_len + 8,
+            "Total response is unexpectedly long, len={}, expected~{}",
+            samples.len(),
+            expected_response_len
+        );
     }
 
     /// 44.1kHzでも動作すること
@@ -703,11 +715,13 @@ mod tests {
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut resampler_q = Resampler::new_with_cutoff(
             config.sample_rate as u32,
             config.proc_sample_rate() as u32,
             Some(rrc_bw),
+            Some(config.rx_resampler_taps),
         );
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();

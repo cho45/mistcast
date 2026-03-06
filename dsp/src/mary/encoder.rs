@@ -249,6 +249,8 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::Complex;
+    use rustfft::FftPlanner;
 
     fn make_encoder() -> Encoder {
         let config = DspConfig::default_48k();
@@ -801,6 +803,129 @@ mod tests {
             bits.len(),
             interleaver_config::fec_bits(),
             "ビット数はFECビット数と一致すべき（パディングなし）"
+        );
+    }
+
+    fn out_of_band_leakage_db_and_peak_db(
+        i_samples: &[f32],
+        q_samples: &[f32],
+        sample_rate: f32,
+        inband_edge_hz: f32,
+        oob_start_hz: f32,
+    ) -> (f32, f32) {
+        assert_eq!(i_samples.len(), q_samples.len());
+        let trim = (i_samples.len() / 8).min(512);
+        let start = trim;
+        let end = i_samples.len().saturating_sub(trim);
+        let n = end.saturating_sub(start);
+        assert!(n >= 512, "FFT解析サンプルが不足: n={}", n);
+
+        let nfft = n.next_power_of_two();
+        let mut buf = vec![Complex::new(0.0f32, 0.0f32); nfft];
+        for idx in 0..n {
+            let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * idx as f32 / (n - 1) as f32).cos();
+            buf[idx] = Complex::new(i_samples[start + idx] * w, q_samples[start + idx] * w);
+        }
+
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(nfft);
+        fft.process(&mut buf);
+
+        let nyquist_guard_hz = sample_rate * 0.45;
+        let mut inband_power = 0.0f64;
+        let mut oob_power = 0.0f64;
+        let mut inband_peak = 0.0f64;
+        let mut oob_peak = 0.0f64;
+        for (k, v) in buf.iter().enumerate() {
+            let mut f = k as f32 * sample_rate / nfft as f32;
+            if k > nfft / 2 {
+                f -= sample_rate;
+            }
+            let af = f.abs();
+            let p = v.norm_sqr() as f64;
+            if af <= inband_edge_hz {
+                inband_power += p;
+                inband_peak = inband_peak.max(p);
+            } else if af >= oob_start_hz && af <= nyquist_guard_hz {
+                oob_power += p;
+                oob_peak = oob_peak.max(p);
+            }
+        }
+
+        assert!(inband_power > 0.0, "inband_power must be positive");
+        assert!(inband_peak > 0.0, "inband_peak must be positive");
+        let leakage_ratio = (oob_power / inband_power).max(1e-20);
+        let peak_ratio = (oob_peak / inband_peak).max(1e-20);
+        (
+            10.0 * (leakage_ratio.log10() as f32),
+            10.0 * (peak_ratio.log10() as f32),
+        )
+    }
+
+    /// キャリア混合前の複素ベースバンドで帯域外リークが十分小さいことを検証
+    #[test]
+    fn test_baseband_fft_has_low_out_of_band_leakage_before_carrier_mix() {
+        let mut encoder = make_encoder();
+        let packet = FountainPacket {
+            seq: 0,
+            coefficients: vec![1u8],
+            data: vec![0xA5u8; crate::params::PAYLOAD_SIZE],
+        };
+        let bits = encoder.encode_packet_bits(&packet);
+
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        let mut phase = 0u8;
+        Modulator::bits_to_chips(
+            &bits,
+            &encoder.modulator().wdict,
+            &mut phase,
+            &mut chips_i,
+            &mut chips_q,
+        );
+
+        let mut bb_i = Vec::new();
+        let mut bb_q = Vec::new();
+        encoder
+            .modulator_mut()
+            .chips_to_baseband_for_test(&chips_i, &chips_q, &mut bb_i, &mut bb_q);
+
+        assert_eq!(bb_i.len(), bb_q.len());
+        assert!(
+            bb_i.len() >= 2048,
+            "baseband length too short: {}",
+            bb_i.len()
+        );
+
+        let cfg = encoder.modulator().config();
+        let rrc_bandwidth_hz = 0.5 * cfg.chip_rate * (1.0 + cfg.rrc_alpha);
+        let inband_edge_hz = rrc_bandwidth_hz * 1.05;
+        let oob_start_hz = rrc_bandwidth_hz * 1.35;
+        let (leakage_db, peak_leakage_db) = out_of_band_leakage_db_and_peak_db(
+            &bb_i,
+            &bb_q,
+            cfg.sample_rate,
+            inband_edge_hz,
+            oob_start_hz,
+        );
+        println!(
+            "baseband_oob_leakage_db={:.2}, baseband_oob_peak_db={:.2}, inband_edge_hz={:.1}, oob_start_hz={:.1}",
+            leakage_db, peak_leakage_db, inband_edge_hz, oob_start_hz
+        );
+
+        assert!(
+            leakage_db < -50.0,
+            "out-of-band integrated leakage is too large: {:.2} dB (inband<= {:.1} Hz, oob>= {:.1} Hz)",
+            leakage_db,
+            inband_edge_hz,
+            oob_start_hz
+        );
+        assert!(
+            peak_leakage_db < -50.0,
+            "out-of-band peak leakage is too large: {:.2} dB (inband<= {:.1} Hz, oob>= {:.1} Hz)",
+            peak_leakage_db,
+            inband_edge_hz,
+            oob_start_hz
         );
     }
 }

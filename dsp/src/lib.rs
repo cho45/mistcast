@@ -41,6 +41,8 @@ pub mod params {
     pub const FIXED_K: usize = 10;
     pub const FOUNTAIN_OVERHEAD: f32 = 0.1;
     pub const MODULATION: DifferentialModulation = DifferentialModulation::Dqpsk;
+    pub const TX_RESAMPLER_TAPS: usize = 73;
+    pub const RX_RESAMPLER_TAPS: usize = 35;
 
     /// 内部処理で使用するチップあたりのサンプル数 (Samples Per Chip)
     /// 奇数にすることでチップ中央のサンプルを正確に取得可能にする。
@@ -59,6 +61,8 @@ pub struct DspConfig {
     pub sync_word_bits: usize,
     pub packets_per_burst: usize,
     pub preamble_sf: usize,
+    pub tx_resampler_taps: usize,
+    pub rx_resampler_taps: usize,
 }
 
 impl DspConfig {
@@ -74,6 +78,8 @@ impl DspConfig {
             sync_word_bits: params::SYNC_WORD_BITS,
             packets_per_burst: params::PACKETS_PER_SYNC_BURST,
             preamble_sf: params::PREAMBLE_SF,
+            tx_resampler_taps: params::TX_RESAMPLER_TAPS,
+            rx_resampler_taps: params::RX_RESAMPLER_TAPS,
         }
     }
 
