@@ -102,6 +102,8 @@ struct Cli {
     sweep_ppm: Vec<f32>,
     sweep_loss: Vec<f32>,
     sweep_fading: Vec<f32>,
+    sweep_chip_rate: Vec<f32>,
+    sweep_carrier_freq: Vec<f32>,
     sample_rate: f32,
     chip_rate: f32,
     carrier_freq: f32,
@@ -584,6 +586,14 @@ fn parse_cli() -> Cli {
     );
     let sweep_loss = parse_list(kv.remove("sweep-loss"), &[0.0, 0.05, 0.1, 0.2, 0.3, 0.4]);
     let sweep_fading = parse_list(kv.remove("sweep-fading"), &[0.0, 0.2, 0.4, 0.6, 0.8]);
+    let sweep_chip_rate = parse_list(
+        kv.remove("sweep-chip-rate"),
+        &[6000.0, 8000.0, 10000.0, 12000.0, 14000.0, 15000.0],
+    );
+    let sweep_carrier_freq = parse_list(
+        kv.remove("sweep-carrier-freq"),
+        &[8000.0, 10000.0, 12000.0, 14000.0, 15000.0],
+    );
 
     let sample_rate = kv
         .remove("sample-rate")
@@ -678,6 +688,8 @@ fn parse_cli() -> Cli {
         sweep_ppm,
         sweep_loss,
         sweep_fading,
+        sweep_chip_rate,
+        sweep_carrier_freq,
         sample_rate,
         chip_rate,
         carrier_freq,
@@ -1385,6 +1397,34 @@ fn run_sweep_fading(cli: &Cli) {
     }
 }
 
+fn run_sweep_band(cli: &Cli) {
+    print_header();
+    for &chip_rate in &cli.sweep_chip_rate {
+        for &carrier_freq in &cli.sweep_carrier_freq {
+            let mut cfg = cli.clone();
+            cfg.chip_rate = chip_rate.max(1.0);
+            cfg.carrier_freq = carrier_freq.max(1.0);
+            let rrc_bw = cfg.chip_rate * (1.0 + cfg.rrc_alpha) * 0.5;
+            let band_lo = (cfg.carrier_freq - rrc_bw).max(0.0);
+            let band_hi = cfg.carrier_freq + rrc_bw;
+            let scenario = format!(
+                "band(bytes={},chip_rate={:.1},carrier={:.1},bw_lo={:.1},bw_hi={:.1},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2},fade={:.2})",
+                cfg.payload_bytes,
+                cfg.chip_rate,
+                cfg.carrier_freq,
+                band_lo,
+                band_hi,
+                cfg.base.sigma,
+                cfg.base.cfo_hz,
+                cfg.base.ppm,
+                cfg.base.burst_loss,
+                cfg.base.fading_depth
+            );
+            evaluate(&cfg, &cfg.base, &scenario);
+        }
+    }
+}
+
 fn print_help() {
     println!(
         "usage: cargo run --release --bin dsss_e2e_eval -- [options]\n\
@@ -1396,6 +1436,7 @@ fn print_help() {
          --mode sweep-loss        バースト欠落率 sweep\n\
          --mode sweep-fading      振幅フェージング深さ sweep\n\
          --mode sweep-multipath   マルチパス profile sweep\n\
+         --mode sweep-band        chip-rate x carrier-freq sweep\n\
          --mode sweep-all         全sweep\n\n\
          evaluation options:\n\
          --trials N\n\
@@ -1425,7 +1466,9 @@ fn print_help() {
          --sweep-awgn \"0,0.005,0.01\"\n\
          --sweep-ppm  \"-120,-80,0,80,120\"\n\
          --sweep-loss \"0,0.1,0.2,0.3\"\n\
-         --sweep-fading \"0,0.2,0.4,0.6,0.8\"\n"
+         --sweep-fading \"0,0.2,0.4,0.6,0.8\"\n\
+         --sweep-chip-rate \"6000,8000,10000,12000,14000,15000\"\n\
+         --sweep-carrier-freq \"8000,10000,12000,14000,15000\"\n"
     );
 }
 
@@ -1444,12 +1487,14 @@ fn main() {
         "sweep-loss" => run_sweep_loss(&cli),
         "sweep-fading" => run_sweep_fading(&cli),
         "sweep-multipath" => run_sweep_multipath(&cli),
+        "sweep-band" => run_sweep_band(&cli),
         "sweep-all" => {
             run_sweep_awgn(&cli);
             run_sweep_ppm(&cli);
             run_sweep_loss(&cli);
             run_sweep_fading(&cli);
             run_sweep_multipath(&cli);
+            run_sweep_band(&cli);
         }
         _ => {
             eprintln!("unknown mode: {}", cli.mode);
@@ -1553,6 +1598,8 @@ mod tests {
             sweep_ppm: vec![],
             sweep_loss: vec![],
             sweep_fading: vec![],
+            sweep_chip_rate: vec![],
+            sweep_carrier_freq: vec![],
             sample_rate: 48000.0,
             chip_rate: 8000.0,
             carrier_freq: 15000.0,
@@ -1600,6 +1647,8 @@ mod tests {
             sweep_ppm: vec![],
             sweep_loss: vec![],
             sweep_fading: vec![],
+            sweep_chip_rate: vec![],
+            sweep_carrier_freq: vec![],
             sample_rate: 48000.0,
             chip_rate: 8000.0,
             carrier_freq: 15000.0,
