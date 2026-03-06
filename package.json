@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "typecheck": "vue-tsc",
     "build": "vue-tsc && vite build",
     "build:wasm": "WASM_FLAVOR=both WASM_NO_OPT=1 node scripts/build-wasm.js",
     "build:wasm:perf": "WASM_FLAVOR=both WASM_NO_OPT=0 node scripts/build-wasm.js",

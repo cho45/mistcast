@@ -32,20 +32,32 @@ export class EncoderProcessor extends AudioWorkletProcessor {
   private started = false;
   private lastSample = 0.0;
   private readonly sampleRateHz = workletGlobal.sampleRate;
+  private readonly REPORT_EVERY_BLOCKS = 64;
+  private statsBlocks = 0;
 
   private baseMinStartSamples = Math.floor(this.sampleRateHz * 0.1);
   private lowWaterSamples = Math.floor(this.sampleRateHz * 0.03);
 
+  private underrunCount = 0;
+  private underrunEventsSinceLastStats = 0;
+  private hardUnderrunEventsSinceLastStats = 0;
+
   constructor() {
     super();
     this.port.onmessage = (e: MessageEvent) => {
-      const msg = e.data as RecycleTransferInputMessage;
+      const msg = e.data as RecycleTransferInputMessage | null;
+      if (!msg || typeof msg !== "object") return;
+
       if (msg.type === "push") {
         this.packetQueue.pushFromMessage(msg);
       } else if (msg.type === "reset") {
         this.packetQueue.reset((data) => this.recycleChunkData(data));
         this.started = false;
         this.lastSample = 0.0;
+        this.statsBlocks = 0;
+        this.underrunCount = 0;
+        this.underrunEventsSinceLastStats = 0;
+        this.hardUnderrunEventsSinceLastStats = 0;
       }
     };
   }
@@ -77,11 +89,32 @@ export class EncoderProcessor extends AudioWorkletProcessor {
     }
 
     if (drained.writtenFrames < outL.length) {
+      this.underrunCount += 1;
+      this.underrunEventsSinceLastStats += 1;
+
       outL.fill(this.lastSample, drained.writtenFrames);
       outR.fill(this.lastSample, drained.writtenFrames);
       if (this.packetQueue.getBufferedFrames() < this.lowWaterSamples) {
+        if (this.started) {
+          this.hardUnderrunEventsSinceLastStats += 1;
+        }
         this.started = false;
       }
+    }
+
+    // 定期的にstatsを送信
+    this.statsBlocks += 1;
+    if (this.statsBlocks % this.REPORT_EVERY_BLOCKS === 0) {
+      const bufferedMs = (this.packetQueue.getBufferedFrames() / this.sampleRateHz) * 1000;
+      this.port.postMessage({
+        type: "encoder-stats",
+        bufferedMs,
+        underrunCount: this.underrunCount,
+        underrunEventsSinceLastStats: this.underrunEventsSinceLastStats,
+        hardUnderrunEventsSinceLastStats: this.hardUnderrunEventsSinceLastStats,
+      });
+      this.underrunEventsSinceLastStats = 0;
+      this.hardUnderrunEventsSinceLastStats = 0;
     }
 
     return true;
@@ -162,7 +195,7 @@ export class DecoderProcessor extends AudioWorkletProcessor {
 
     if (this.statsBlocks % this.REPORT_EVERY_BLOCKS === 0) {
       this.port.postMessage({
-        type: "stats",
+        type: "decoder-stats",
         blocks: this.statsBlocks,
         avgProcessMs: this.statsTotalMs / this.statsBlocks,
         maxProcessMs: this.statsMaxMs,

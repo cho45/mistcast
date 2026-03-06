@@ -112,7 +112,7 @@ type RecyclePortInboundMessage =
   | { type: "recycle"; data: Float32Array }
   | { type: "input"; data: Float32Array }
   | {
-    type: "stats";
+    type: "decoder-stats";
     blocks: number;
     avgProcessMs: number;
     maxProcessMs: number;
@@ -122,11 +122,9 @@ type RecyclePortInboundMessage =
     inputRms: number;
   }
   | {
-    type: "stats";
+    type: "encoder-stats";
     bufferedMs: number;
     underrunCount: number;
-    droppedSamplesCount: number;
-    inputGapMsPeak: number;
     underrunEventsSinceLastStats: number;
     hardUnderrunEventsSinceLastStats: number;
   };
@@ -151,6 +149,7 @@ export class MistcastBackend {
   private wasmBindings: WasmBindings | null = null;
   private isEncoding = false;
   private randomizeSeq = false;
+  private encoderStartTime: number | null = null; // エンコーダ開始時刻
 
   private onPacket: ((data: Uint8Array) => void) | null = null;
   private onProgress: ((p: any) => void) | null = null;
@@ -204,20 +203,28 @@ export class MistcastBackend {
     this.audioOutPort.onmessage = (event: MessageEvent) => {
       const msg = event.data as RecyclePortInboundMessage | null;
       if (!msg || typeof msg !== "object") return;
-      if (msg.type === "recycle" && msg.data instanceof Float32Array) {
+      if (msg.type === "recycle") {
         this.audioPacketSender?.recycle(msg.data);
         this.fillEncoderBuffer();
-      } else if (msg.type === "stats") {
+      } else if (msg.type === "encoder-stats") {
         // Encoder stats (AudioStreamProcessor)
-        if ("underrunEventsSinceLastStats" in msg) {
-          if (msg.underrunEventsSinceLastStats > 0 || msg.hardUnderrunEventsSinceLastStats > 0) {
-            console.log(
-              `[AudioStreamProcessor] underrun events: ${msg.underrunEventsSinceLastStats}, ` +
-              `hard underrun events: ${msg.hardUnderrunEventsSinceLastStats}, ` +
-              `buffered: ${msg.bufferedMs.toFixed(0)}ms, ` +
-              `total underruns: ${msg.underrunCount}`
-            );
-          }
+        const elapsed = this.encoderStartTime ? ((Date.now() - this.encoderStartTime) / 1000).toFixed(1) : "?";
+        const dropped = this.audioPacketSender?.getDroppedSamplesCount() ?? 0;
+        if (msg.underrunEventsSinceLastStats > 0 || msg.hardUnderrunEventsSinceLastStats > 0) {
+          console.log(
+            `[EncoderProcessor T+${elapsed}s] underrun events: ${msg.underrunEventsSinceLastStats}, ` +
+            `hard underrun events: ${msg.hardUnderrunEventsSinceLastStats}, ` +
+            `buffered: ${msg.bufferedMs.toFixed(0)}ms, ` +
+            `dropped samples: ${dropped}, ` +
+            `total underruns: ${msg.underrunCount}`
+          );
+        } else {
+          /*
+          console.log(
+            `[EncoderProcessor T+${elapsed}s] buffered: ${msg.bufferedMs.toFixed(0)}ms, ` +
+            `dropped samples: ${dropped}`
+          );
+          */
         }
       }
     };
@@ -233,9 +240,9 @@ export class MistcastBackend {
     this.audioInPort.onmessage = (event: MessageEvent) => {
       const msg = event.data as RecyclePortInboundMessage | null;
       if (!msg || typeof msg !== "object") return;
-      if (msg.type === "input" && msg.data instanceof Float32Array) {
+      if (msg.type === "input") {
         this.processSamples(msg.data);
-      } else if (msg.type === "stats") {
+      } else if (msg.type === "decoder-stats") {
         this.decoderProcessorStats = {
           blocks: msg.blocks,
           avgProcessMs: msg.avgProcessMs,
@@ -292,13 +299,18 @@ export class MistcastBackend {
     }
 
     this.isEncoding = true;
+    this.encoderStartTime = Date.now();
+
     this.fillEncoderBuffer();
   }
 
   private fillEncoderBuffer() {
     if (!this.isEncoding || !this.encoder || !this.audioPacketSender || !this.audioOutPort) return;
 
-    while (this.isEncoding) {
+    // フレームサイズに対して十分なプール残量がある場合のみ pull_frame する。
+    // 1フレームが packetSamples よりもわずかに長い場合、2パケット分を消費する可能性があるため、
+    // 余裕を持って 2 以上の空きを要求する。
+    while (this.isEncoding && this.audioPacketSender.getAvailablePoolSize() >= 2) {
       let frame: Float32Array | null | undefined;
       if (this.randomizeSeq) {
         // seq は 0..65535 の範囲でランダムに選択（ヘッダが u16 なので）
@@ -315,6 +327,7 @@ export class MistcastBackend {
       this.audioPacketSender.appendFrom(samples, samples.length, 1, this.audioOutPort);
 
       if (this.audioPacketSender.getDroppedSamplesCount() > prevDropped) {
+        console.warn(`[Worker] Samples dropped! total=${this.audioPacketSender.getDroppedSamplesCount()}`);
         break;
       }
     }

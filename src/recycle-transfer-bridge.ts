@@ -71,6 +71,14 @@ export class RecycleTransferSender {
     return this.droppedSamplesCount;
   }
 
+  getAvailablePoolSize(): number {
+    return this.pool.length;
+  }
+
+  getPacketSamples(): number {
+    return this.packetSamples;
+  }
+
   reset(): void {
     this.pool.length = 0;
     this.writeChunk = null;
