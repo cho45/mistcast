@@ -221,6 +221,12 @@ const ALL_COLUMNS: &[&str] = &[
     "multipath",
     "raw_err_run_mean",
     "raw_err_run_max",
+    "err_w_cw_mean",
+    "err_w_cw_p50",
+    "err_w_cw_p90",
+    "err_w_cw_p99",
+    "err_w_cw_max",
+    "err_w_cw_hist",
 ];
 
 fn parse_positive_f32(value: &str) -> Result<f32, String> {
@@ -392,6 +398,10 @@ struct TrialResult {
     raw_error_runs: usize,
     raw_error_run_bits: usize,
     raw_error_run_max: usize,
+    codeword_count: usize,
+    codeword_error_sum: usize,
+    codeword_error_max: usize,
+    codeword_error_weights: Vec<usize>,
     last_est_snr_db: f32,
     phase_gate_on_symbols: usize,
     phase_gate_off_symbols: usize,
@@ -424,6 +434,10 @@ struct Metrics {
     total_raw_error_runs: usize,
     total_raw_error_run_bits: usize,
     max_raw_error_run_len: usize,
+    total_codewords: usize,
+    total_codeword_error_sum: usize,
+    max_codeword_error: usize,
+    codeword_error_weights: Vec<usize>,
     sum_last_est_snr_db: f64,
     count_last_est_snr_db: usize,
     total_phase_gate_on_symbols: usize,
@@ -451,6 +465,10 @@ impl Metrics {
         self.total_raw_error_runs += t.raw_error_runs;
         self.total_raw_error_run_bits += t.raw_error_run_bits;
         self.max_raw_error_run_len = self.max_raw_error_run_len.max(t.raw_error_run_max);
+        self.total_codewords += t.codeword_count;
+        self.total_codeword_error_sum += t.codeword_error_sum;
+        self.max_codeword_error = self.max_codeword_error.max(t.codeword_error_max);
+        self.codeword_error_weights.extend(t.codeword_error_weights);
         self.total_tx_signal_energy += t.tx_signal_energy_sum;
         self.total_tx_signal_samples += t.tx_signal_samples;
         self.total_process_time_ns += t.process_time_ns;
@@ -572,6 +590,72 @@ impl Metrics {
         }
     }
 
+    fn err_w_cw_mean(&self) -> Option<f32> {
+        if self.total_codewords == 0 {
+            None
+        } else {
+            Some(self.total_codeword_error_sum as f32 / self.total_codewords as f32)
+        }
+    }
+
+    fn err_w_cw_p50(&self) -> Option<f32> {
+        quantile_usize(&self.codeword_error_weights, 0.5)
+    }
+
+    fn err_w_cw_p90(&self) -> Option<f32> {
+        quantile_usize(&self.codeword_error_weights, 0.9)
+    }
+
+    fn err_w_cw_p99(&self) -> Option<f32> {
+        quantile_usize(&self.codeword_error_weights, 0.99)
+    }
+
+    fn err_w_cw_max(&self) -> Option<usize> {
+        if self.max_codeword_error == 0 && self.total_codewords == 0 {
+            None
+        } else {
+            Some(self.max_codeword_error)
+        }
+    }
+
+    fn err_w_cw_hist(&self) -> Option<String> {
+        if self.codeword_error_weights.is_empty() {
+            return None;
+        }
+        let mut b0 = 0usize;
+        let mut b1 = 0usize;
+        let mut b2 = 0usize;
+        let mut b3_4 = 0usize;
+        let mut b5_8 = 0usize;
+        let mut b9_16 = 0usize;
+        let mut b17_32 = 0usize;
+        let mut b33p = 0usize;
+        for &w in &self.codeword_error_weights {
+            match w {
+                0 => b0 += 1,
+                1 => b1 += 1,
+                2 => b2 += 1,
+                3..=4 => b3_4 += 1,
+                5..=8 => b5_8 += 1,
+                9..=16 => b9_16 += 1,
+                17..=32 => b17_32 += 1,
+                _ => b33p += 1,
+            }
+        }
+        let n = self.codeword_error_weights.len() as f32;
+        Some(format!(
+            "0:{:.3}|1:{:.3}|2:{:.3}|3-4:{:.3}|5-8:{:.3}|9-16:{:.3}|17-32:{:.3}|33+:{:.3}",
+            b0 as f32 / n,
+            b1 as f32 / n,
+            b2 as f32 / n,
+            b3_4 as f32 / n,
+            b5_8 as f32 / n,
+            b9_16 as f32 / n,
+            b17_32 as f32 / n,
+            b33p as f32 / n,
+        ))
+    }
+
     fn avg_last_est_snr_db(&self) -> Option<f32> {
         if self.count_last_est_snr_db == 0 {
             None
@@ -646,6 +730,17 @@ fn quantile(values: &[f32], q: f32) -> Option<f32> {
     let q = q.clamp(0.0, 1.0);
     let idx = (((v.len() - 1) as f32) * q).round() as usize;
     v.get(idx).copied()
+}
+
+fn quantile_usize(values: &[usize], q: f32) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v = values.to_vec();
+    v.sort_unstable();
+    let q = q.clamp(0.0, 1.0);
+    let idx = (((v.len() - 1) as f32) * q).round() as usize;
+    v.get(idx).map(|&x| x as f32)
 }
 
 fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
@@ -880,6 +975,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     raw_error_runs: 0,
                     raw_error_run_bits: 0,
                     raw_error_run_max: 0,
+                    codeword_count: 0,
+                    codeword_error_sum: 0,
+                    codeword_error_max: 0,
+                    codeword_error_weights: Vec::new(),
                     last_est_snr_db: f32::NAN,
                     phase_gate_on_symbols: 0,
                     phase_gate_off_symbols: 0,
@@ -928,6 +1027,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         raw_error_runs: 0,
                         raw_error_run_bits: 0,
                         raw_error_run_max: 0,
+                        codeword_count: 0,
+                        codeword_error_sum: 0,
+                        codeword_error_max: 0,
+                        codeword_error_weights: Vec::new(),
                         last_est_snr_db: f32::NAN,
                         phase_gate_on_symbols: 0,
                         phase_gate_off_symbols: 0,
@@ -965,6 +1068,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         raw_error_runs: 0,
         raw_error_run_bits: 0,
         raw_error_run_max: 0,
+        codeword_count: 0,
+        codeword_error_sum: 0,
+        codeword_error_max: 0,
+        codeword_error_weights: Vec::new(),
         last_est_snr_db: f32::NAN,
         phase_gate_on_symbols: 0,
         phase_gate_off_symbols: 0,
@@ -1031,6 +1138,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let raw_error_runs_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_error_run_bits_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_error_run_max_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let codeword_error_weights_acc: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let efb = Arc::clone(&expected_fec_bits);
         let rbe = Arc::clone(&raw_bit_errors_acc);
@@ -1038,6 +1146,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         let rer = Arc::clone(&raw_error_runs_acc);
         let rrb = Arc::clone(&raw_error_run_bits_acc);
         let rrm = Arc::clone(&raw_error_run_max_acc);
+        let cew = Arc::clone(&codeword_error_weights_acc);
         decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
             // LLR から復号して seq を推定できた場合のみ raw BER を積算する。
             let decoded_bits = fec::decode_soft(llrs);
@@ -1084,6 +1193,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
             *rrb.lock().unwrap() += run_bits;
             let mut max_guard = rrm.lock().unwrap();
             *max_guard = (*max_guard).max(run_max);
+            cew.lock().unwrap().push(errors);
         }));
     }
 
@@ -1132,6 +1242,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
                 let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
                 let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
+                let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
+                let codeword_count = codeword_error_weights.len();
+                let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
+                let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
                 return TrialResult {
                     success: errs == 0,
                     completion_sec: Some(elapsed_sec),
@@ -1152,6 +1266,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     raw_error_runs,
                     raw_error_run_bits,
                     raw_error_run_max,
+                    codeword_count,
+                    codeword_error_sum,
+                    codeword_error_max,
+                    codeword_error_weights,
                     last_est_snr_db: progress.last_est_snr_db,
                     phase_gate_on_symbols: progress.phase_gate_on_symbols,
                     phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1185,6 +1303,11 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
                     let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
                     let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
+                    let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
+                    let codeword_count = codeword_error_weights.len();
+                    let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
+                    let codeword_error_max =
+                        codeword_error_weights.iter().copied().max().unwrap_or(0);
                     return TrialResult {
                         success: errs == 0,
                         completion_sec: Some(elapsed_sec),
@@ -1205,6 +1328,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         raw_error_runs,
                         raw_error_run_bits,
                         raw_error_run_max,
+                        codeword_count,
+                        codeword_error_sum,
+                        codeword_error_max,
+                        codeword_error_weights,
                         last_est_snr_db: progress.last_est_snr_db,
                         phase_gate_on_symbols: progress.phase_gate_on_symbols,
                         phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1226,6 +1353,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
     let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
     let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
+    let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
+    let codeword_count = codeword_error_weights.len();
+    let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
+    let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
     let final_progress = decoder.process_samples(&[]);
     TrialResult {
         success: false,
@@ -1247,6 +1378,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         raw_error_runs,
         raw_error_run_bits,
         raw_error_run_max,
+        codeword_count,
+        codeword_error_sum,
+        codeword_error_max,
+        codeword_error_weights,
         last_est_snr_db: final_progress.last_est_snr_db,
         phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
         phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
@@ -1303,6 +1438,15 @@ fn render_column(
             .raw_err_run_max()
             .map(|v| v.to_string())
             .unwrap_or_else(|| "NaN".to_string()),
+        "err_w_cw_mean" => fmt_opt(m.err_w_cw_mean()),
+        "err_w_cw_p50" => fmt_opt(m.err_w_cw_p50()),
+        "err_w_cw_p90" => fmt_opt(m.err_w_cw_p90()),
+        "err_w_cw_p99" => fmt_opt(m.err_w_cw_p99()),
+        "err_w_cw_max" => m
+            .err_w_cw_max()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "NaN".to_string()),
+        "err_w_cw_hist" => m.err_w_cw_hist().unwrap_or_else(|| "NaN".to_string()),
         "goodput_effective_bps" => format!("{:.3}", m.goodput_effective_bps(cli.payload_bytes * 8)),
         "goodput_success_mean_bps" => fmt_opt(m.goodput_success_mean_bps(cli.payload_bytes * 8)),
         "p95_complete_s" => fmt_opt(m.p95_completion_sec()),
