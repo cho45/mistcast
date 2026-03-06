@@ -25,6 +25,34 @@ pub struct Demodulator {
 }
 
 impl Demodulator {
+    #[inline]
+    fn update_top2(top1: &mut f32, top2: &mut f32, v: f32) {
+        if v > *top1 {
+            *top2 = *top1;
+            *top1 = v;
+        } else if v > *top2 {
+            *top2 = v;
+        }
+    }
+
+    #[inline]
+    fn max_star_from_top2(top1: f32, top2: f32) -> f32 {
+        if !top1.is_finite() {
+            return f32::NEG_INFINITY;
+        }
+        if !top2.is_finite() {
+            return top1;
+        }
+        // max* 近似: log(exp(a)+exp(b)) = max(a,b) + log(1 + exp(-|a-b|))
+        top1 + (-(top1 - top2).abs()).exp().ln_1p()
+    }
+
+    #[inline]
+    fn max_star_pair(a: f32, b: f32) -> f32 {
+        let m = a.max(b);
+        m + (-(a - b).abs()).exp().ln_1p()
+    }
+
     /// 新しいMaryDQPSK復調器を作成する
     pub fn new() -> Self {
         let wdict = WalshDictionary::default_w16();
@@ -61,8 +89,8 @@ impl Demodulator {
     /// 戻り値: 4ビットLLR [bit0, bit1, bit2, bit3]
     ///
     /// # 理論
-    /// Max-Log-MAP近似では、各ビットのLLRは以下のように計算される：
-    /// LLR(b_i) = (max_{x: b_i=0} energy[x] - max_{x: b_i=1} energy[x]) / E_max
+    /// Max-Log-MAP + max*補正（上位2候補）:
+    /// LLR(b_i) ≈ (max*_{x:b_i=0} E_x - max*_{x:b_i=1} E_x) / E_max
     pub fn walsh_llr(&self, energies: &[f32; 16], max_energy: f32) -> [f32; 4] {
         let mut llr = [0.0f32; 4];
         let denom = max_energy.max(1e-6);
@@ -72,20 +100,20 @@ impl Demodulator {
         // 戻り値の配列は [LLR(MSB=3), LLR(bit=2), LLR(bit=1), LLR(LSB=0)] の順でなければならない。
         for (i, item) in llr.iter_mut().enumerate() {
             let bit = 3 - i; // i=0 -> bit=3, i=1 -> bit=2 ...
-
-            // bit=0のWalsh indexの最大エネルギー
-            let max_e0 = (0..16)
-                .filter(|&idx| (idx & (1 << bit)) == 0)
-                .map(|idx| energies[idx])
-                .fold(f32::NEG_INFINITY, f32::max);
-
-            // bit=1のWalsh indexの最大エネルギー
-            let max_e1 = (0..16)
-                .filter(|&idx| (idx & (1 << bit)) != 0)
-                .map(|idx| energies[idx])
-                .fold(f32::NEG_INFINITY, f32::max);
-
-            *item = (max_e0 - max_e1) / denom;
+            let mut max_e0_1 = f32::NEG_INFINITY;
+            let mut max_e0_2 = f32::NEG_INFINITY;
+            let mut max_e1_1 = f32::NEG_INFINITY;
+            let mut max_e1_2 = f32::NEG_INFINITY;
+            for (idx, &energy) in energies.iter().enumerate() {
+                if (idx & (1 << bit)) == 0 {
+                    Self::update_top2(&mut max_e0_1, &mut max_e0_2, energy);
+                } else {
+                    Self::update_top2(&mut max_e1_1, &mut max_e1_2, energy);
+                }
+            }
+            let max_star_e0 = Self::max_star_from_top2(max_e0_1, max_e0_2);
+            let max_star_e1 = Self::max_star_from_top2(max_e1_1, max_e1_2);
+            *item = (max_star_e0 - max_star_e1) / denom;
         }
 
         llr
@@ -114,9 +142,9 @@ impl Demodulator {
         let m3 = -d.im; // s3=( 0,-1)
 
         // bit0: 0 -> {phase0, phase1}, 1 -> {phase2, phase3}
-        let llr0 = m0.max(m1) - m2.max(m3);
+        let llr0 = Self::max_star_pair(m0, m1) - Self::max_star_pair(m2, m3);
         // bit1: 0 -> {phase0, phase3}, 1 -> {phase1, phase2}
-        let llr1 = m0.max(m3) - m1.max(m2);
+        let llr1 = Self::max_star_pair(m0, m3) - Self::max_star_pair(m1, m2);
         [llr0, llr1]
     }
 
@@ -302,6 +330,26 @@ mod tests {
         for (bit, item) in llr.iter().enumerate() {
             assert!(*item < 0.0, "LLR[{}] should be negative for Walsh[15]", bit);
         }
+    }
+
+    #[test]
+    fn test_walsh_llr_uses_second_candidate_information() {
+        let demod = make_demodulator();
+        let mut energies = [0.0f32; 16];
+        // bit3=0側 (idx 0..7) に近い第2候補を置く
+        energies[0] = 100.0;
+        energies[1] = 99.5;
+        // bit3=1側 (idx 8..15)
+        energies[8] = 99.4;
+        let llr = demod.walsh_llr(&energies, 100.0);
+
+        let pure_max_norm = (100.0 - 99.4) / 100.0;
+        assert!(
+            llr[0] > pure_max_norm,
+            "max* correction should increase confidence when second candidate is close: llr={} pure_max={}",
+            llr[0],
+            pure_max_norm
+        );
     }
 
     /// リセット後の状態確認
@@ -624,9 +672,8 @@ mod tests {
 
     /// LLRの信頼性を検証する：エネルギーが大きいほどLLRの絶対値が大きい
     ///
-    /// 注：現在の正規化ロジック (E_maxで除算) では、ノイズのない理想信号は
-    /// 振幅に関わらず LLR=1.0 に収束する。そのため、ここでは絶対値ではなく
-    /// 正しく 1.0 に正規化されることを検証する。
+    /// 注：max*補正を入れたため、理想信号でも厳密に1.0にはならない。
+    /// 振幅に依らず高信頼度を保つことを検証する。
     #[test]
     fn test_llr_reliability_normalized() {
         let mut demod = make_demodulator();
@@ -649,17 +696,17 @@ mod tests {
         demod.reset();
         let (walsh_llr_strong, _, _) = demod.demod_symbol(&signal_strong);
 
-        // 検証：理想信号ではどちらも LLR ≈ 1.0 になる
+        // 検証：理想信号ではどちらも十分大きい信頼度になる
         for bit in 0..4 {
             assert!(
-                (walsh_llr_weak[bit].abs() - 1.0).abs() < 1e-3,
-                "Weak signal bit{} LLR should be ~1.0, got {}",
+                walsh_llr_weak[bit].abs() > 0.95,
+                "Weak signal bit{} LLR should be high-confidence (>0.95), got {}",
                 bit,
                 walsh_llr_weak[bit]
             );
             assert!(
-                (walsh_llr_strong[bit].abs() - 1.0).abs() < 1e-3,
-                "Strong signal bit{} LLR should be ~1.0, got {}",
+                walsh_llr_strong[bit].abs() > 0.95,
+                "Strong signal bit{} LLR should be high-confidence (>0.95), got {}",
                 bit,
                 walsh_llr_strong[bit]
             );
@@ -1390,12 +1437,11 @@ mod tests {
 
         let (walsh_llr, _dqpsk_llr, _diff) = demodulator.demod_symbol(&signal);
 
-        // Walsh[0]のLLRは高信頼性（1.0に近い）
-        // 根拠：正規化ロジックにより、理想的な信号（ノイズなし）では (E_max - 0) / E_max = 1.0 となる。
+        // Walsh[0]のLLRは高信頼性
         for (bit, item) in walsh_llr.iter().enumerate() {
             assert!(
-                (item.abs() - 1.0).abs() < 1e-3,
-                "Walsh[0] LLR[{}] should be ~1.0, got {}",
+                item.abs() > 0.95,
+                "Walsh[0] LLR[{}] should be high-confidence (>0.95), got {}",
                 bit,
                 item
             );
