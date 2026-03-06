@@ -76,6 +76,9 @@ pub struct DecodeProgress {
     pub last_pred_mse_fde: f32,
     pub last_pred_mse_raw: f32,
     pub last_est_snr_db: f32,
+    pub phase_gate_on_symbols: usize,
+    pub phase_gate_off_symbols: usize,
+    pub phase_gate_on_ratio: f32,
     pub ebn0_approx_db: f32,
     pub basis_matrix: Vec<u8>,
 }
@@ -141,6 +144,8 @@ pub struct Decoder {
     pub parse_error_packets: usize,
     pub invalid_neighbor_packets: usize,
     pub stats_total_samples: usize,
+    pub phase_gate_on_symbols: usize,
+    pub phase_gate_off_symbols: usize,
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
@@ -254,6 +259,8 @@ impl Decoder {
             invalid_neighbor_packets: 0,
             llr_callback: None,
             stats_total_samples: 0,
+            phase_gate_on_symbols: 0,
+            phase_gate_off_symbols: 0,
             // ゼロアロケーションバッファ初期化
             mix_buffer_i: Vec::with_capacity(4096),
             mix_buffer_q: Vec::with_capacity(4096),
@@ -899,6 +906,11 @@ impl Decoder {
             let phase_track_enabled = dqpsk_conf >= TRACKING_PHASE_DQPSK_CONF_MIN
                 && walsh_conf >= TRACKING_PHASE_WALSH_CONF_MIN
                 && snr_proxy >= TRACKING_PHASE_SNR_PROXY_MIN;
+            if phase_track_enabled {
+                self.phase_gate_on_symbols += 1;
+            } else {
+                self.phase_gate_off_symbols += 1;
+            }
 
             let phase_step = if phase_track_enabled {
                 let decided = if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
@@ -1069,12 +1081,20 @@ impl Decoder {
         self.last_pred_mse_fde = f32::NAN;
         self.last_pred_mse_raw = f32::NAN;
         self.last_est_snr_db = f32::NAN;
+        self.phase_gate_on_symbols = 0;
+        self.phase_gate_off_symbols = 0;
     }
 
     fn progress(&self) -> DecodeProgress {
         let needed = self.fountain_decoder.params().k;
         let progress = self.fountain_decoder.progress();
         let ebn0_approx_db = estimate_ebn0_approx_db(&self.config, self.last_est_snr_db);
+        let phase_gate_total = self.phase_gate_on_symbols + self.phase_gate_off_symbols;
+        let phase_gate_on_ratio = if phase_gate_total == 0 {
+            0.0
+        } else {
+            self.phase_gate_on_symbols as f32 / phase_gate_total as f32
+        };
 
         DecodeProgress {
             received_packets: self.received_packets,
@@ -1096,6 +1116,9 @@ impl Decoder {
             last_pred_mse_fde: self.last_pred_mse_fde,
             last_pred_mse_raw: self.last_pred_mse_raw,
             last_est_snr_db: self.last_est_snr_db,
+            phase_gate_on_symbols: self.phase_gate_on_symbols,
+            phase_gate_off_symbols: self.phase_gate_off_symbols,
+            phase_gate_on_ratio,
             ebn0_approx_db,
             basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
@@ -1393,6 +1416,8 @@ impl Decoder {
         self.parse_error_packets = 0;
         self.invalid_neighbor_packets = 0;
         self.stats_total_samples = 0;
+        self.phase_gate_on_symbols = 0;
+        self.phase_gate_off_symbols = 0;
     }
 }
 

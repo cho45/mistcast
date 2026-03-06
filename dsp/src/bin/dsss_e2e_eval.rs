@@ -164,6 +164,8 @@ struct TrialResult {
     last_pred_mse_fde: f32,
     last_pred_mse_raw: f32,
     last_est_snr_db: f32,
+    phase_gate_on_symbols: usize,
+    phase_gate_off_symbols: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -195,6 +197,8 @@ struct Metrics {
     count_last_pred_mse_raw: usize,
     sum_last_est_snr_db: f64,
     count_last_est_snr_db: usize,
+    total_phase_gate_on_symbols: usize,
+    total_phase_gate_off_symbols: usize,
 }
 
 impl Metrics {
@@ -230,6 +234,8 @@ impl Metrics {
             self.sum_last_est_snr_db += t.last_est_snr_db as f64;
             self.count_last_est_snr_db += 1;
         }
+        self.total_phase_gate_on_symbols += t.phase_gate_on_symbols;
+        self.total_phase_gate_off_symbols += t.phase_gate_off_symbols;
 
         if t.first_attempt_success {
             self.first_attempt_successes += 1;
@@ -389,6 +395,13 @@ impl Metrics {
         }
         let p_noise = sigma * sigma;
         Some(10.0 * (p_sig / p_noise).log10())
+    }
+
+    fn phase_gate_on_ratio(&self) -> f32 {
+        ratio(
+            self.total_phase_gate_on_symbols,
+            self.total_phase_gate_on_symbols + self.total_phase_gate_off_symbols,
+        )
     }
 }
 
@@ -915,6 +928,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     last_pred_mse_fde: f32::NAN,
                     last_pred_mse_raw: f32::NAN,
                     last_est_snr_db: f32::NAN,
+                    phase_gate_on_symbols: 0,
+                    phase_gate_off_symbols: 0,
                 };
             }
         }
@@ -957,6 +972,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         last_pred_mse_fde: f32::NAN,
                         last_pred_mse_raw: f32::NAN,
                         last_est_snr_db: f32::NAN,
+                        phase_gate_on_symbols: 0,
+                        phase_gate_off_symbols: 0,
                     };
                 }
             }
@@ -988,6 +1005,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         last_pred_mse_fde: f32::NAN,
         last_pred_mse_raw: f32::NAN,
         last_est_snr_db: f32::NAN,
+        phase_gate_on_symbols: 0,
+        phase_gate_off_symbols: 0,
     }
 }
 
@@ -1140,6 +1159,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     last_pred_mse_fde: progress.last_pred_mse_fde,
                     last_pred_mse_raw: progress.last_pred_mse_raw,
                     last_est_snr_db: progress.last_est_snr_db,
+                    phase_gate_on_symbols: progress.phase_gate_on_symbols,
+                    phase_gate_off_symbols: progress.phase_gate_off_symbols,
                 };
             }
         }
@@ -1184,6 +1205,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         last_pred_mse_fde: progress.last_pred_mse_fde,
                         last_pred_mse_raw: progress.last_pred_mse_raw,
                         last_est_snr_db: progress.last_est_snr_db,
+                        phase_gate_on_symbols: progress.phase_gate_on_symbols,
+                        phase_gate_off_symbols: progress.phase_gate_off_symbols,
                     };
                 }
             }
@@ -1217,12 +1240,14 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         last_pred_mse_fde: final_progress.last_pred_mse_fde,
         last_pred_mse_raw: final_progress.last_pred_mse_raw,
         last_est_snr_db: final_progress.last_est_snr_db,
+        phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
+        phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
     }
 }
 
 fn print_header() {
     println!(
-        "scenario,phy,mary_fde_mode,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,multipath"
+        "scenario,phy,mary_fde_mode,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,phase_gate_on_symbols,phase_gate_off_symbols,phase_gate_on_ratio,multipath"
     );
 }
 
@@ -1281,6 +1306,9 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         fmt_opt(m.avg_last_pred_mse_fde()),
         fmt_opt(m.avg_last_pred_mse_raw()),
         fmt_opt(m.avg_last_est_snr_db()),
+        m.total_phase_gate_on_symbols.to_string(),
+        m.total_phase_gate_off_symbols.to_string(),
+        format!("{:.6}", m.phase_gate_on_ratio()),
         imp.multipath.name.clone(),
     ];
     println!("{}", cols.join(","));
