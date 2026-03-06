@@ -966,7 +966,10 @@ impl Decoder {
                     phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
                 st.phase_rate = (st.phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY
                     + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
-                    .clamp(-TRACKING_PHASE_RATE_LIMIT_RAD, TRACKING_PHASE_RATE_LIMIT_RAD);
+                    .clamp(
+                        -TRACKING_PHASE_RATE_LIMIT_RAD,
+                        TRACKING_PHASE_RATE_LIMIT_RAD,
+                    );
                 (st.phase_rate + TRACKING_PHASE_PROP_GAIN_OFF * damped_err)
                     .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
             };
@@ -1409,10 +1412,7 @@ impl Decoder {
 
         // round() 後の添字がバッファ内に収まるかを事前確認する。
         // 負値を usize へキャストした際の 0 への飽和を防ぐ。
-        let min_p = symbol_start as f32
-            + timing_offset
-            + sample_shift
-            + ((spc as f32 - 1.0) / 2.0);
+        let min_p = symbol_start as f32 + timing_offset + sample_shift + ((spc as f32 - 1.0) / 2.0);
         let max_p = symbol_start as f32
             + ((sf - 1) * spc) as f32
             + timing_offset
@@ -2367,8 +2367,7 @@ mod tests {
         let timing_offset = -(spc as f32) * TRACKING_TIMING_LIMIT_CHIP;
         let sample_shift = -(spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
 
-        let corrs =
-            decoder.despread_symbol_with_timing(symbol_start, timing_offset, sample_shift);
+        let corrs = decoder.despread_symbol_with_timing(symbol_start, timing_offset, sample_shift);
         assert!(
             corrs.is_none(),
             "despread should reject negative sample index underflow: symbol_start={}, timing_offset={}, sample_shift={}",

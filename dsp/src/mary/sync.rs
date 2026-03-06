@@ -234,12 +234,7 @@ impl MarySyncDetector {
     }
 
     /// 同期ワード1シンボル分の相関を計算（チップ全体で積分）
-    fn correlate_sync_symbol(
-        &self,
-        i_ch: &[f32],
-        q_ch: &[f32],
-        offset: usize,
-    ) -> (f32, f32, f32) {
+    fn correlate_sync_symbol(&self, i_ch: &[f32], q_ch: &[f32], offset: usize) -> (f32, f32, f32) {
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         let mut sum_en = 0.0f32;
@@ -424,7 +419,7 @@ impl MarySyncDetector {
                 if used_samples == 0 {
                     break;
                 }
-                
+
                 // Scale back by sqrt(spc) to preserve absolute power scale,
                 // because adding identical signal samples coherently scales amplitude by `spc`
                 // while noise amplitude scales by `sqrt(spc)`.
@@ -919,8 +914,7 @@ mod tests {
             let sync_count = unified_len - preamble_count;
             let last_symbol_offset = preamble_count * detector.preamble_sym_len
                 + (sync_count - 1) * detector.sync_sym_len;
-            let last_symbol_access =
-                last_symbol_offset + detector.sync_sf * detector.spc - 1;
+            let last_symbol_access = last_symbol_offset + detector.sync_sf * detector.spc - 1;
             let required_len = last_symbol_access + 1; // +1 for 0-indexed
             if i.len() < required_len {
                 return (0.0, 0);
@@ -1001,7 +995,11 @@ mod tests {
 
             let (res, _) = detector.detect(&i, &q, 0);
             let sync = res.expect("Should find strong peak");
-            println!("Found sync with score: {:.4} at detected_idx: {}", sync.score, sync.peak_sample_idx - (detector.preamble_sym_len * repeat));
+            println!(
+                "Found sync with score: {:.4} at detected_idx: {}",
+                sync.score,
+                sync.peak_sample_idx - (detector.preamble_sym_len * repeat)
+            );
             assert!(sync.score > detector.threshold_fine);
             let detected_idx = sync.peak_sample_idx - (detector.preamble_sym_len * repeat);
             // Rc=8000 (spc=6) ではピークが平坦になりやすいため、spc/2 程度の誤差を許容する
@@ -1408,17 +1406,9 @@ mod tests {
                 for rep in 0..repeat {
                     let is_preamble = rep < config.preamble_repeat;
                     let (ci, cq, en) = if is_preamble {
-                        detector.correlate_preamble_symbol(
-                            &i_noise,
-                            &q_noise,
-                            current_offset,
-                        )
+                        detector.correlate_preamble_symbol(&i_noise, &q_noise, current_offset)
                     } else {
-                        detector.correlate_sync_symbol(
-                            &i_noise,
-                            &q_noise,
-                            current_offset,
-                        )
+                        detector.correlate_sync_symbol(&i_noise, &q_noise, current_offset)
                     };
                     let sf = if is_preamble {
                         detector.preamble_sf
