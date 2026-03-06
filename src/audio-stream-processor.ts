@@ -26,6 +26,8 @@ type StatsMessage = {
   underrunCount: number;
   droppedSamplesCount: number;
   inputGapMsPeak: number;
+  underrunEventsSinceLastStats: number;
+  hardUnderrunEventsSinceLastStats: number;
 };
 
 const workletGlobal = globalThis as unknown as { sampleRate: number; currentTime: number };
@@ -59,6 +61,8 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
   private droppedSamples = 0;
   private underrunCount = 0;
+  private pendingUnderrunEvents = 0;
+  private pendingHardUnderrunEvents = 0;
   private lastStatsAt = 0;
   private pushIntervalPeakSec = 0;
   private lastPushAtSec = -1;
@@ -131,6 +135,8 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       this.droppedSamples = 0;
       this.underrunCount = 0;
       this.hardUnderrunCount = 0;
+      this.pendingUnderrunEvents = 0;
+      this.pendingHardUnderrunEvents = 0;
       this.consecutiveEmptyBlocks = 0;
       this.inHardUnderrun = false;
       this.bufferScale = 1.0;
@@ -227,6 +233,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
     if (written < bufferLength) {
       this.underrunCount += 1;
+      this.pendingUnderrunEvents += 1;
       this.growBufferOnUnderrun();
       if (written === 0) {
         this.consecutiveEmptyBlocks += 1;
@@ -236,6 +243,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
         if (this.consecutiveEmptyBlocks > this.maxSoftUnderrunBlocks) {
           if (!this.inHardUnderrun) {
             this.hardUnderrunCount += 1;
+            this.pendingHardUnderrunEvents += 1;
             this.inHardUnderrun = true;
           }
         }
@@ -263,7 +271,11 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       underrunCount: this.underrunCount,
       droppedSamplesCount: this.droppedSamples,
       inputGapMsPeak: this.pushIntervalPeakSec * 1000,
+      underrunEventsSinceLastStats: this.pendingUnderrunEvents,
+      hardUnderrunEventsSinceLastStats: this.pendingHardUnderrunEvents,
     };
+    this.pendingUnderrunEvents = 0;
+    this.pendingHardUnderrunEvents = 0;
     this.port.postMessage(msg);
   }
 }

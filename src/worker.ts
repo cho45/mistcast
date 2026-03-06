@@ -120,6 +120,15 @@ type RecyclePortInboundMessage =
     blockDurationMs: number;
     overruns: number;
     inputRms: number;
+  }
+  | {
+    type: "stats";
+    bufferedMs: number;
+    underrunCount: number;
+    droppedSamplesCount: number;
+    inputGapMsPeak: number;
+    underrunEventsSinceLastStats: number;
+    hardUnderrunEventsSinceLastStats: number;
   };
 
 type DecoderProcessorStats = {
@@ -198,6 +207,18 @@ export class MistcastBackend {
       if (msg.type === "recycle" && msg.data instanceof Float32Array) {
         this.audioPacketSender?.recycle(msg.data);
         this.fillEncoderBuffer();
+      } else if (msg.type === "stats") {
+        // Encoder stats (AudioStreamProcessor)
+        if ("underrunEventsSinceLastStats" in msg) {
+          if (msg.underrunEventsSinceLastStats > 0 || msg.hardUnderrunEventsSinceLastStats > 0) {
+            console.log(
+              `[AudioStreamProcessor] underrun events: ${msg.underrunEventsSinceLastStats}, ` +
+              `hard underrun events: ${msg.hardUnderrunEventsSinceLastStats}, ` +
+              `buffered: ${msg.bufferedMs.toFixed(0)}ms, ` +
+              `total underruns: ${msg.underrunCount}`
+            );
+          }
+        }
       }
     };
     this.audioOutPort.start();
