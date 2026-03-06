@@ -94,19 +94,30 @@ impl Demodulator {
     /// DQPSK LLR計算（2ビットphase）
     ///
     /// `diff`: 差分信号 (Z_curr * Z_prev*)
-    /// `max_energy`: 現在のシンボルの最大エネルギー (正規化用)
+    /// `norm_scale`: LLR正規化スケール（振幅/エネルギーどちらでも可）
     ///
     /// 戻り値: 2ビットLLR [bit0, bit1]
-    pub fn dqpsk_llr(&self, diff: Complex32, max_energy: f32) -> [f32; 2] {
-        let denom = max_energy.max(1e-6);
-        // DQPSK mapping (Gray code):
-        // 00 -> 0 -> (1, 0)
-        // 01 -> 1 -> (0, 1)
-        // 11 -> 2 -> (-1, 0)
-        // 10 -> 3 -> (0, -1)
-        // LLR(b0) = diff.re + diff.im
-        // LLR(b1) = diff.re - diff.im
-        [(diff.re + diff.im) / denom, (diff.re - diff.im) / denom]
+    pub fn dqpsk_llr(&self, diff: Complex32, norm_scale: f32) -> [f32; 2] {
+        let denom = norm_scale.max(1e-6);
+        let d = diff / denom;
+
+        // DQPSK Gray mapping:
+        //   phase0 -> 00 -> (+1,  0)
+        //   phase1 -> 01 -> ( 0, +1)
+        //   phase2 -> 11 -> (-1,  0)
+        //   phase3 -> 10 -> ( 0, -1)
+        //
+        // 各位相仮説の Max-Log メトリクス m_k = Re{d * conj(s_k)}。
+        let m0 = d.re; // s0=( 1, 0)
+        let m1 = d.im; // s1=( 0, 1)
+        let m2 = -d.re; // s2=(-1, 0)
+        let m3 = -d.im; // s3=( 0,-1)
+
+        // bit0: 0 -> {phase0, phase1}, 1 -> {phase2, phase3}
+        let llr0 = m0.max(m1) - m2.max(m3);
+        // bit1: 0 -> {phase0, phase3}, 1 -> {phase1, phase2}
+        let llr1 = m0.max(m3) - m1.max(m2);
+        [llr0, llr1]
     }
 
     /// 1シンボル分の復調

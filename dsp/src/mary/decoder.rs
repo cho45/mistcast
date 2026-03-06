@@ -40,6 +40,10 @@ const TRACKING_TIMING_RATE_LIMIT_CHIP: f32 = 0.25;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const TRACKING_PHASE_RATE_LIMIT_RAD: f32 = 2.6;
 const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
+const TRACKING_PHASE_DQPSK_CONF_MIN: f32 = 0.25;
+const TRACKING_PHASE_WALSH_CONF_MIN: f32 = 0.03;
+const TRACKING_PHASE_SNR_PROXY_MIN: f32 = 1.8;
+const TRACKING_PHASE_RATE_HOLD_DECAY: f32 = 0.9;
 const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
 const PAYLOAD_SPREAD_FACTOR: usize = 16;
 
@@ -858,12 +862,16 @@ impl Decoder {
             };
 
             let mut max_energy = 0.0f32;
+            let mut second_energy = 0.0f32;
             let mut best_idx = 0usize;
             for (idx, corr) in on_corrs.iter().enumerate() {
                 let energy = corr.norm_sqr();
                 if energy > max_energy {
+                    second_energy = max_energy;
                     max_energy = energy;
                     best_idx = idx;
+                } else if energy > second_energy {
+                    second_energy = energy;
                 }
             }
             total_packet_energy += max_energy;
@@ -883,20 +891,33 @@ impl Decoder {
             self.packet_llrs_buffer.extend_from_slice(&walsh_llr);
             self.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
 
-            let decided = if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
-                Complex32::new(1.0, 0.0)
-            } else if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] < 0.0 {
-                Complex32::new(0.0, 1.0)
-            } else if dqpsk_llr[0] < 0.0 && dqpsk_llr[1] < 0.0 {
-                Complex32::new(-1.0, 0.0)
-            } else {
-                Complex32::new(0.0, -1.0)
-            };
+            let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
+            let energy_sum = energies.iter().sum::<f32>();
+            let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
+            let snr_proxy = max_energy / (noise_floor + 1e-6);
+            let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
+            let phase_track_enabled = dqpsk_conf >= TRACKING_PHASE_DQPSK_CONF_MIN
+                && walsh_conf >= TRACKING_PHASE_WALSH_CONF_MIN
+                && snr_proxy >= TRACKING_PHASE_SNR_PROXY_MIN;
 
-            let phase_err = phase_error_from_diff(diff, decided);
-            st.phase_rate = update_phase_rate(st.phase_rate, phase_err);
-            let (sin_dphi, cos_dphi) =
-                phase_step_from_phase_error(phase_err, st.phase_rate).sin_cos();
+            let phase_step = if phase_track_enabled {
+                let decided = if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
+                    Complex32::new(1.0, 0.0)
+                } else if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] < 0.0 {
+                    Complex32::new(0.0, 1.0)
+                } else if dqpsk_llr[0] < 0.0 && dqpsk_llr[1] < 0.0 {
+                    Complex32::new(-1.0, 0.0)
+                } else {
+                    Complex32::new(0.0, -1.0)
+                };
+                let phase_err = phase_error_from_diff(diff, decided);
+                st.phase_rate = update_phase_rate(st.phase_rate, phase_err);
+                phase_step_from_phase_error(phase_err, st.phase_rate)
+            } else {
+                st.phase_rate *= TRACKING_PHASE_RATE_HOLD_DECAY;
+                st.phase_rate.clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
+            };
+            let (sin_dphi, cos_dphi) = phase_step.sin_cos();
             st.phase_ref *= Complex32::new(cos_dphi, sin_dphi);
             st.phase_ref /= st.phase_ref.norm().max(1e-6);
 
@@ -908,6 +929,8 @@ impl Decoder {
             st.timing_offset =
                 update_timing_offset(st.timing_offset, st.timing_rate, timing_err, timing_limit);
 
+            // 差分検波の参照は毎シンボル更新する。
+            // ここを凍結すると次シンボルの diff が2シンボル差分になり誤り伝搬が増える。
             let on_norm = on_rot.norm().max(1e-6);
             self.demodulator.set_prev_phase(on_rot / on_norm);
         }
