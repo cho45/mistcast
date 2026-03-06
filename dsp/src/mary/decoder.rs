@@ -50,6 +50,8 @@ const TRACKING_PHASE_RATE_HOLD_DECAY: f32 = 0.9;
 const TRACKING_PHASE_PROP_GAIN_OFF: f32 = 0.08;
 const TRACKING_PHASE_FREQ_GAIN_OFF: f32 = 0.01;
 const TRACKING_PHASE_OFF_ERR_CLAMP: f32 = 0.35;
+const TRACKING_PHASE_ERR_GATE_RAD: f32 = 1.00;
+const TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH: f32 = 1.60;
 const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
 const PAYLOAD_SPREAD_FACTOR: usize = 16;
 
@@ -85,6 +87,7 @@ pub struct DecodeProgress {
     pub phase_gate_on_symbols: usize,
     pub phase_gate_off_symbols: usize,
     pub phase_gate_on_ratio: f32,
+    pub phase_innovation_reject_symbols: usize,
     pub ebn0_approx_db: f32,
     pub basis_matrix: Vec<u8>,
 }
@@ -152,6 +155,7 @@ pub struct Decoder {
     pub stats_total_samples: usize,
     pub phase_gate_on_symbols: usize,
     pub phase_gate_off_symbols: usize,
+    pub phase_innovation_reject_symbols: usize,
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
@@ -268,6 +272,7 @@ impl Decoder {
             stats_total_samples: 0,
             phase_gate_on_symbols: 0,
             phase_gate_off_symbols: 0,
+            phase_innovation_reject_symbols: 0,
             // ゼロアロケーションバッファ初期化
             mix_buffer_i: Vec::with_capacity(4096),
             mix_buffer_q: Vec::with_capacity(4096),
@@ -921,6 +926,12 @@ impl Decoder {
 
             let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
             let phase_err = phase_error_from_diff(diff, decided);
+            let innovation_rejected = st.phase_gate_enabled
+                && phase_err.abs() > TRACKING_PHASE_ERR_GATE_RAD
+                && dqpsk_conf < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
+            if innovation_rejected {
+                self.phase_innovation_reject_symbols += 1;
+            }
             let phase_step = if st.phase_gate_enabled {
                 st.phase_rate = update_phase_rate(st.phase_rate, phase_err);
                 phase_step_from_phase_error(phase_err, st.phase_rate)
@@ -1087,6 +1098,7 @@ impl Decoder {
         self.last_est_snr_db = f32::NAN;
         self.phase_gate_on_symbols = 0;
         self.phase_gate_off_symbols = 0;
+        self.phase_innovation_reject_symbols = 0;
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -1123,6 +1135,7 @@ impl Decoder {
             phase_gate_on_symbols: self.phase_gate_on_symbols,
             phase_gate_off_symbols: self.phase_gate_off_symbols,
             phase_gate_on_ratio,
+            phase_innovation_reject_symbols: self.phase_innovation_reject_symbols,
             ebn0_approx_db,
             basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
@@ -1422,6 +1435,7 @@ impl Decoder {
         self.stats_total_samples = 0;
         self.phase_gate_on_symbols = 0;
         self.phase_gate_off_symbols = 0;
+        self.phase_innovation_reject_symbols = 0;
     }
 }
 
