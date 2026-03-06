@@ -42,7 +42,7 @@ pub mod params {
     pub const FOUNTAIN_OVERHEAD: f32 = 0.1;
     pub const MODULATION: DifferentialModulation = DifferentialModulation::Dqpsk;
     pub const TX_RESAMPLER_TAPS: usize = 73;
-    pub const RX_RESAMPLER_TAPS: usize = 35;
+    pub const RX_RESAMPLER_TAPS: usize = 101;
 
     /// 内部処理で使用するチップあたりのサンプル数 (Samples Per Chip)
     /// 奇数にすることでチップ中央のサンプルを正確に取得可能にする。
