@@ -44,9 +44,10 @@ pub struct MarySyncDetector {
 
 impl MarySyncDetector {
     /// デフォルトのしきい値 (ZC SF=13 プリアンブル + Walsh SF=15 同期ワード用)
-    /// ROC分析に基づく: ノイズ FAR 1% → 0.23, FAR 0.1% → 0.30
-    pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.20;
-    pub const THRESHOLD_FINE_DEFAULT: f32 = 0.23;
+    /// ROC分析に基づく: ノイズ FAR 0.1% → 0.043, FAR 1% → 0.030
+    /// ※ただし自己相関サイドローブ（無ノイズ時の信号自身との相関）による誤検出を防ぐため、実用的にはこれより高めに設定する
+    pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.10;
+    pub const THRESHOLD_FINE_DEFAULT: f32 = 0.15;
 
     pub fn new(config: DspConfig, threshold_coarse: f32, threshold_fine: f32) -> Self {
         let preamble_sf = config.preamble_sf;
@@ -932,10 +933,19 @@ mod tests {
 
             let (res, _) = detector.detect(&i, &q, 0);
             let sync = res.expect("Should find strong peak");
+            println!("Found sync with score: {:.4} at detected_idx: {}", sync.score, sync.peak_sample_idx - (detector.preamble_sym_len * repeat));
             assert!(sync.score > detector.threshold_fine);
             let detected_idx = sync.peak_sample_idx - (detector.preamble_sym_len * repeat);
             // Rc=8000 (spc=6) ではピークが平坦になりやすいため、spc/2 程度の誤差を許容する
-            assert!((detected_idx as i32 - gt_idx as i32).abs() <= (detector.spc / 2) as i32);
+            let error = (detected_idx as i32 - gt_idx as i32).abs();
+            assert!(
+                error <= (detector.spc / 2) as i32,
+                "detected_idx={} gt_idx={} error={} spc={}",
+                detected_idx,
+                gt_idx,
+                error,
+                detector.spc
+            );
         }
 
         // シナリオ2: ランダムノイズのみの場合
