@@ -250,8 +250,6 @@ impl MarySyncDetector {
         num_symbols: usize,
     ) -> (f32, (f32, f32)) {
         let mut total_rho_p = 0.0f32;
-        let mut min_power = f32::INFINITY;
-        let mut max_power = 0.0f32;
 
         let mut sum_re = 0.0f32;
         let mut sum_im = 0.0f32;
@@ -280,10 +278,6 @@ impl MarySyncDetector {
                 0.0
             };
             total_rho_p += rho_p_sym;
-
-            let norm_pow = en / sf as f32;
-            min_power = min_power.min(norm_pow);
-            max_power = max_power.max(norm_pow);
 
             if rep > 0 && last_mag > 1e-9 && mag > 1e-9 {
                 let re = last_ci * ci + last_cq * cq;
@@ -316,13 +310,7 @@ impl MarySyncDetector {
             0.0
         };
 
-        let mut score = rho_p * rho_phi;
-
-        let avg_power = (min_power + max_power) / 2.0;
-        if min_power < avg_power * 0.25 {
-            score *= 0.1;
-        }
-
+        let score = rho_p * rho_phi;
         (score.max(0.0), (last_ci, last_cq))
     }
 

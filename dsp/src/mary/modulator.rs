@@ -400,11 +400,6 @@ impl Modulator {
         output.extend_from_slice(&preamble_buf);
         output.extend_from_slice(&sync_samples_buf);
         output.extend_from_slice(&data_samples_buf);
-
-        // flush を一時的なバッファに追加してから output に結合
-        let mut flush_buf = Vec::new();
-        self.flush(&mut flush_buf);
-        output.extend_from_slice(&flush_buf);
     }
 
     /// 変調器の状態をリセット
@@ -841,23 +836,13 @@ mod tests {
         let preamble_len = mod_.config.preamble_sf * mod_.config.preamble_repeat * spc;
         let sync_len = 15 * mod_.config.sync_word_bits * spc;
         let payload_len = 96;
-        let margin_len = 96;
-        let expected_base = preamble_len + sync_len + payload_len + margin_len;
-
-        // flush() で追加されるテールは、リサンプラの応答長に加えて
-        // encode_frame内の margin(96) と RRC押し出し長の差分が乗る。
-        let ratio = mod_.config.sample_rate / mod_.config.proc_sample_rate();
-        let rrc_push_out = (mod_.rrc_i.num_taps() as f32 * ratio).ceil() as usize;
-        let resampler_tail = ((mod_.config.tx_resampler_taps - 1) as f32 * ratio).round() as usize;
-        let expected_total =
-            expected_base + resampler_tail + rrc_push_out.saturating_sub(margin_len);
-        let diff = (frame.len() as i32 - expected_total as i32).abs();
+        let expected_base = preamble_len + sync_len + payload_len;
+        let diff = (frame.len() as i32 - expected_base as i32).abs();
 
         assert!(
             diff <= 5,
-            "Frame length mismatch: actual={}, expected_total={}, base={}, diff={}",
+            "Frame length mismatch: actual={}, expected_base={}, diff={}",
             frame.len(),
-            expected_total,
             expected_base,
             diff
         );
@@ -1481,6 +1466,9 @@ mod tests {
         // 通常フレームを生成
         let mut frame1 = Vec::new();
         mod_.encode_frame(&bits, &mut frame1);
+        // フレーム間メモリの影響を排除して NCO 精度のみを評価する
+        let mut flush_buf = Vec::new();
+        mod_.flush(&mut flush_buf);
 
         // NCOを進めて10分間のオーディオ実行をシミュレート
         // 48000 samples/sec * 600 sec = 28,800,000 samples
