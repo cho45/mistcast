@@ -167,6 +167,10 @@ struct TrialResult {
     phase_gate_on_symbols: usize,
     phase_gate_off_symbols: usize,
     phase_innovation_reject_symbols: usize,
+    phase_err_abs_sum_rad: f64,
+    phase_err_abs_count: usize,
+    phase_err_abs_ge_0p5_symbols: usize,
+    phase_err_abs_ge_1p0_symbols: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -201,6 +205,10 @@ struct Metrics {
     total_phase_gate_on_symbols: usize,
     total_phase_gate_off_symbols: usize,
     total_phase_innovation_reject_symbols: usize,
+    total_phase_err_abs_sum_rad: f64,
+    total_phase_err_abs_count: usize,
+    total_phase_err_abs_ge_0p5_symbols: usize,
+    total_phase_err_abs_ge_1p0_symbols: usize,
 }
 
 impl Metrics {
@@ -239,6 +247,10 @@ impl Metrics {
         self.total_phase_gate_on_symbols += t.phase_gate_on_symbols;
         self.total_phase_gate_off_symbols += t.phase_gate_off_symbols;
         self.total_phase_innovation_reject_symbols += t.phase_innovation_reject_symbols;
+        self.total_phase_err_abs_sum_rad += t.phase_err_abs_sum_rad;
+        self.total_phase_err_abs_count += t.phase_err_abs_count;
+        self.total_phase_err_abs_ge_0p5_symbols += t.phase_err_abs_ge_0p5_symbols;
+        self.total_phase_err_abs_ge_1p0_symbols += t.phase_err_abs_ge_1p0_symbols;
 
         if t.first_attempt_success {
             self.first_attempt_successes += 1;
@@ -411,6 +423,28 @@ impl Metrics {
         ratio(
             self.total_phase_innovation_reject_symbols,
             self.total_phase_gate_on_symbols + self.total_phase_gate_off_symbols,
+        )
+    }
+
+    fn phase_err_abs_mean_rad(&self) -> Option<f32> {
+        if self.total_phase_err_abs_count == 0 {
+            None
+        } else {
+            Some((self.total_phase_err_abs_sum_rad / self.total_phase_err_abs_count as f64) as f32)
+        }
+    }
+
+    fn phase_err_abs_ge_0p5_ratio(&self) -> f32 {
+        ratio(
+            self.total_phase_err_abs_ge_0p5_symbols,
+            self.total_phase_err_abs_count,
+        )
+    }
+
+    fn phase_err_abs_ge_1p0_ratio(&self) -> f32 {
+        ratio(
+            self.total_phase_err_abs_ge_1p0_symbols,
+            self.total_phase_err_abs_count,
         )
     }
 }
@@ -941,6 +975,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     phase_gate_on_symbols: 0,
                     phase_gate_off_symbols: 0,
                     phase_innovation_reject_symbols: 0,
+                    phase_err_abs_sum_rad: 0.0,
+                    phase_err_abs_count: 0,
+                    phase_err_abs_ge_0p5_symbols: 0,
+                    phase_err_abs_ge_1p0_symbols: 0,
                 };
             }
         }
@@ -986,6 +1024,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         phase_gate_on_symbols: 0,
                         phase_gate_off_symbols: 0,
                         phase_innovation_reject_symbols: 0,
+                        phase_err_abs_sum_rad: 0.0,
+                        phase_err_abs_count: 0,
+                        phase_err_abs_ge_0p5_symbols: 0,
+                        phase_err_abs_ge_1p0_symbols: 0,
                     };
                 }
             }
@@ -1020,6 +1062,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         phase_gate_on_symbols: 0,
         phase_gate_off_symbols: 0,
         phase_innovation_reject_symbols: 0,
+        phase_err_abs_sum_rad: 0.0,
+        phase_err_abs_count: 0,
+        phase_err_abs_ge_0p5_symbols: 0,
+        phase_err_abs_ge_1p0_symbols: 0,
     }
 }
 
@@ -1175,6 +1221,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     phase_gate_on_symbols: progress.phase_gate_on_symbols,
                     phase_gate_off_symbols: progress.phase_gate_off_symbols,
                     phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
+                    phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
+                    phase_err_abs_count: progress.phase_err_abs_count,
+                    phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
+                    phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
                 };
             }
         }
@@ -1222,6 +1272,10 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         phase_gate_on_symbols: progress.phase_gate_on_symbols,
                         phase_gate_off_symbols: progress.phase_gate_off_symbols,
                         phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
+                        phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
+                        phase_err_abs_count: progress.phase_err_abs_count,
+                        phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
+                        phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
                     };
                 }
             }
@@ -1258,12 +1312,16 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
         phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
         phase_innovation_reject_symbols: final_progress.phase_innovation_reject_symbols,
+        phase_err_abs_sum_rad: final_progress.phase_err_abs_sum_rad,
+        phase_err_abs_count: final_progress.phase_err_abs_count,
+        phase_err_abs_ge_0p5_symbols: final_progress.phase_err_abs_ge_0p5_symbols,
+        phase_err_abs_ge_1p0_symbols: final_progress.phase_err_abs_ge_1p0_symbols,
     }
 }
 
 fn print_header() {
     println!(
-        "scenario,phy,mary_fde_mode,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,phase_gate_on_symbols,phase_gate_off_symbols,phase_gate_on_ratio,phase_innovation_reject_symbols,phase_innovation_reject_ratio,multipath"
+        "scenario,phy,mary_fde_mode,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,phase_gate_on_symbols,phase_gate_off_symbols,phase_gate_on_ratio,phase_innovation_reject_symbols,phase_innovation_reject_ratio,phase_err_abs_count,phase_err_abs_mean_rad,phase_err_abs_ge_0p5_symbols,phase_err_abs_ge_0p5_ratio,phase_err_abs_ge_1p0_symbols,phase_err_abs_ge_1p0_ratio,multipath"
     );
 }
 
@@ -1327,6 +1385,12 @@ fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
         format!("{:.6}", m.phase_gate_on_ratio()),
         m.total_phase_innovation_reject_symbols.to_string(),
         format!("{:.6}", m.phase_innovation_reject_ratio()),
+        m.total_phase_err_abs_count.to_string(),
+        fmt_opt(m.phase_err_abs_mean_rad()),
+        m.total_phase_err_abs_ge_0p5_symbols.to_string(),
+        format!("{:.6}", m.phase_err_abs_ge_0p5_ratio()),
+        m.total_phase_err_abs_ge_1p0_symbols.to_string(),
+        format!("{:.6}", m.phase_err_abs_ge_1p0_ratio()),
         imp.multipath.name.clone(),
     ];
     println!("{}", cols.join(","));

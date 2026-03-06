@@ -52,6 +52,8 @@ const TRACKING_PHASE_FREQ_GAIN_OFF: f32 = 0.01;
 const TRACKING_PHASE_OFF_ERR_CLAMP: f32 = 0.35;
 const TRACKING_PHASE_ERR_GATE_RAD: f32 = 1.00;
 const TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH: f32 = 1.60;
+const PHASE_ERR_ABS_THRESH_0P5_RAD: f32 = 0.5;
+const PHASE_ERR_ABS_THRESH_1P0_RAD: f32 = 1.0;
 const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
 const PAYLOAD_SPREAD_FACTOR: usize = 16;
 
@@ -88,6 +90,13 @@ pub struct DecodeProgress {
     pub phase_gate_off_symbols: usize,
     pub phase_gate_on_ratio: f32,
     pub phase_innovation_reject_symbols: usize,
+    pub phase_err_abs_sum_rad: f64,
+    pub phase_err_abs_count: usize,
+    pub phase_err_abs_mean_rad: f32,
+    pub phase_err_abs_ge_0p5_symbols: usize,
+    pub phase_err_abs_ge_1p0_symbols: usize,
+    pub phase_err_abs_ge_0p5_ratio: f32,
+    pub phase_err_abs_ge_1p0_ratio: f32,
     pub ebn0_approx_db: f32,
     pub basis_matrix: Vec<u8>,
 }
@@ -156,6 +165,10 @@ pub struct Decoder {
     pub phase_gate_on_symbols: usize,
     pub phase_gate_off_symbols: usize,
     pub phase_innovation_reject_symbols: usize,
+    pub phase_err_abs_sum_rad: f64,
+    pub phase_err_abs_count: usize,
+    pub phase_err_abs_ge_0p5_symbols: usize,
+    pub phase_err_abs_ge_1p0_symbols: usize,
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
@@ -273,6 +286,10 @@ impl Decoder {
             phase_gate_on_symbols: 0,
             phase_gate_off_symbols: 0,
             phase_innovation_reject_symbols: 0,
+            phase_err_abs_sum_rad: 0.0,
+            phase_err_abs_count: 0,
+            phase_err_abs_ge_0p5_symbols: 0,
+            phase_err_abs_ge_1p0_symbols: 0,
             // ゼロアロケーションバッファ初期化
             mix_buffer_i: Vec::with_capacity(4096),
             mix_buffer_q: Vec::with_capacity(4096),
@@ -926,8 +943,17 @@ impl Decoder {
 
             let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
             let phase_err = phase_error_from_diff(diff, decided);
+            let phase_err_abs = phase_err.abs();
+            self.phase_err_abs_sum_rad += phase_err_abs as f64;
+            self.phase_err_abs_count += 1;
+            if phase_err_abs >= PHASE_ERR_ABS_THRESH_0P5_RAD {
+                self.phase_err_abs_ge_0p5_symbols += 1;
+            }
+            if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
+                self.phase_err_abs_ge_1p0_symbols += 1;
+            }
             let innovation_rejected = st.phase_gate_enabled
-                && phase_err.abs() > TRACKING_PHASE_ERR_GATE_RAD
+                && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
                 && dqpsk_conf < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
             if innovation_rejected {
                 self.phase_innovation_reject_symbols += 1;
@@ -1099,6 +1125,10 @@ impl Decoder {
         self.phase_gate_on_symbols = 0;
         self.phase_gate_off_symbols = 0;
         self.phase_innovation_reject_symbols = 0;
+        self.phase_err_abs_sum_rad = 0.0;
+        self.phase_err_abs_count = 0;
+        self.phase_err_abs_ge_0p5_symbols = 0;
+        self.phase_err_abs_ge_1p0_symbols = 0;
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -1110,6 +1140,21 @@ impl Decoder {
             0.0
         } else {
             self.phase_gate_on_symbols as f32 / phase_gate_total as f32
+        };
+        let phase_err_abs_mean_rad = if self.phase_err_abs_count == 0 {
+            0.0
+        } else {
+            (self.phase_err_abs_sum_rad / self.phase_err_abs_count as f64) as f32
+        };
+        let phase_err_abs_ge_0p5_ratio = if self.phase_err_abs_count == 0 {
+            0.0
+        } else {
+            self.phase_err_abs_ge_0p5_symbols as f32 / self.phase_err_abs_count as f32
+        };
+        let phase_err_abs_ge_1p0_ratio = if self.phase_err_abs_count == 0 {
+            0.0
+        } else {
+            self.phase_err_abs_ge_1p0_symbols as f32 / self.phase_err_abs_count as f32
         };
 
         DecodeProgress {
@@ -1136,6 +1181,13 @@ impl Decoder {
             phase_gate_off_symbols: self.phase_gate_off_symbols,
             phase_gate_on_ratio,
             phase_innovation_reject_symbols: self.phase_innovation_reject_symbols,
+            phase_err_abs_sum_rad: self.phase_err_abs_sum_rad,
+            phase_err_abs_count: self.phase_err_abs_count,
+            phase_err_abs_mean_rad,
+            phase_err_abs_ge_0p5_symbols: self.phase_err_abs_ge_0p5_symbols,
+            phase_err_abs_ge_1p0_symbols: self.phase_err_abs_ge_1p0_symbols,
+            phase_err_abs_ge_0p5_ratio,
+            phase_err_abs_ge_1p0_ratio,
             ebn0_approx_db,
             basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
@@ -1436,6 +1488,10 @@ impl Decoder {
         self.phase_gate_on_symbols = 0;
         self.phase_gate_off_symbols = 0;
         self.phase_innovation_reject_symbols = 0;
+        self.phase_err_abs_sum_rad = 0.0;
+        self.phase_err_abs_count = 0;
+        self.phase_err_abs_ge_0p5_symbols = 0;
+        self.phase_err_abs_ge_1p0_symbols = 0;
     }
 }
 
