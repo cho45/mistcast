@@ -40,10 +40,16 @@ const TRACKING_TIMING_RATE_LIMIT_CHIP: f32 = 0.25;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const TRACKING_PHASE_RATE_LIMIT_RAD: f32 = 2.6;
 const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
-const TRACKING_PHASE_DQPSK_CONF_MIN: f32 = 0.25;
-const TRACKING_PHASE_WALSH_CONF_MIN: f32 = 0.03;
-const TRACKING_PHASE_SNR_PROXY_MIN: f32 = 1.8;
+const TRACKING_PHASE_DQPSK_CONF_ON_MIN: f32 = 1.10;
+const TRACKING_PHASE_WALSH_CONF_ON_MIN: f32 = 0.12;
+const TRACKING_PHASE_SNR_PROXY_ON_MIN: f32 = 4.0;
+const TRACKING_PHASE_DQPSK_CONF_OFF_MIN: f32 = 0.70;
+const TRACKING_PHASE_WALSH_CONF_OFF_MIN: f32 = 0.08;
+const TRACKING_PHASE_SNR_PROXY_OFF_MIN: f32 = 2.8;
 const TRACKING_PHASE_RATE_HOLD_DECAY: f32 = 0.9;
+const TRACKING_PHASE_PROP_GAIN_OFF: f32 = 0.08;
+const TRACKING_PHASE_FREQ_GAIN_OFF: f32 = 0.01;
+const TRACKING_PHASE_OFF_ERR_CLAMP: f32 = 0.35;
 const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
 const PAYLOAD_SPREAD_FACTOR: usize = 16;
 
@@ -169,6 +175,7 @@ struct TrackingState {
     phase_rate: f32,
     timing_offset: f32,
     timing_rate: f32,
+    phase_gate_enabled: bool,
 }
 
 impl Decoder {
@@ -549,6 +556,7 @@ impl Decoder {
                 phase_rate: 0.0,
                 timing_offset: 0.0,
                 timing_rate: 0.0,
+                phase_gate_enabled: false,
             });
             self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
             self.state = DecoderState::EqualizedDecoding;
@@ -903,31 +911,27 @@ impl Decoder {
             let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
             let snr_proxy = max_energy / (noise_floor + 1e-6);
             let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
-            let phase_track_enabled = dqpsk_conf >= TRACKING_PHASE_DQPSK_CONF_MIN
-                && walsh_conf >= TRACKING_PHASE_WALSH_CONF_MIN
-                && snr_proxy >= TRACKING_PHASE_SNR_PROXY_MIN;
-            if phase_track_enabled {
+            st.phase_gate_enabled =
+                next_phase_gate_enabled(st.phase_gate_enabled, dqpsk_conf, walsh_conf, snr_proxy);
+            if st.phase_gate_enabled {
                 self.phase_gate_on_symbols += 1;
             } else {
                 self.phase_gate_off_symbols += 1;
             }
 
-            let phase_step = if phase_track_enabled {
-                let decided = if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
-                    Complex32::new(1.0, 0.0)
-                } else if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] < 0.0 {
-                    Complex32::new(0.0, 1.0)
-                } else if dqpsk_llr[0] < 0.0 && dqpsk_llr[1] < 0.0 {
-                    Complex32::new(-1.0, 0.0)
-                } else {
-                    Complex32::new(0.0, -1.0)
-                };
-                let phase_err = phase_error_from_diff(diff, decided);
+            let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
+            let phase_err = phase_error_from_diff(diff, decided);
+            let phase_step = if st.phase_gate_enabled {
                 st.phase_rate = update_phase_rate(st.phase_rate, phase_err);
                 phase_step_from_phase_error(phase_err, st.phase_rate)
             } else {
-                st.phase_rate *= TRACKING_PHASE_RATE_HOLD_DECAY;
-                st.phase_rate.clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
+                let damped_err =
+                    phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
+                st.phase_rate = (st.phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY
+                    + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
+                    .clamp(-TRACKING_PHASE_RATE_LIMIT_RAD, TRACKING_PHASE_RATE_LIMIT_RAD);
+                (st.phase_rate + TRACKING_PHASE_PROP_GAIN_OFF * damped_err)
+                    .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
             };
             let (sin_dphi, cos_dphi) = phase_step.sin_cos();
             st.phase_ref *= Complex32::new(cos_dphi, sin_dphi);
@@ -1464,6 +1468,63 @@ fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
 }
 
 #[inline]
+fn phase_gate_pass_count(
+    dqpsk_conf: f32,
+    walsh_conf: f32,
+    snr_proxy: f32,
+    dqpsk_thr: f32,
+    walsh_thr: f32,
+    snr_thr: f32,
+) -> u8 {
+    u8::from(dqpsk_conf >= dqpsk_thr)
+        + u8::from(walsh_conf >= walsh_thr)
+        + u8::from(snr_proxy >= snr_thr)
+}
+
+#[inline]
+fn next_phase_gate_enabled(
+    prev_enabled: bool,
+    dqpsk_conf: f32,
+    walsh_conf: f32,
+    snr_proxy: f32,
+) -> bool {
+    let pass_on = phase_gate_pass_count(
+        dqpsk_conf,
+        walsh_conf,
+        snr_proxy,
+        TRACKING_PHASE_DQPSK_CONF_ON_MIN,
+        TRACKING_PHASE_WALSH_CONF_ON_MIN,
+        TRACKING_PHASE_SNR_PROXY_ON_MIN,
+    );
+    let pass_off = phase_gate_pass_count(
+        dqpsk_conf,
+        walsh_conf,
+        snr_proxy,
+        TRACKING_PHASE_DQPSK_CONF_OFF_MIN,
+        TRACKING_PHASE_WALSH_CONF_OFF_MIN,
+        TRACKING_PHASE_SNR_PROXY_OFF_MIN,
+    );
+    if prev_enabled {
+        pass_off >= 2
+    } else {
+        pass_on >= 2
+    }
+}
+
+#[inline]
+fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
+    if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
+        Complex32::new(1.0, 0.0)
+    } else if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] < 0.0 {
+        Complex32::new(0.0, 1.0)
+    } else if dqpsk_llr[0] < 0.0 && dqpsk_llr[1] < 0.0 {
+        Complex32::new(-1.0, 0.0)
+    } else {
+        Complex32::new(0.0, -1.0)
+    }
+}
+
+#[inline]
 fn estimate_ebn0_approx_db(config: &DspConfig, est_snr_db_internal: f32) -> f32 {
     if !est_snr_db_internal.is_finite() {
         return f32::NAN;
@@ -1522,6 +1583,18 @@ mod tests {
         assert!(decoder.recovered_data.is_none());
         assert!(decoder.sample_buffer_i.is_empty());
         assert!(decoder.sample_buffer_q.is_empty());
+    }
+
+    #[test]
+    fn test_next_phase_gate_enabled_uses_2_of_3_and_hysteresis() {
+        // OFF→ON: ON閾値で2条件満たせば有効化する
+        assert!(next_phase_gate_enabled(false, 1.2, 0.15, 1.0));
+
+        // ON維持: ON閾値は割ってもOFF閾値で2条件満たせば維持する
+        assert!(next_phase_gate_enabled(true, 0.8, 0.1, 1.0));
+
+        // ON→OFF: OFF閾値で1条件以下なら無効化する
+        assert!(!next_phase_gate_enabled(true, 0.10, 0.01, 1.1));
     }
 
     #[test]
