@@ -722,24 +722,6 @@ impl MarySyncDetector {
     }
 }
 
-pub fn downconvert(
-    samples: &[f32],
-    sample_offset: usize,
-    config: &DspConfig,
-) -> (Vec<f32>, Vec<f32>) {
-    use crate::common::nco::Nco;
-    let mut nco = Nco::new(-config.carrier_freq, config.sample_rate);
-    nco.skip(sample_offset);
-    let mut i_ch = Vec::with_capacity(samples.len());
-    let mut q_ch = Vec::with_capacity(samples.len());
-    for &s in samples {
-        let lo = nco.step();
-        i_ch.push(s * lo.re * 2.0);
-        q_ch.push(s * lo.im * 2.0);
-    }
-    (i_ch, q_ch)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,6 +730,24 @@ mod tests {
     use crate::mary::modulator::Modulator;
     use rand::prelude::*;
     use rand_distr::Normal;
+
+    pub fn downconvert(
+        samples: &[f32],
+        sample_offset: usize,
+        config: &DspConfig,
+    ) -> (Vec<f32>, Vec<f32>) {
+        use crate::common::nco::Nco;
+        let mut nco = Nco::new(-config.carrier_freq, config.sample_rate);
+        nco.skip(sample_offset);
+        let mut i_ch = Vec::with_capacity(samples.len());
+        let mut q_ch = Vec::with_capacity(samples.len());
+        for &s in samples {
+            let lo = nco.step();
+            i_ch.push(s * lo.re * 2.0);
+            q_ch.push(s * lo.im * 2.0);
+        }
+        (i_ch, q_ch)
+    }
 
     fn generate_signal(config: &DspConfig, offset: usize, amplitude: f32) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());

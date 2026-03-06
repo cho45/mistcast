@@ -305,25 +305,6 @@ impl SyncDetector {
     }
 }
 
-pub fn downconvert(
-    samples: &[f32],
-    sample_offset: usize,
-    config: &DspConfig,
-) -> (Vec<f32>, Vec<f32>) {
-    let two_pi = 2.0 * std::f32::consts::PI;
-    let fs = config.sample_rate;
-    let fc = config.carrier_freq;
-    let mut i_ch = Vec::with_capacity(samples.len());
-    let mut q_ch = Vec::with_capacity(samples.len());
-    for (k, &s) in samples.iter().enumerate() {
-        let t = (sample_offset + k) as f32 / fs;
-        let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
-        i_ch.push(s * cos_v * 2.0);
-        q_ch.push(s * (-sin_v) * 2.0);
-    }
-    (i_ch, q_ch)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +313,25 @@ mod tests {
     use crate::dsss::modulator::Modulator;
     use rand::prelude::*;
     use rand_distr::Normal;
+
+    pub fn downconvert(
+        samples: &[f32],
+        sample_offset: usize,
+        config: &DspConfig,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let two_pi = 2.0 * std::f32::consts::PI;
+        let fs = config.sample_rate;
+        let fc = config.carrier_freq;
+        let mut i_ch = Vec::with_capacity(samples.len());
+        let mut q_ch = Vec::with_capacity(samples.len());
+        for (k, &s) in samples.iter().enumerate() {
+            let t = (sample_offset + k) as f32 / fs;
+            let (sin_v, cos_v) = (two_pi * fc * t).sin_cos();
+            i_ch.push(s * cos_v * 2.0);
+            q_ch.push(s * (-sin_v) * 2.0);
+        }
+        (i_ch, q_ch)
+    }
 
     fn generate_signal(config: &DspConfig, offset: usize, amplitude: f32) -> (Vec<f32>, Vec<f32>) {
         let mut modulator = Modulator::new(config.clone());
