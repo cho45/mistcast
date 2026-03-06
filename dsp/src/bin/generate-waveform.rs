@@ -129,7 +129,8 @@ fn run_dsss_encoder(dsp_config: DspConfig, data: &[u8], target_duration_sec: f32
     // Fountain encoder を設定
     let needed_k = data.len().div_ceil(params::PAYLOAD_SIZE).max(1);
     encoder.set_fountain_k(needed_k);
-    let fountain_params = dsp::coding::fountain::FountainParams::new(needed_k, params::PAYLOAD_SIZE);
+    let fountain_params =
+        dsp::coding::fountain::FountainParams::new(needed_k, params::PAYLOAD_SIZE);
     let mut fountain_encoder = FountainEncoder::new(data, fountain_params);
 
     let mut samples = Vec::new();
@@ -181,7 +182,12 @@ fn main() -> Result<()> {
 
     println!("=== Waveform Generator ===");
     println!("モード: {:?}", args.mode);
-    println!("データ: {:?} ({} バイト, ヘッダ込 {} バイト)", display_text, original_size, data_with_size.len());
+    println!(
+        "データ: {:?} ({} バイト, ヘッダ込 {} バイト)",
+        display_text,
+        original_size,
+        data_with_size.len()
+    );
     println!("サンプルレート: {} Hz", args.sample_rate);
     println!("目安の長さ: {:.1} 秒", args.duration);
 
