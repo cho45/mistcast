@@ -1,3 +1,4 @@
+use clap::{builder::PossibleValuesParser, Parser, ValueEnum};
 use dsp::coding::fec;
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
 use dsp::frame::packet::{Packet, PACKET_BYTES};
@@ -9,7 +10,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use std::collections::HashMap;
-use std::env;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
@@ -85,44 +86,51 @@ struct ChannelImpairment {
     multipath: MultipathProfile,
 }
 
-#[derive(Clone, Debug)]
-struct Cli {
-    phy: String,
-    mode: String,
-    trials: usize,
-    payload_bytes: usize,
-    deadline_sec: f32,
-    max_sec: f32,
-    chunk_samples: usize,
-    gap_samples: usize,
-    seed: u64,
-    target_p_complete: f32,
-    base: ChannelImpairment,
-    sweep_awgn: Vec<f32>,
-    sweep_ppm: Vec<f32>,
-    sweep_loss: Vec<f32>,
-    sweep_fading: Vec<f32>,
-    sweep_chip_rate: Vec<f32>,
-    sweep_carrier_freq: Vec<f32>,
-    sample_rate: f32,
-    chip_rate: f32,
-    carrier_freq: f32,
-    mseq_order: usize,
-    rrc_alpha: f32,
-    sync_word_bits: usize,
-    preamble_repeat: usize,
-    packets_per_burst: usize,
-    preamble_sf: usize,
-    mary_fde_mode: MaryFdeMode,
-    mary_fde_snr_db: f32,
-    mary_fde_lambda_scale: f32,
-    mary_fde_lambda_floor: f32,
-    mary_fde_max_inv_gain: Option<f32>,
-    mary_cir_norm: String,
-    mary_cir_tap_alpha: f32,
+impl FromStr for MultipathProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if let Some(preset) = Self::preset(&normalized) {
+            return Ok(preset);
+        }
+        Self::parse_custom(value).ok_or_else(|| {
+            format!(
+                "invalid multipath: {value} (preset: none|mild|medium|harsh or taps: 0:1.0,9:0.4)"
+            )
+        })
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Phy {
+    Dsss,
+    Mary,
+}
+
+impl Phy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dsss => "dsss",
+            Self::Mary => "mary",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum EvalMode {
+    Point,
+    SweepAwgn,
+    SweepPpm,
+    SweepLoss,
+    SweepFading,
+    SweepMultipath,
+    SweepBand,
+    SweepAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum MaryFdeMode {
     On,
     Off,
@@ -135,6 +143,190 @@ impl MaryFdeMode {
             Self::On => "on",
             Self::Off => "off",
             Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum CirNormArg {
+    None,
+    UnitEnergy,
+    Peak,
+}
+
+impl From<CirNormArg> for CirNormalizationMode {
+    fn from(value: CirNormArg) -> Self {
+        match value {
+            CirNormArg::None => CirNormalizationMode::None,
+            CirNormArg::UnitEnergy => CirNormalizationMode::UnitEnergy,
+            CirNormArg::Peak => CirNormalizationMode::Peak,
+        }
+    }
+}
+
+const DEFAULT_COLUMNS: &[&str] = &[
+    "scenario",
+    "phy",
+    "mary_fde_mode",
+    "trials",
+    "awgn_snr_db",
+    "p_complete",
+    "ber",
+    "raw_ber",
+    "goodput_effective_bps",
+    "goodput_success_mean_bps",
+    "p95_complete_s",
+    "mean_complete_s",
+    "avg_proc_ns_sample",
+    "synced_frame_ratio",
+    "phase_gate_on_ratio",
+    "phase_innovation_reject_ratio",
+    "phase_err_abs_mean_rad",
+    "phase_err_abs_ge_0p5_ratio",
+    "phase_err_abs_ge_1p0_ratio",
+    "avg_last_est_snr_db",
+    "multipath",
+];
+
+fn parse_positive_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid float: {value}"))?;
+    if parsed > 0.0 {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be > 0: {value}"))
+    }
+}
+
+fn parse_nonnegative_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid float: {value}"))?;
+    if parsed >= 0.0 {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be >= 0: {value}"))
+    }
+}
+
+fn parse_unit_interval_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid float: {value}"))?;
+    if (0.0..=1.0).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be in [0,1]: {value}"))
+    }
+}
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid integer: {value}"))?;
+    if parsed > 0 {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be > 0: {value}"))
+    }
+}
+
+#[derive(Parser, Clone, Debug)]
+#[command(author, version, about = "DSSS/Mary E2E評価ツール", long_about = None)]
+struct Cli {
+    #[arg(long, value_enum, default_value_t = Phy::Dsss)]
+    phy: Phy,
+    #[arg(long, value_enum, default_value_t = EvalMode::Point)]
+    mode: EvalMode,
+    #[arg(long, value_parser = parse_positive_usize, default_value_t = 40)]
+    trials: usize,
+    #[arg(long = "payload-bytes", value_parser = parse_positive_usize, default_value_t = 64)]
+    payload_bytes: usize,
+    #[arg(long = "max-sec", value_parser = parse_positive_f32, default_value_t = 2.0)]
+    max_sec: f32,
+    #[arg(long = "chunk-samples", value_parser = parse_positive_usize, default_value_t = 16_384)]
+    chunk_samples: usize,
+    #[arg(long = "gap-samples", default_value_t = 64)]
+    gap_samples: usize,
+    #[arg(long, default_value_t = 0xA11CE_u64)]
+    seed: u64,
+    #[arg(long = "target-p", value_parser = parse_unit_interval_f32, default_value_t = 0.95)]
+    target_p_complete: f32,
+    #[arg(long, value_parser = parse_nonnegative_f32, default_value_t = 0.0)]
+    sigma: f32,
+    #[arg(long = "cfo-hz", default_value_t = 0.0)]
+    cfo_hz: f32,
+    #[arg(long, default_value_t = 0.0)]
+    ppm: f32,
+    #[arg(long = "burst-loss", value_parser = parse_unit_interval_f32, default_value_t = 0.0)]
+    burst_loss: f32,
+    #[arg(long = "fading-depth", value_parser = parse_unit_interval_f32, default_value_t = 0.0)]
+    fading_depth: f32,
+    #[arg(long, default_value = "none")]
+    multipath: MultipathProfile,
+    #[arg(long = "sweep-awgn", value_delimiter = ',', default_values_t = [0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0])]
+    sweep_awgn: Vec<f32>,
+    #[arg(long = "sweep-ppm", value_delimiter = ',', default_values_t = [-120.0, -80.0, -40.0, 0.0, 40.0, 80.0, 120.0])]
+    sweep_ppm: Vec<f32>,
+    #[arg(long = "sweep-loss", value_delimiter = ',', default_values_t = [0.0, 0.05, 0.1, 0.2, 0.3, 0.4])]
+    sweep_loss: Vec<f32>,
+    #[arg(long = "sweep-fading", value_delimiter = ',', default_values_t = [0.0, 0.2, 0.4, 0.6, 0.8])]
+    sweep_fading: Vec<f32>,
+    #[arg(long = "sweep-chip-rate", value_delimiter = ',', default_values_t = [6000.0, 8000.0, 10000.0, 12000.0, 14000.0, 15000.0])]
+    sweep_chip_rate: Vec<f32>,
+    #[arg(long = "sweep-carrier-freq", value_delimiter = ',', default_values_t = [8000.0, 10000.0, 12000.0, 14000.0, 15000.0])]
+    sweep_carrier_freq: Vec<f32>,
+    #[arg(long = "sample-rate", default_value_t = dsp::params::DEFAULT_SAMPLE_RATE)]
+    sample_rate: f32,
+    #[arg(long = "chip-rate", default_value_t = dsp::params::CHIP_RATE)]
+    chip_rate: f32,
+    #[arg(long = "carrier-freq", default_value_t = dsp::params::CARRIER_FREQ)]
+    carrier_freq: f32,
+    #[arg(long = "mseq-order", default_value_t = dsp::params::MSEQ_ORDER)]
+    mseq_order: usize,
+    #[arg(long = "rrc-alpha", default_value_t = dsp::params::RRC_ALPHA)]
+    rrc_alpha: f32,
+    #[arg(long = "sync-word-bits", default_value_t = dsp::params::SYNC_WORD_BITS)]
+    sync_word_bits: usize,
+    #[arg(long = "preamble-repeat", default_value_t = dsp::params::PREAMBLE_REPEAT)]
+    preamble_repeat: usize,
+    #[arg(long = "packets-per-burst", default_value_t = dsp::params::PACKETS_PER_SYNC_BURST)]
+    packets_per_burst: usize,
+    #[arg(long = "preamble-sf", default_value_t = dsp::params::PREAMBLE_SF)]
+    preamble_sf: usize,
+    #[arg(long = "mary-fde", value_enum, default_value_t = MaryFdeMode::On)]
+    mary_fde_mode: MaryFdeMode,
+    #[arg(long = "mary-fde-snr-db", default_value_t = 15.0)]
+    mary_fde_snr_db: f32,
+    #[arg(long = "mary-fde-k", default_value_t = 1.0)]
+    mary_fde_lambda_scale: f32,
+    #[arg(long = "mary-fde-lambda-floor", default_value_t = 0.0)]
+    mary_fde_lambda_floor: f32,
+    #[arg(long = "mary-fde-max-inv-gain", value_parser = parse_positive_f32)]
+    mary_fde_max_inv_gain: Option<f32>,
+    #[arg(long = "mary-cir-norm", value_enum, default_value_t = CirNormArg::None)]
+    mary_cir_norm: CirNormArg,
+    #[arg(long = "mary-cir-tap-alpha", default_value_t = 0.0)]
+    mary_cir_tap_alpha: f32,
+    #[arg(
+        long = "columns",
+        value_delimiter = ',',
+        value_parser = PossibleValuesParser::new(DEFAULT_COLUMNS)
+    )]
+    columns: Option<Vec<String>>,
+}
+
+impl Cli {
+    fn base_impairment(&self) -> ChannelImpairment {
+        ChannelImpairment {
+            sigma: self.sigma,
+            cfo_hz: self.cfo_hz,
+            ppm: self.ppm,
+            burst_loss: self.burst_loss,
+            fading_depth: self.fading_depth,
+            multipath: self.multipath.clone(),
         }
     }
 }
@@ -154,15 +346,9 @@ struct TrialResult {
     tx_signal_energy_sum: f64,
     tx_signal_samples: usize,
     process_time_ns: u64,
-    cir_nmse: Option<f32>,
     /// FEC符号化ビットのハード判定BER（Fountain符号の外側の生BER）
     raw_bit_errors: usize,
     raw_bits_compared: usize,
-    fde_selected_frames: usize,
-    raw_selected_frames: usize,
-    last_path_used: i32,
-    last_pred_mse_fde: f32,
-    last_pred_mse_raw: f32,
     last_est_snr_db: f32,
     phase_gate_on_symbols: usize,
     phase_gate_off_symbols: usize,
@@ -177,7 +363,6 @@ struct TrialResult {
 struct Metrics {
     trials: usize,
     successes: usize,
-    deadline_hits: usize,
     first_attempt_successes: usize,
     total_attempts: usize,
     total_synced_frames: usize,
@@ -189,17 +374,8 @@ struct Metrics {
     total_tx_signal_samples: usize,
     total_process_time_ns: u64,
     completion_secs: Vec<f32>,
-    cir_nmses: Vec<f32>,
     total_raw_bit_errors: usize,
     total_raw_bits_compared: usize,
-    total_fde_selected_frames: usize,
-    total_raw_selected_frames: usize,
-    last_path_fde_trials: usize,
-    last_path_raw_trials: usize,
-    sum_last_pred_mse_fde: f64,
-    count_last_pred_mse_fde: usize,
-    sum_last_pred_mse_raw: f64,
-    count_last_pred_mse_raw: usize,
     sum_last_est_snr_db: f64,
     count_last_est_snr_db: usize,
     total_phase_gate_on_symbols: usize,
@@ -212,7 +388,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn push(&mut self, t: TrialResult, deadline_sec: f32) {
+    fn push(&mut self, t: TrialResult) {
         self.trials += 1;
         self.total_elapsed_sec += t.elapsed_sec;
         self.total_attempts += t.attempts;
@@ -222,24 +398,9 @@ impl Metrics {
         self.dropped_attempts += t.dropped_attempts;
         self.total_raw_bit_errors += t.raw_bit_errors;
         self.total_raw_bits_compared += t.raw_bits_compared;
-        self.total_fde_selected_frames += t.fde_selected_frames;
-        self.total_raw_selected_frames += t.raw_selected_frames;
         self.total_tx_signal_energy += t.tx_signal_energy_sum;
         self.total_tx_signal_samples += t.tx_signal_samples;
         self.total_process_time_ns += t.process_time_ns;
-        if t.last_path_used == 1 {
-            self.last_path_fde_trials += 1;
-        } else if t.last_path_used == 0 {
-            self.last_path_raw_trials += 1;
-        }
-        if t.last_pred_mse_fde.is_finite() {
-            self.sum_last_pred_mse_fde += t.last_pred_mse_fde as f64;
-            self.count_last_pred_mse_fde += 1;
-        }
-        if t.last_pred_mse_raw.is_finite() {
-            self.sum_last_pred_mse_raw += t.last_pred_mse_raw as f64;
-            self.count_last_pred_mse_raw += 1;
-        }
         if t.last_est_snr_db.is_finite() {
             self.sum_last_est_snr_db += t.last_est_snr_db as f64;
             self.count_last_est_snr_db += 1;
@@ -259,22 +420,12 @@ impl Metrics {
             self.successes += 1;
             if let Some(c) = t.completion_sec {
                 self.completion_secs.push(c);
-                if c <= deadline_sec {
-                    self.deadline_hits += 1;
-                }
             }
-        }
-        if let Some(nmse) = t.cir_nmse {
-            self.cir_nmses.push(nmse);
         }
     }
 
     fn p_complete(&self) -> f32 {
         ratio(self.successes, self.trials)
-    }
-
-    fn p_complete_deadline(&self) -> f32 {
-        ratio(self.deadline_hits, self.trials)
     }
 
     fn synced_frame_ratio(&self) -> f32 {
@@ -287,14 +438,6 @@ impl Metrics {
         } else {
             self.total_bit_errors as f32 / self.total_bits_compared as f32
         }
-    }
-
-    fn fer(&self) -> f32 {
-        1.0 - ratio(self.first_attempt_successes, self.trials)
-    }
-
-    fn per(&self) -> f32 {
-        self.fer()
     }
 
     fn p95_completion_sec(&self) -> Option<f32> {
@@ -345,50 +488,11 @@ impl Metrics {
         }
     }
 
-    fn avg_cir_nmse(&self) -> Option<f32> {
-        if self.cir_nmses.is_empty() {
-            None
-        } else {
-            Some(self.cir_nmses.iter().sum::<f32>() / self.cir_nmses.len() as f32)
-        }
-    }
-
     fn raw_ber(&self) -> f32 {
         if self.total_raw_bits_compared == 0 {
             f32::NAN
         } else {
             self.total_raw_bit_errors as f32 / self.total_raw_bits_compared as f32
-        }
-    }
-
-    fn fde_selected_ratio(&self) -> f32 {
-        ratio(
-            self.total_fde_selected_frames,
-            self.total_fde_selected_frames + self.total_raw_selected_frames,
-        )
-    }
-
-    fn last_path_fde_ratio(&self) -> f32 {
-        ratio(self.last_path_fde_trials, self.trials)
-    }
-
-    fn last_path_raw_ratio(&self) -> f32 {
-        ratio(self.last_path_raw_trials, self.trials)
-    }
-
-    fn avg_last_pred_mse_fde(&self) -> Option<f32> {
-        if self.count_last_pred_mse_fde == 0 {
-            None
-        } else {
-            Some((self.sum_last_pred_mse_fde / self.count_last_pred_mse_fde as f64) as f32)
-        }
-    }
-
-    fn avg_last_pred_mse_raw(&self) -> Option<f32> {
-        if self.count_last_pred_mse_raw == 0 {
-            None
-        } else {
-            Some((self.sum_last_pred_mse_raw / self.count_last_pred_mse_raw as f64) as f32)
         }
     }
 
@@ -468,36 +572,6 @@ fn quantile(values: &[f32], q: f32) -> Option<f32> {
     v.get(idx).copied()
 }
 
-fn parse_list(arg: Option<String>, fallback: &[f32]) -> Vec<f32> {
-    let Some(raw) = arg else {
-        return fallback.to_vec();
-    };
-    let mut out = Vec::new();
-    for part in raw.split(',') {
-        let p = part.trim();
-        if p.is_empty() {
-            continue;
-        }
-        if let Ok(v) = p.parse::<f32>() {
-            out.push(v);
-        }
-    }
-    if out.is_empty() {
-        fallback.to_vec()
-    } else {
-        out
-    }
-}
-
-fn parse_mary_fde_mode(value: &str) -> Option<MaryFdeMode> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "on" | "true" | "1" | "yes" | "enabled" => Some(MaryFdeMode::On),
-        "off" | "false" | "0" | "no" | "disabled" => Some(MaryFdeMode::Off),
-        "auto" => Some(MaryFdeMode::Auto),
-        _ => None,
-    }
-}
-
 fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
     match mode {
         MaryFdeMode::On => {
@@ -515,255 +589,15 @@ fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
     }
 }
 
-fn parse_cir_norm(value: &str) -> CirNormalizationMode {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "none" => CirNormalizationMode::None,
-        "unit_energy" | "unit-energy" | "unitenergy" => CirNormalizationMode::UnitEnergy,
-        "peak" | "peak_norm" | "peak-norm" | "peaknorm" => CirNormalizationMode::Peak,
-        _ => CirNormalizationMode::None,
+fn selected_columns(cli: &Cli) -> Vec<&str> {
+    match &cli.columns {
+        Some(columns) => columns.iter().map(String::as_str).collect(),
+        None => DEFAULT_COLUMNS.to_vec(),
     }
 }
 
 fn parse_cli() -> Cli {
-    let mut kv = HashMap::<String, String>::new();
-    let mut args = env::args().skip(1);
-
-    while let Some(arg) = args.next() {
-        if let Some(stripped) = arg.strip_prefix("--") {
-            if let Some((k, v)) = stripped.split_once('=') {
-                kv.insert(k.to_string(), v.to_string());
-            } else {
-                let key = stripped.to_string();
-                if let Some(next) = args.next() {
-                    if next.starts_with("--") {
-                        kv.insert(key, "true".to_string());
-                        let stripped_next = next.trim_start_matches("--");
-                        if let Some((k2, v2)) = stripped_next.split_once('=') {
-                            kv.insert(k2.to_string(), v2.to_string());
-                        } else {
-                            kv.insert(stripped_next.to_string(), "true".to_string());
-                        }
-                    } else {
-                        kv.insert(key, next);
-                    }
-                } else {
-                    kv.insert(key, "true".to_string());
-                }
-            }
-        }
-    }
-
-    let phy = kv
-        .remove("phy")
-        .unwrap_or_else(|| "dsss".to_string())
-        .to_lowercase();
-    let mode = kv
-        .remove("mode")
-        .unwrap_or_else(|| "point".to_string())
-        .to_lowercase();
-    let trials = kv
-        .remove("trials")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(40)
-        .max(1);
-    let payload_bytes = kv
-        .remove("payload-bytes")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(64)
-        .max(1);
-    let deadline_sec = kv
-        .remove("deadline-sec")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.8)
-        .max(0.01);
-    let max_sec = kv
-        .remove("max-sec")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(2.0)
-        .max(deadline_sec);
-    let chunk_samples = kv
-        .remove("chunk-samples")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(16_384)
-        .max(1);
-    let gap_samples = kv
-        .remove("gap-samples")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(64);
-    let seed = kv
-        .remove("seed")
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0xA11CE_u64);
-    let target_p_complete = kv
-        .remove("target-p")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.95)
-        .clamp(0.0, 1.0);
-    let sigma = kv
-        .remove("sigma")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0)
-        .max(0.0);
-    let cfo_hz = kv
-        .remove("cfo-hz")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0);
-    let ppm = kv
-        .remove("ppm")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0);
-    let burst_loss = kv
-        .remove("burst-loss")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let fading_depth = kv
-        .remove("fading-depth")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-
-    let multipath = if let Some(spec) = kv.remove("multipath") {
-        if let Some(p) = MultipathProfile::preset(&spec.to_lowercase()) {
-            p
-        } else {
-            MultipathProfile::parse_custom(&spec).unwrap_or_else(MultipathProfile::none)
-        }
-    } else {
-        MultipathProfile::none()
-    };
-
-    let sweep_awgn = parse_list(
-        kv.remove("sweep-awgn"),
-        &[0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0],
-    );
-    let sweep_ppm = parse_list(
-        kv.remove("sweep-ppm"),
-        &[-120.0, -80.0, -40.0, 0.0, 40.0, 80.0, 120.0],
-    );
-    let sweep_loss = parse_list(kv.remove("sweep-loss"), &[0.0, 0.05, 0.1, 0.2, 0.3, 0.4]);
-    let sweep_fading = parse_list(kv.remove("sweep-fading"), &[0.0, 0.2, 0.4, 0.6, 0.8]);
-    let sweep_chip_rate = parse_list(
-        kv.remove("sweep-chip-rate"),
-        &[6000.0, 8000.0, 10000.0, 12000.0, 14000.0, 15000.0],
-    );
-    let sweep_carrier_freq = parse_list(
-        kv.remove("sweep-carrier-freq"),
-        &[8000.0, 10000.0, 12000.0, 14000.0, 15000.0],
-    );
-
-    let sample_rate = kv
-        .remove("sample-rate")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(dsp::params::DEFAULT_SAMPLE_RATE);
-    let chip_rate = kv
-        .remove("chip-rate")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(dsp::params::CHIP_RATE);
-    let carrier_freq = kv
-        .remove("carrier-freq")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(dsp::params::CARRIER_FREQ);
-    let mseq_order = kv
-        .remove("mseq-order")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(dsp::params::MSEQ_ORDER);
-    let rrc_alpha = kv
-        .remove("rrc-alpha")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(dsp::params::RRC_ALPHA);
-
-    let sync_word_bits = kv
-        .remove("sync-word-bits")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(dsp::params::SYNC_WORD_BITS);
-
-    let preamble_repeat = kv
-        .remove("preamble-repeat")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(dsp::params::PREAMBLE_REPEAT);
-
-    let packets_per_burst = kv
-        .remove("packets-per-burst")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(dsp::params::PACKETS_PER_SYNC_BURST);
-    let preamble_sf = kv
-        .remove("preamble-sf")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(dsp::params::PREAMBLE_SF);
-    let mary_fde_mode = kv
-        .remove("mary-fde")
-        .map(|v| {
-            parse_mary_fde_mode(&v)
-                .unwrap_or_else(|| panic!("invalid --mary-fde value: {v} (expected: on|off|auto)"))
-        })
-        .unwrap_or(MaryFdeMode::On);
-    let mary_fde_snr_db = kv
-        .remove("mary-fde-snr-db")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(15.0);
-    let mary_fde_lambda_scale = kv
-        .remove("mary-fde-k")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(1.0);
-    let mary_fde_lambda_floor = kv
-        .remove("mary-fde-lambda-floor")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0);
-    let mary_fde_max_inv_gain = kv
-        .remove("mary-fde-max-inv-gain")
-        .and_then(|v| v.parse::<f32>().ok())
-        .filter(|v| *v > 0.0);
-    let mary_cir_norm = kv
-        .remove("mary-cir-norm")
-        .unwrap_or_else(|| "none".to_string());
-    let mary_cir_tap_alpha = kv
-        .remove("mary-cir-tap-alpha")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0);
-
-    Cli {
-        phy,
-        mode,
-        trials,
-        payload_bytes,
-        deadline_sec,
-        max_sec,
-        chunk_samples,
-        gap_samples,
-        seed,
-        target_p_complete,
-        base: ChannelImpairment {
-            sigma,
-            cfo_hz,
-            ppm,
-            burst_loss,
-            fading_depth,
-            multipath,
-        },
-        sweep_awgn,
-        sweep_ppm,
-        sweep_loss,
-        sweep_fading,
-        sweep_chip_rate,
-        sweep_carrier_freq,
-        sample_rate,
-        chip_rate,
-        carrier_freq,
-        mseq_order,
-        rrc_alpha,
-        sync_word_bits,
-        preamble_repeat,
-        packets_per_burst,
-        preamble_sf,
-        mary_fde_mode,
-        mary_fde_snr_db,
-        mary_fde_lambda_scale,
-        mary_fde_lambda_floor,
-        mary_fde_max_inv_gain,
-        mary_cir_norm,
-        mary_cir_tap_alpha,
-    }
+    Cli::parse()
 }
 
 fn make_bytes(len: usize, seed: u64) -> Vec<u8> {
@@ -963,14 +797,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     tx_signal_energy_sum,
                     tx_signal_samples,
                     process_time_ns: total_process_ns,
-                    cir_nmse: None,
                     raw_bit_errors: 0,
                     raw_bits_compared: 0,
-                    fde_selected_frames: 0,
-                    raw_selected_frames: 0,
-                    last_path_used: -1,
-                    last_pred_mse_fde: f32::NAN,
-                    last_pred_mse_raw: f32::NAN,
                     last_est_snr_db: f32::NAN,
                     phase_gate_on_symbols: 0,
                     phase_gate_off_symbols: 0,
@@ -1012,14 +840,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         tx_signal_energy_sum,
                         tx_signal_samples,
                         process_time_ns: total_process_ns,
-                        cir_nmse: None,
                         raw_bit_errors: 0,
                         raw_bits_compared: 0,
-                        fde_selected_frames: 0,
-                        raw_selected_frames: 0,
-                        last_path_used: -1,
-                        last_pred_mse_fde: f32::NAN,
-                        last_pred_mse_raw: f32::NAN,
                         last_est_snr_db: f32::NAN,
                         phase_gate_on_symbols: 0,
                         phase_gate_off_symbols: 0,
@@ -1050,14 +872,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         tx_signal_energy_sum,
         tx_signal_samples,
         process_time_ns: total_process_ns,
-        cir_nmse: None,
         raw_bit_errors: 0,
         raw_bits_compared: 0,
-        fde_selected_frames: 0,
-        raw_selected_frames: 0,
-        last_path_used: -1,
-        last_pred_mse_fde: f32::NAN,
-        last_pred_mse_raw: f32::NAN,
         last_est_snr_db: f32::NAN,
         phase_gate_on_symbols: 0,
         phase_gate_off_symbols: 0,
@@ -1098,7 +914,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         cli.mary_fde_lambda_floor,
         cli.mary_fde_max_inv_gain,
     );
-    decoder.set_cir_postprocess(parse_cir_norm(&cli.mary_cir_norm), cli.mary_cir_tap_alpha);
+    decoder.set_cir_postprocess(cli.mary_cir_norm.into(), cli.mary_cir_tap_alpha);
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;
@@ -1209,14 +1025,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     tx_signal_energy_sum,
                     tx_signal_samples,
                     process_time_ns: total_process_ns,
-                    cir_nmse: None,
                     raw_bit_errors,
                     raw_bits_compared,
-                    fde_selected_frames: progress.fde_selected_frames,
-                    raw_selected_frames: progress.raw_selected_frames,
-                    last_path_used: progress.last_path_used,
-                    last_pred_mse_fde: progress.last_pred_mse_fde,
-                    last_pred_mse_raw: progress.last_pred_mse_raw,
                     last_est_snr_db: progress.last_est_snr_db,
                     phase_gate_on_symbols: progress.phase_gate_on_symbols,
                     phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1260,14 +1070,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         tx_signal_energy_sum,
                         tx_signal_samples,
                         process_time_ns: total_process_ns,
-                        cir_nmse: None,
                         raw_bit_errors,
                         raw_bits_compared,
-                        fde_selected_frames: progress.fde_selected_frames,
-                        raw_selected_frames: progress.raw_selected_frames,
-                        last_path_used: progress.last_path_used,
-                        last_pred_mse_fde: progress.last_pred_mse_fde,
-                        last_pred_mse_raw: progress.last_pred_mse_raw,
                         last_est_snr_db: progress.last_est_snr_db,
                         phase_gate_on_symbols: progress.phase_gate_on_symbols,
                         phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -1300,14 +1104,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         tx_signal_energy_sum,
         tx_signal_samples,
         process_time_ns: total_process_ns,
-        cir_nmse: None,
         raw_bit_errors,
         raw_bits_compared,
-        fde_selected_frames: final_progress.fde_selected_frames,
-        raw_selected_frames: final_progress.raw_selected_frames,
-        last_path_used: final_progress.last_path_used,
-        last_pred_mse_fde: final_progress.last_pred_mse_fde,
-        last_pred_mse_raw: final_progress.last_pred_mse_raw,
         last_est_snr_db: final_progress.last_est_snr_db,
         phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
         phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
@@ -1319,10 +1117,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     }
 }
 
-fn print_header() {
-    println!(
-        "scenario,phy,mary_fde_mode,trials,success,deadline_hits,first_attempt_successes,total_bits_compared,total_bit_errors,tx_signal_power,awgn_noise_power,awgn_snr_db,p_complete,p_complete_deadline,deadline_s,ber,per,fer,goodput_effective_bps,goodput_success_mean_bps,p95_complete_s,mean_complete_s,total_attempts,total_synced_frames,synced_frame_ratio,dropped_attempts,avg_proc_ns_sample,cir_nmse,raw_ber,total_fde_selected_frames,total_raw_selected_frames,fde_selected_ratio,last_path_fde_ratio,last_path_raw_ratio,avg_last_pred_mse_fde,avg_last_pred_mse_raw,avg_last_est_snr_db,phase_gate_on_symbols,phase_gate_off_symbols,phase_gate_on_ratio,phase_innovation_reject_symbols,phase_innovation_reject_ratio,phase_err_abs_count,phase_err_abs_mean_rad,phase_err_abs_ge_0p5_symbols,phase_err_abs_ge_0p5_ratio,phase_err_abs_ge_1p0_symbols,phase_err_abs_ge_1p0_ratio,multipath"
-    );
+fn print_header(cli: &Cli) {
+    println!("{}", selected_columns(cli).join(","));
 }
 
 fn fmt_opt(v: Option<f32>) -> String {
@@ -1330,69 +1126,51 @@ fn fmt_opt(v: Option<f32>) -> String {
         .unwrap_or_else(|| "NaN".to_string())
 }
 
-fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
-    let noise_power = if imp.sigma > 0.0 {
-        Some(imp.sigma * imp.sigma)
-    } else {
-        None
-    };
+fn render_column(
+    name: &str,
+    scenario: &str,
+    cli: &Cli,
+    imp: &ChannelImpairment,
+    m: &Metrics,
+) -> String {
     let raw_ber = m.raw_ber();
-    let raw_ber_str = if raw_ber.is_nan() {
-        "NaN".to_string()
-    } else {
-        format!("{raw_ber:.6}")
-    };
-    let cols = vec![
-        scenario.to_string(),
-        cli.phy.clone(),
-        cli.mary_fde_mode.as_str().to_string(),
-        m.trials.to_string(),
-        m.successes.to_string(),
-        m.deadline_hits.to_string(),
-        m.first_attempt_successes.to_string(),
-        m.total_bits_compared.to_string(),
-        m.total_bit_errors.to_string(),
-        fmt_opt(m.tx_signal_power()),
-        fmt_opt(noise_power),
-        fmt_opt(m.awgn_snr_db(imp.sigma)),
-        format!("{:.6}", m.p_complete()),
-        format!("{:.6}", m.p_complete_deadline()),
-        format!("{:.3}", cli.deadline_sec),
-        format!("{:.6}", m.ber()),
-        format!("{:.6}", m.per()),
-        format!("{:.6}", m.fer()),
-        format!("{:.3}", m.goodput_effective_bps(cli.payload_bytes * 8)),
-        fmt_opt(m.goodput_success_mean_bps(cli.payload_bytes * 8)),
-        fmt_opt(m.p95_completion_sec()),
-        fmt_opt(m.mean_completion_sec()),
-        m.total_attempts.to_string(),
-        m.total_synced_frames.to_string(),
-        format!("{:.6}", m.synced_frame_ratio()),
-        m.dropped_attempts.to_string(),
-        format!("{:.2}", m.avg_process_time_per_sample_ns()),
-        fmt_opt(m.avg_cir_nmse()),
-        raw_ber_str,
-        m.total_fde_selected_frames.to_string(),
-        m.total_raw_selected_frames.to_string(),
-        format!("{:.6}", m.fde_selected_ratio()),
-        format!("{:.6}", m.last_path_fde_ratio()),
-        format!("{:.6}", m.last_path_raw_ratio()),
-        fmt_opt(m.avg_last_pred_mse_fde()),
-        fmt_opt(m.avg_last_pred_mse_raw()),
-        fmt_opt(m.avg_last_est_snr_db()),
-        m.total_phase_gate_on_symbols.to_string(),
-        m.total_phase_gate_off_symbols.to_string(),
-        format!("{:.6}", m.phase_gate_on_ratio()),
-        m.total_phase_innovation_reject_symbols.to_string(),
-        format!("{:.6}", m.phase_innovation_reject_ratio()),
-        m.total_phase_err_abs_count.to_string(),
-        fmt_opt(m.phase_err_abs_mean_rad()),
-        m.total_phase_err_abs_ge_0p5_symbols.to_string(),
-        format!("{:.6}", m.phase_err_abs_ge_0p5_ratio()),
-        m.total_phase_err_abs_ge_1p0_symbols.to_string(),
-        format!("{:.6}", m.phase_err_abs_ge_1p0_ratio()),
-        imp.multipath.name.clone(),
-    ];
+    match name {
+        "scenario" => scenario.to_string(),
+        "phy" => cli.phy.as_str().to_string(),
+        "mary_fde_mode" => cli.mary_fde_mode.as_str().to_string(),
+        "trials" => m.trials.to_string(),
+        "awgn_snr_db" => fmt_opt(m.awgn_snr_db(imp.sigma)),
+        "p_complete" => format!("{:.6}", m.p_complete()),
+        "ber" => format!("{:.6}", m.ber()),
+        "raw_ber" => {
+            if raw_ber.is_nan() {
+                "NaN".to_string()
+            } else {
+                format!("{raw_ber:.6}")
+            }
+        }
+        "goodput_effective_bps" => format!("{:.3}", m.goodput_effective_bps(cli.payload_bytes * 8)),
+        "goodput_success_mean_bps" => fmt_opt(m.goodput_success_mean_bps(cli.payload_bytes * 8)),
+        "p95_complete_s" => fmt_opt(m.p95_completion_sec()),
+        "mean_complete_s" => fmt_opt(m.mean_completion_sec()),
+        "avg_proc_ns_sample" => format!("{:.2}", m.avg_process_time_per_sample_ns()),
+        "synced_frame_ratio" => format!("{:.6}", m.synced_frame_ratio()),
+        "phase_gate_on_ratio" => format!("{:.6}", m.phase_gate_on_ratio()),
+        "phase_innovation_reject_ratio" => format!("{:.6}", m.phase_innovation_reject_ratio()),
+        "phase_err_abs_mean_rad" => fmt_opt(m.phase_err_abs_mean_rad()),
+        "phase_err_abs_ge_0p5_ratio" => format!("{:.6}", m.phase_err_abs_ge_0p5_ratio()),
+        "phase_err_abs_ge_1p0_ratio" => format!("{:.6}", m.phase_err_abs_ge_1p0_ratio()),
+        "avg_last_est_snr_db" => fmt_opt(m.avg_last_est_snr_db()),
+        "multipath" => imp.multipath.name.clone(),
+        _ => unreachable!("column should be validated before rendering"),
+    }
+}
+
+fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
+    let cols = selected_columns(cli)
+        .into_iter()
+        .map(|col| render_column(col, scenario, cli, imp, m))
+        .collect::<Vec<_>>();
     println!("{}", cols.join(","));
 }
 
@@ -1402,51 +1180,46 @@ fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
         let trial_seed = cli
             .seed
             .wrapping_add((trial_idx as u64).wrapping_mul(0x9E37_79B9));
-        let tr = if cli.phy == "mary" {
+        let tr = if matches!(cli.phy, Phy::Mary) {
             run_trial_mary_e2e(imp, cli, trial_seed)
         } else {
             run_trial_dsss_e2e(imp, cli, trial_seed)
         };
-        metrics.push(tr, cli.deadline_sec);
+        metrics.push(tr);
     }
     print_row(scenario, cli, imp, &metrics);
     metrics
 }
 
 fn run_point(cli: &Cli) {
-    print_header();
+    print_header(cli);
+    let base = cli.base_impairment();
     let scenario = format!(
         "point(bytes={},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2},fade={:.2})",
-        cli.payload_bytes,
-        cli.base.sigma,
-        cli.base.cfo_hz,
-        cli.base.ppm,
-        cli.base.burst_loss,
-        cli.base.fading_depth
+        cli.payload_bytes, base.sigma, base.cfo_hz, base.ppm, base.burst_loss, base.fading_depth
     );
-    evaluate(cli, &cli.base, &scenario);
+    evaluate(cli, &base, &scenario);
 }
 
 fn run_sweep_awgn(cli: &Cli) {
-    print_header();
+    print_header(cli);
     let mut phy_limit = None;
     for &sigma in &cli.sweep_awgn {
-        let mut imp = cli.base.clone();
+        let mut imp = cli.base_impairment();
         imp.sigma = sigma;
         let scenario = format!(
             "awgn(bytes={},sigma={sigma:.3},cfo={:.1},ppm={:.1},loss={:.2},fade={:.2})",
             cli.payload_bytes, imp.cfo_hz, imp.ppm, imp.burst_loss, imp.fading_depth
         );
         let d = evaluate(cli, &imp, &scenario);
-        if d.p_complete_deadline() >= cli.target_p_complete {
+        if d.p_complete() >= cli.target_p_complete {
             phy_limit = Some(sigma);
         }
     }
     println!(
-        "# awgn_limit(target_p_complete_deadline>={:.2}, deadline_s={:.2}, phy={}) result={}",
+        "# awgn_limit(target_p_complete>={:.2}, phy={}) result={}",
         cli.target_p_complete,
-        cli.deadline_sec,
-        cli.phy,
+        cli.phy.as_str(),
         phy_limit
             .map(|v| format!("{v:.3}"))
             .unwrap_or_else(|| "none".to_string()),
@@ -1454,9 +1227,9 @@ fn run_sweep_awgn(cli: &Cli) {
 }
 
 fn run_sweep_ppm(cli: &Cli) {
-    print_header();
+    print_header(cli);
     for &ppm in &cli.sweep_ppm {
-        let mut imp = cli.base.clone();
+        let mut imp = cli.base_impairment();
         imp.ppm = ppm;
         let scenario = format!(
             "ppm(bytes={},ppm={ppm:.1},sigma={:.3},cfo={:.1},loss={:.2},fade={:.2})",
@@ -1467,9 +1240,9 @@ fn run_sweep_ppm(cli: &Cli) {
 }
 
 fn run_sweep_loss(cli: &Cli) {
-    print_header();
+    print_header(cli);
     for &loss in &cli.sweep_loss {
-        let mut imp = cli.base.clone();
+        let mut imp = cli.base_impairment();
         imp.burst_loss = loss.clamp(0.0, 1.0);
         let scenario = format!(
             "loss(bytes={},loss={:.2},sigma={:.3},cfo={:.1},ppm={:.1},fade={:.2})",
@@ -1480,9 +1253,9 @@ fn run_sweep_loss(cli: &Cli) {
 }
 
 fn run_sweep_multipath(cli: &Cli) {
-    print_header();
+    print_header(cli);
     for name in ["none", "mild", "medium", "harsh"] {
-        let mut imp = cli.base.clone();
+        let mut imp = cli.base_impairment();
         imp.multipath = MultipathProfile::preset(name).unwrap_or_else(MultipathProfile::none);
         let scenario = format!(
             "multipath(bytes={},profile={name},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2},fade={:.2})",
@@ -1493,9 +1266,9 @@ fn run_sweep_multipath(cli: &Cli) {
 }
 
 fn run_sweep_fading(cli: &Cli) {
-    print_header();
+    print_header(cli);
     for &fade in &cli.sweep_fading {
-        let mut imp = cli.base.clone();
+        let mut imp = cli.base_impairment();
         imp.fading_depth = fade.clamp(0.0, 1.0);
         let scenario = format!(
             "fading(bytes={},fade={:.2},sigma={:.3},ppm={:.1},loss={:.2})",
@@ -1506,7 +1279,7 @@ fn run_sweep_fading(cli: &Cli) {
 }
 
 fn run_sweep_band(cli: &Cli) {
-    print_header();
+    print_header(cli);
     for &chip_rate in &cli.sweep_chip_rate {
         for &carrier_freq in &cli.sweep_carrier_freq {
             let mut cfg = cli.clone();
@@ -1522,92 +1295,35 @@ fn run_sweep_band(cli: &Cli) {
                 cfg.carrier_freq,
                 band_lo,
                 band_hi,
-                cfg.base.sigma,
-                cfg.base.cfo_hz,
-                cfg.base.ppm,
-                cfg.base.burst_loss,
-                cfg.base.fading_depth
+                cfg.sigma,
+                cfg.cfo_hz,
+                cfg.ppm,
+                cfg.burst_loss,
+                cfg.fading_depth
             );
-            evaluate(&cfg, &cfg.base, &scenario);
+            evaluate(&cfg, &cfg.base_impairment(), &scenario);
         }
     }
-}
-
-fn print_help() {
-    println!(
-        "usage: cargo run --release --bin dsss_e2e_eval -- [options]\n\
-         common options:\n\
-         --phy [dsss|mary]          物理層方式の選択 (default: dsss)\n\
-         --mode point               単点評価 (default)\n\
-         --mode sweep-awgn        AWGN sweep + awgn_limit推定\n\
-         --mode sweep-ppm         ppm sweep\n\
-         --mode sweep-loss        バースト欠落率 sweep\n\
-         --mode sweep-fading      振幅フェージング深さ sweep\n\
-         --mode sweep-multipath   マルチパス profile sweep\n\
-         --mode sweep-band        chip-rate x carrier-freq sweep\n\
-         --mode sweep-all         全sweep\n\n\
-         evaluation options:\n\
-         --trials N\n\
-         --payload-bytes N          送信バイト長 (default: 64)\n\
-         --deadline-sec F\n\
-         --max-sec F\n\
-         --chunk-samples N\n\
-         --gap-samples N\n\
-         --seed N\n\
-         --sigma F\n\
-         --ppm F\n\
-         --burst-loss F             (0..1)\n\
-         --fading-depth F           (0..1)\n\
-         --multipath NAME_OR_TAPS\n\
-             NAME: none|mild|medium|harsh\n\
-             TAPS: \"0:1.0,9:0.4,23:0.2\"\n\
-         --target-p F               (awgn_limit判定用)\n\n\
-         mary/FDE options:\n\
-         --mary-fde [on|off|auto]   FDEモード (default: on)\n\
-         --mary-fde-snr-db F        MMSE換算SNR[dB] (default: 15)\n\
-         --mary-fde-k F             λ_eff = k*λ + λ_floor の k (default: 1.0)\n\
-         --mary-fde-lambda-floor F  λ_floor (default: 0.0)\n\
-         --mary-fde-max-inv-gain F  逆フィルタ利得上限(任意)\n\
-         --mary-cir-norm MODE       none|unit_energy|peak (default: none)\n\
-         --mary-cir-tap-alpha F     |h| < alpha*max|h| を0化 (default: 0)\n\n\
-         sweep lists:\n\
-         --sweep-awgn \"0,0.005,0.01\"\n\
-         --sweep-ppm  \"-120,-80,0,80,120\"\n\
-         --sweep-loss \"0,0.1,0.2,0.3\"\n\
-         --sweep-fading \"0,0.2,0.4,0.6,0.8\"\n\
-         --sweep-chip-rate \"6000,8000,10000,12000,14000,15000\"\n\
-         --sweep-carrier-freq \"8000,10000,12000,14000,15000\"\n"
-    );
 }
 
 fn main() {
     let cli = parse_cli();
 
-    if matches!(cli.mode.as_str(), "help" | "--help" | "-h") {
-        print_help();
-        return;
-    }
-
-    match cli.mode.as_str() {
-        "point" => run_point(&cli),
-        "sweep-awgn" => run_sweep_awgn(&cli),
-        "sweep-ppm" => run_sweep_ppm(&cli),
-        "sweep-loss" => run_sweep_loss(&cli),
-        "sweep-fading" => run_sweep_fading(&cli),
-        "sweep-multipath" => run_sweep_multipath(&cli),
-        "sweep-band" => run_sweep_band(&cli),
-        "sweep-all" => {
+    match cli.mode {
+        EvalMode::Point => run_point(&cli),
+        EvalMode::SweepAwgn => run_sweep_awgn(&cli),
+        EvalMode::SweepPpm => run_sweep_ppm(&cli),
+        EvalMode::SweepLoss => run_sweep_loss(&cli),
+        EvalMode::SweepFading => run_sweep_fading(&cli),
+        EvalMode::SweepMultipath => run_sweep_multipath(&cli),
+        EvalMode::SweepBand => run_sweep_band(&cli),
+        EvalMode::SweepAll => {
             run_sweep_awgn(&cli);
             run_sweep_ppm(&cli);
             run_sweep_loss(&cli);
             run_sweep_fading(&cli);
             run_sweep_multipath(&cli);
             run_sweep_band(&cli);
-        }
-        _ => {
-            eprintln!("unknown mode: {}", cli.mode);
-            print_help();
-            std::process::exit(2);
         }
     }
 }
@@ -1632,51 +1348,33 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_mary_fde_mode() {
-        assert_eq!(parse_mary_fde_mode("on"), Some(MaryFdeMode::On));
-        assert_eq!(parse_mary_fde_mode("OFF"), Some(MaryFdeMode::Off));
-        assert_eq!(parse_mary_fde_mode("auto"), Some(MaryFdeMode::Auto));
-        assert_eq!(parse_mary_fde_mode("invalid"), None);
-    }
-
-    #[test]
     fn test_metrics_calculations() {
         let mut m = Metrics::default();
-        let deadline = 1.0;
 
-        m.push(
-            TrialResult {
-                success: true,
-                completion_sec: Some(0.5),
-                elapsed_sec: 0.5,
-                attempts: 1,
-                first_attempt_success: true,
-                bit_errors: 0,
-                bits_compared: 128,
-                cir_nmse: None,
-                ..Default::default()
-            },
-            deadline,
-        );
+        m.push(TrialResult {
+            success: true,
+            completion_sec: Some(0.5),
+            elapsed_sec: 0.5,
+            attempts: 1,
+            first_attempt_success: true,
+            bit_errors: 0,
+            bits_compared: 128,
+            ..Default::default()
+        });
 
-        m.push(
-            TrialResult {
-                success: false,
-                completion_sec: None,
-                elapsed_sec: 1.2,
-                attempts: 3,
-                first_attempt_success: false,
-                bit_errors: 10,
-                bits_compared: 128,
-                cir_nmse: None,
-                ..Default::default()
-            },
-            deadline,
-        );
+        m.push(TrialResult {
+            success: false,
+            completion_sec: None,
+            elapsed_sec: 1.2,
+            attempts: 3,
+            first_attempt_success: false,
+            bit_errors: 10,
+            bits_compared: 128,
+            ..Default::default()
+        });
 
         assert_eq!(m.trials, 2);
         assert_eq!(m.successes, 1);
-        assert_eq!(m.deadline_hits, 1);
         assert_eq!(m.p_complete(), 0.5);
         assert_eq!(m.ber(), 10.0 / 256.0);
     }
@@ -1684,24 +1382,21 @@ mod tests {
     #[test]
     fn test_e2e_dsss_smoke() {
         let cli = Cli {
-            phy: "dsss".to_string(),
-            mode: "point".to_string(),
+            phy: Phy::Dsss,
+            mode: EvalMode::Point,
             trials: 1,
             payload_bytes: 16,
-            deadline_sec: 2.0,
             max_sec: 5.0,
             chunk_samples: 1024,
             gap_samples: 0,
             seed: 123,
             target_p_complete: 0.95,
-            base: ChannelImpairment {
-                sigma: 0.0,
-                cfo_hz: 0.0,
-                ppm: 0.0,
-                burst_loss: 0.0,
-                fading_depth: 0.0,
-                multipath: MultipathProfile::none(),
-            },
+            sigma: 0.0,
+            cfo_hz: 0.0,
+            ppm: 0.0,
+            burst_loss: 0.0,
+            fading_depth: 0.0,
+            multipath: MultipathProfile::none(),
             sweep_awgn: vec![],
             sweep_ppm: vec![],
             sweep_loss: vec![],
@@ -1722,35 +1417,33 @@ mod tests {
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,
             mary_fde_max_inv_gain: None,
-            mary_cir_norm: "none".to_string(),
+            mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
+            columns: None,
         };
 
-        let res = run_trial_dsss_e2e(&cli.base, &cli, cli.seed);
+        let res = run_trial_dsss_e2e(&cli.base_impairment(), &cli, cli.seed);
         assert!(res.success);
     }
 
     #[test]
     fn test_e2e_mary_smoke() {
         let cli = Cli {
-            phy: "mary".to_string(),
-            mode: "point".to_string(),
+            phy: Phy::Mary,
+            mode: EvalMode::Point,
             trials: 1,
             payload_bytes: 16,
-            deadline_sec: 2.0,
             max_sec: 5.0,
             chunk_samples: 1024,
             gap_samples: 0,
             seed: 456,
             target_p_complete: 0.95,
-            base: ChannelImpairment {
-                sigma: 0.0,
-                cfo_hz: 0.0,
-                ppm: 0.0,
-                burst_loss: 0.0,
-                fading_depth: 0.0,
-                multipath: MultipathProfile::none(),
-            },
+            sigma: 0.0,
+            cfo_hz: 0.0,
+            ppm: 0.0,
+            burst_loss: 0.0,
+            fading_depth: 0.0,
+            multipath: MultipathProfile::none(),
             sweep_awgn: vec![],
             sweep_ppm: vec![],
             sweep_loss: vec![],
@@ -1771,11 +1464,12 @@ mod tests {
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,
             mary_fde_max_inv_gain: None,
-            mary_cir_norm: "none".to_string(),
+            mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
+            columns: None,
         };
 
-        let res = run_trial_mary_e2e(&cli.base, &cli, cli.seed);
+        let res = run_trial_mary_e2e(&cli.base_impairment(), &cli, cli.seed);
         assert!(res.success);
     }
 }
