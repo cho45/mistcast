@@ -187,6 +187,7 @@ const DEFAULT_COLUMNS: &[&str] = &[
     "mean_complete_s",
     "avg_proc_ns_sample",
     "synced_frame_ratio",
+    "crc_pass_ratio",
     "phase_gate_on_ratio",
     "phase_innovation_reject_ratio",
     "phase_err_abs_mean_rad",
@@ -348,6 +349,10 @@ struct TrialResult {
     attempts: usize,
     /// 同期済みフレーム数（CRCミスを含む）
     synced_frames: usize,
+    /// CRC通過フレーム数（Accepted）
+    accepted_frames: usize,
+    /// CRCエラーフレーム数
+    crc_error_frames: usize,
     first_attempt_success: bool,
     bit_errors: usize,
     bits_compared: usize,
@@ -375,6 +380,8 @@ struct Metrics {
     first_attempt_successes: usize,
     total_attempts: usize,
     total_synced_frames: usize,
+    total_accepted_frames: usize,
+    total_crc_error_frames: usize,
     total_bit_errors: usize,
     total_bits_compared: usize,
     total_elapsed_sec: f32,
@@ -402,6 +409,8 @@ impl Metrics {
         self.total_elapsed_sec += t.elapsed_sec;
         self.total_attempts += t.attempts;
         self.total_synced_frames += t.synced_frames;
+        self.total_accepted_frames += t.accepted_frames;
+        self.total_crc_error_frames += t.crc_error_frames;
         self.total_bit_errors += t.bit_errors;
         self.total_bits_compared += t.bits_compared;
         self.dropped_attempts += t.dropped_attempts;
@@ -439,6 +448,13 @@ impl Metrics {
 
     fn synced_frame_ratio(&self) -> f32 {
         ratio(self.total_synced_frames, self.total_attempts)
+    }
+
+    fn crc_pass_ratio(&self) -> f32 {
+        ratio(
+            self.total_accepted_frames,
+            self.total_accepted_frames + self.total_crc_error_frames,
+        )
     }
 
     fn ber(&self) -> f32 {
@@ -799,6 +815,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     elapsed_sec,
                     attempts,
                     synced_frames: progress.received_packets + progress.crc_error_packets,
+                    accepted_frames: progress.received_packets,
+                    crc_error_frames: progress.crc_error_packets,
                     first_attempt_success: attempts == 1 && errs == 0,
                     bit_errors: errs,
                     bits_compared,
@@ -842,6 +860,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         elapsed_sec,
                         attempts,
                         synced_frames: progress.received_packets + progress.crc_error_packets,
+                        accepted_frames: progress.received_packets,
+                        crc_error_frames: progress.crc_error_packets,
                         first_attempt_success: attempts == 1 && errs == 0,
                         bit_errors: errs,
                         bits_compared,
@@ -874,6 +894,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         elapsed_sec,
         attempts,
         synced_frames: final_progress.received_packets + final_progress.crc_error_packets,
+        accepted_frames: final_progress.received_packets,
+        crc_error_frames: final_progress.crc_error_packets,
         first_attempt_success: false,
         bit_errors,
         bits_compared,
@@ -1027,6 +1049,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     elapsed_sec,
                     attempts,
                     synced_frames: progress.received_packets + progress.crc_error_packets,
+                    accepted_frames: progress.received_packets,
+                    crc_error_frames: progress.crc_error_packets,
                     first_attempt_success: attempts == 1 && errs == 0,
                     bit_errors: errs,
                     bits_compared,
@@ -1072,6 +1096,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         elapsed_sec,
                         attempts,
                         synced_frames: progress.received_packets + progress.crc_error_packets,
+                        accepted_frames: progress.received_packets,
+                        crc_error_frames: progress.crc_error_packets,
                         first_attempt_success: attempts == 1 && errs == 0,
                         bit_errors: errs,
                         bits_compared,
@@ -1106,6 +1132,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         elapsed_sec,
         attempts,
         synced_frames: final_progress.received_packets + final_progress.crc_error_packets,
+        accepted_frames: final_progress.received_packets,
+        crc_error_frames: final_progress.crc_error_packets,
         first_attempt_success: false,
         bit_errors,
         bits_compared,
@@ -1172,6 +1200,7 @@ fn render_column(
         "mean_complete_s" => fmt_opt(m.mean_completion_sec()),
         "avg_proc_ns_sample" => format!("{:.2}", m.avg_process_time_per_sample_ns()),
         "synced_frame_ratio" => format!("{:.6}", m.synced_frame_ratio()),
+        "crc_pass_ratio" => format!("{:.6}", m.crc_pass_ratio()),
         "phase_gate_on_ratio" => format!("{:.6}", m.phase_gate_on_ratio()),
         "phase_innovation_reject_ratio" => format!("{:.6}", m.phase_innovation_reject_ratio()),
         "phase_err_abs_mean_rad" => fmt_opt(m.phase_err_abs_mean_rad()),
