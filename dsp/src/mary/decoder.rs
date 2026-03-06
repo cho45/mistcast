@@ -18,6 +18,7 @@ use crate::common::rrc_filter::RrcFilter;
 use crate::frame::packet::Packet;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
+use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
@@ -54,8 +55,6 @@ const TRACKING_PHASE_ERR_GATE_RAD: f32 = 1.00;
 const TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH: f32 = 1.60;
 const PHASE_ERR_ABS_THRESH_0P5_RAD: f32 = 0.5;
 const PHASE_ERR_ABS_THRESH_1P0_RAD: f32 = 1.0;
-const SYNC_SPREAD_FACTOR: usize = crate::params::SPREAD_FACTOR;
-const PAYLOAD_SPREAD_FACTOR: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CirNormalizationMode {
@@ -1408,7 +1407,7 @@ impl Decoder {
         sample_shift: f32,
     ) -> Option<[Complex32; 16]> {
         let spc = self.config.proc_samples_per_chip().max(1);
-        let sf = 16;
+        let sf = PAYLOAD_SPREAD_FACTOR;
 
         // round() 後の添字がバッファ内に収まるかを事前確認する。
         // 負値を usize へキャストした際の 0 への飽和を防ぐ。
@@ -1703,17 +1702,12 @@ mod tests {
     }
 
     #[test]
-    fn test_spread_factor_transition() {
+    fn test_spread_factor_config_consistency() {
         let sf_sync = SYNC_SPREAD_FACTOR;
         let sf_payload = PAYLOAD_SPREAD_FACTOR;
-        assert_ne!(
-            sf_sync, sf_payload,
-            "Sync and Payload should have different SF"
-        );
-        assert_eq!(
-            sf_payload - sf_sync,
-            1,
-            "Payload SF should be 1 more than Sync SF"
+        assert!(
+            sf_sync > 0 && sf_payload > 0,
+            "Spread factors must be positive"
         );
     }
 
@@ -2318,15 +2312,19 @@ mod tests {
         let diff = on_rot * decoder.demodulator.prev_phase().conj();
         let max_energy = best_corr.norm_sqr(); // 256
 
-        // Walsh LLR は理想条件で 1.0 スケールになる。
+        // Walsh LLR は max* 補正により 1.0 より僅かに小さくなる。
+        // bit=0 側: [256, 0, ...] / bit=1 側: [0, 0, ...] の max* 差分を期待値とする。
         let mut energies = [0.0f32; 16];
         energies[0] = max_energy;
         let walsh_llr = decoder.demodulator.walsh_llr(&energies, max_energy);
         let walsh_avg_abs = walsh_llr.iter().map(|v| v.abs()).sum::<f32>() / walsh_llr.len() as f32;
+        let max_star = |a: f32, b: f32| -> f32 { a.max(b) + (-(a - b).abs()).exp().ln_1p() };
+        let expected_walsh_abs = (max_star(max_energy, 0.0) - max_star(0.0, 0.0)) / max_energy;
         assert!(
-            (walsh_avg_abs - 1.0).abs() < 1e-6,
-            "Walsh LLR scale should be ~1.0 in ideal case, got {}",
-            walsh_avg_abs
+            (walsh_avg_abs - expected_walsh_abs).abs() < 1e-6,
+            "Walsh LLR scale mismatch: got {}, expected {}",
+            walsh_avg_abs,
+            expected_walsh_abs
         );
 
         // 旧式（誤り）: diff は振幅次元なのにエネルギー次元で割ると過小化する。

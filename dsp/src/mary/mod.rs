@@ -7,6 +7,7 @@ pub mod decoder;
 pub mod demodulator;
 pub mod encoder;
 pub mod modulator;
+pub mod params;
 pub mod sync;
 
 /// インターリーバ設定モジュール

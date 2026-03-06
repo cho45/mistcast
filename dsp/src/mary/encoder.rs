@@ -9,6 +9,7 @@ use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::Packet;
 use crate::mary::interleaver_config;
 use crate::mary::modulator::Modulator;
+use crate::mary::params;
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 
@@ -61,7 +62,7 @@ impl Encoder {
         // Modulator 出力バッファサイズ (最大フレームサンプル数)
         let max_bits = mary_aligned_size * packets_per_sync_burst;
         let max_symbols = max_bits.div_ceil(6);
-        let max_chips = max_symbols * 16 + 2000;
+        let max_chips = max_symbols * params::PAYLOAD_SPREAD_FACTOR + 2000;
         let dsp_ref = &config.dsp;
         let max_samples =
             (max_chips as f32 * (dsp_ref.sample_rate / dsp_ref.proc_sample_rate())) as usize + 5000;
@@ -88,7 +89,7 @@ impl Encoder {
         // Modulator 出力バッファサイズ
         let max_bits = mary_aligned_size * packets_per_sync_burst;
         let max_symbols = max_bits.div_ceil(6);
-        let max_chips = max_symbols * 16 + 2000;
+        let max_chips = max_symbols * params::PAYLOAD_SPREAD_FACTOR + 2000;
         let dsp_ref = &config.dsp;
         let max_samples =
             (max_chips as f32 * (dsp_ref.sample_rate / dsp_ref.proc_sample_rate())) as usize + 5000;
@@ -541,8 +542,10 @@ mod tests {
 
         // 4. フレーム長の整合性
         let spc = encoder.modulator.config().samples_per_chip();
-        let preamble_len = 15 * encoder.modulator.config().preamble_repeat * spc;
-        let sync_len = 16 * 15 * spc;
+        let preamble_len = encoder.modulator.config().preamble_sf
+            * encoder.modulator.config().preamble_repeat
+            * spc;
+        let sync_len = encoder.modulator.config().sync_word_bits * params::SYNC_SPREAD_FACTOR * spc;
 
         assert!(
             frame.len() > preamble_len + sync_len,
@@ -561,8 +564,8 @@ mod tests {
 
         let spc = encoder.modulator.config().samples_per_chip();
         let preamble_repeat = encoder.modulator.config().preamble_repeat;
-        let preamble_len = 15 * preamble_repeat * spc;
-        let sync_len = 16 * 15 * spc;
+        let preamble_len = encoder.modulator.config().preamble_sf * preamble_repeat * spc;
+        let sync_len = encoder.modulator.config().sync_word_bits * params::SYNC_SPREAD_FACTOR * spc;
 
         // プリアンブル部分が存在する
         assert!(frame.len() > preamble_len, "Frame should contain preamble");
@@ -677,7 +680,7 @@ mod tests {
 
         // PAPR (Peak-to-Average Power Ratio)
         // 根拠：MaryDQPSK信号のPAPRは理論上以下のように計算できる
-        // - 平均電力：各シンボルのエネルギーはsf=16、信号は±1なので平均電力は約1.0
+        // - 平均電力：各シンボルのエネルギーは sf=PAYLOAD_SPREAD_FACTOR、信号は±1なので平均電力は約1.0
         // - ピーク電力：RRCフィルタのピークで最大約1.44
         // - 理論PAPR ≈ 1.44 / 1.0 = 1.44
         // - 実際には複数シンボルの蓄積とリサンプラの影響で3-5程度

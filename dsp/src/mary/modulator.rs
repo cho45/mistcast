@@ -7,13 +7,14 @@
 //! 4. 帯域シフト: キャリアfcで実信号へアップコンバート
 //!
 //! # 仕様
-//! - プリアンブル/Sync: Walsh[0]、DBPSK、sf=15
-//! - Payload: Walsh[0-15]、DQPSK、sf=16
+//! - プリアンブル/Sync: Walsh[0]、DBPSK、sf=SYNC_SPREAD_FACTOR
+//! - Payload: Walsh[0-15]、DQPSK、sf=PAYLOAD_SPREAD_FACTOR
 
 use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::common::walsh::WalshDictionary;
+use crate::mary::params;
 use crate::params::{INTERNAL_SPC, SYNC_WORD};
 use crate::DspConfig;
 
@@ -73,7 +74,7 @@ impl Modulator {
 
         // Calculate buffer sizes for zero-allocation
         // Max frame: 352 bits (1 packet) / 6 bits/symbol * 16 chips/symbol + margin
-        let max_chips = 352 / 6 * 16 + 2000;
+        let max_chips = 352 / 6 * params::PAYLOAD_SPREAD_FACTOR + 2000;
         let max_bb = max_chips * INTERNAL_SPC + 2000;
         let sample_ratio = config.sample_rate / config.proc_sample_rate();
         let max_resampled = (max_bb as f32 * sample_ratio) as usize + 2000;
@@ -108,7 +109,7 @@ impl Modulator {
 
     /// デフォルト設定 (48kHz) で変調器を作成する
     pub fn default_48k() -> Self {
-        Self::new(DspConfig::default_48k())
+        Self::new(params::dsp_config_48k())
     }
 
     /// プリアンブル (Zadoff-Chu系列 SF=13) を生成する
@@ -186,7 +187,7 @@ impl Modulator {
         output_i: &mut Vec<f32>,
         output_q: &mut Vec<f32>,
     ) {
-        let sf = 16; // Payloadはsf=16
+        let sf = params::PAYLOAD_SPREAD_FACTOR;
         let num_symbols = bits.len().div_ceil(6);
         output_i.clear();
         output_q.clear();
@@ -357,7 +358,7 @@ impl Modulator {
         let mut preamble_buf = Vec::new();
         self.generate_preamble(&mut preamble_buf);
 
-        // 同期ワード (DBPSK, Walsh[0], sf=15)
+        // 同期ワード (DBPSK, Walsh[0], sf=SYNC_SPREAD_FACTOR)
         let sync_bits: Vec<u8> = (0..self.config.sync_word_bits)
             .rev()
             .map(|i| ((SYNC_WORD >> i) & 1) as u8)
@@ -367,7 +368,7 @@ impl Modulator {
         self.chips_buffer_i.clear();
         self.chips_buffer_q.clear();
         let walsh_seq = &self.wdict.w16[0];
-        let sf_sync = 15; // 15チップに固定
+        let sf_sync = params::SYNC_SPREAD_FACTOR;
         let sync_chips_needed = sync_bits.len() * sf_sync;
         if self.chips_buffer_i.capacity() < sync_chips_needed {
             self.chips_buffer_i.reserve(sync_chips_needed);
@@ -563,7 +564,7 @@ mod tests {
     /// 検証項目：
     /// 1. Walsh系列の直交性：異なるWalsh indexのchipsは直交する（内積≈0）
     /// 2. DQPSK位相遷移：同じWalsh indexで異なるDQPSK bitsの場合、位相のみが変化
-    /// 3. エネルギー保存：各シンボルのエネルギーはsf=16に等しい
+    /// 3. エネルギー保存：各シンボルのエネルギーは sf=PAYLOAD_SPREAD_FACTOR に等しい
     #[test]
     fn test_math_mary_dqpsk() {
         let mod_ = make_modulator();
@@ -666,7 +667,7 @@ mod tests {
         );
 
         // ===== 検証3: エネルギー保存 =====
-        // 各シンボルのエネルギーはsf=16（各chipは±1）
+        // 各シンボルのエネルギーは sf=PAYLOAD_SPREAD_FACTOR（各chipは±1）
         // DQPSK 00の場合：I成分にWalsh系列（±1）、Q成分は0
         // したがってエネルギー = 16（I成分）+ 0（Q成分）= 16
         let energy_00: f32 = chips_i_00.iter().map(|&x| x * x).sum::<f32>()
@@ -698,7 +699,7 @@ mod tests {
         Modulator::bits_to_chips(&bits, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         // 各シンボルの位相を確認
-        let sf = 16;
+        let sf = params::PAYLOAD_SPREAD_FACTOR;
         let walsh0 = &mod_.wdict.w16[0];
 
         // シンボル1: phase=0 -> (1.0, 0.0)
@@ -834,7 +835,7 @@ mod tests {
         // フレーム長の妥当性計算（設定値ベース）
         let spc = mod_.config.samples_per_chip();
         let preamble_len = mod_.config.preamble_sf * mod_.config.preamble_repeat * spc;
-        let sync_len = 15 * mod_.config.sync_word_bits * spc;
+        let sync_len = params::SYNC_SPREAD_FACTOR * mod_.config.sync_word_bits * spc;
         let payload_len = 96;
         let expected_base = preamble_len + sync_len + payload_len;
         let diff = (frame.len() as i32 - expected_base as i32).abs();
@@ -1240,7 +1241,7 @@ mod tests {
         );
     }
 
-    /// Sync→Payloadハンドオーバー：sf=15→sf=16、DBPSK→DQPSKの切り替え
+    /// Sync→Payloadハンドオーバー：sf=SYNC→PAYLOAD、DBPSK→DQPSKの切り替え
     #[test]
     fn test_sync_to_payload_handoff_rigor() {
         let mut mod_ = make_modulator();
@@ -1326,7 +1327,7 @@ mod tests {
         Modulator::bits_to_chips(&bits, &mod_.wdict, &mut phase, &mut chips_i, &mut chips_q);
 
         // 各シンボルの位相を確認
-        let sf = 16;
+        let sf = params::PAYLOAD_SPREAD_FACTOR;
         let expected_phases = [(1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, 0.0)];
 
         for (sym_idx, &exp_iq) in expected_phases.iter().enumerate() {

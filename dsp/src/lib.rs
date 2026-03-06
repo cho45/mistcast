@@ -297,7 +297,7 @@ impl WasmMaryDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
         console_error_panic_hook::set_once();
-        let mut config = DspConfig::new(sample_rate);
+        let mut config = mary::params::dsp_config(sample_rate);
         config.packets_per_burst = packets_per_burst;
         let mut inner = mary::decoder::Decoder::new(
             params::FIXED_K * params::PAYLOAD_SIZE,
@@ -351,7 +351,7 @@ pub struct WasmMaryEncoder {
 impl WasmMaryEncoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate: f32, packets_per_burst: usize) -> Self {
-        let mut config = DspConfig::new(sample_rate);
+        let mut config = mary::params::dsp_config(sample_rate);
         config.packets_per_burst = packets_per_burst;
         WasmMaryEncoder {
             inner: mary::encoder::Encoder::new(config),

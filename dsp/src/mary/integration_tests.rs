@@ -5,6 +5,7 @@
 use crate::common::walsh::WalshDictionary;
 use crate::mary::decoder::Decoder;
 use crate::mary::encoder::Encoder;
+use crate::mary::params;
 use crate::DspConfig;
 use num_complex::Complex32;
 
@@ -17,7 +18,7 @@ struct MaryTestSystem {
 
 impl MaryTestSystem {
     fn new() -> Self {
-        let config = DspConfig::default_48k();
+        let config = params::dsp_config_48k();
         let encoder = Encoder::new(config.clone());
         let decoder = Decoder::new(160, 10, config.clone());
         Self {
@@ -92,7 +93,7 @@ mod tests {
 
         // プリアンブルはフレームの先頭にある
         let spc = system.config.samples_per_chip();
-        let sf_preamble = 15;
+        let sf_preamble = system.config.preamble_sf;
         let preamble_len = system.config.preamble_repeat * sf_preamble * spc;
 
         // プリアンブル部分が存在する
@@ -129,9 +130,13 @@ mod tests {
         let frame = system.encoder.encode_frame().unwrap();
 
         // フレームにはSync Wordが含まれている
-        // Sync Wordは16ビット = 16シンボル（DBPSK, sf=15）
-        let sync_samples_count = 16 * 15 * system.config.samples_per_chip();
-        let preamble_count = system.config.preamble_repeat * 15 * system.config.samples_per_chip();
+        // Sync Wordは sync_word_bits シンボル（DBPSK, sf=SYNC_SPREAD_FACTOR）
+        let sync_samples_count = system.config.sync_word_bits
+            * params::SYNC_SPREAD_FACTOR
+            * system.config.samples_per_chip();
+        let preamble_count = system.config.preamble_repeat
+            * system.config.preamble_sf
+            * system.config.samples_per_chip();
 
         // Sync部分がフレームに含まれている
         assert!(frame.len() > preamble_count + sync_samples_count);

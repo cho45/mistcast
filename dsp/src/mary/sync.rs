@@ -4,6 +4,7 @@
 //! 位相回転やクロックズレに強い同期捕捉を実現する。
 
 // use crate::common::walsh::WalshDictionary; // unused in current file
+use crate::mary::params;
 use crate::DspConfig;
 use num_complex::Complex32;
 
@@ -31,7 +32,7 @@ pub struct ChannelQualityEstimate {
 pub struct MarySyncDetector {
     config: DspConfig,
     preamble_pn: Vec<Complex32>, // Zadoff-Chu SF=13
-    sync_pn: Vec<f32>,           // Walsh[0] SF=15
+    sync_pn: Vec<f32>,           // Walsh[0] SF=SYNC_SPREAD_FACTOR
     sync_symbols: Vec<f32>,      // プリアンブル構造 + SYNC_WORD
     preamble_sf: usize,
     sync_sf: usize,
@@ -43,7 +44,7 @@ pub struct MarySyncDetector {
 }
 
 impl MarySyncDetector {
-    /// デフォルトのしきい値 (ZC SF=13 プリアンブル + Walsh SF=15 同期ワード用)
+    /// デフォルトのしきい値 (ZC SF=13 プリアンブル + Walsh 同期ワード用)
     /// ROC分析に基づく: ノイズ FAR 0.1% → 0.043, FAR 1% → 0.030
     /// ※ただし自己相関サイドローブ（無ノイズ時の信号自身との相関）による誤検出を防ぐため、実用的にはこれより高めに設定する
     pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.10;
@@ -51,7 +52,7 @@ impl MarySyncDetector {
 
     pub fn new(config: DspConfig, threshold_coarse: f32, threshold_fine: f32) -> Self {
         let preamble_sf = config.preamble_sf;
-        let sync_sf = 15;
+        let sync_sf = params::SYNC_SPREAD_FACTOR;
         let spc = config.proc_samples_per_chip().max(1);
 
         let zc = crate::common::zadoff_chu::ZadoffChu::new(preamble_sf, 1);
@@ -863,7 +864,7 @@ mod tests {
     fn test_sync_absolute_timing_accuracy() {
         let config = DspConfig::default_48k();
         let detector = new_detector_default(config.clone());
-        let sym_len = 15 * config.proc_samples_per_chip(); // sf=15
+        let sym_len = config.preamble_sf * config.proc_samples_per_chip();
         let preamble_len = config.preamble_repeat * sym_len;
         let offset = 500;
 
@@ -908,7 +909,7 @@ mod tests {
             // current_offset = n + preamble_repeat * preamble_sym_len + (sync_count - 1) * sync_sym_len
             //                  = n + 2 * 39 + 7 * 45 = n + 78 + 315 = n + 393
             // correlate_sync_symbol の最後のアクセス：
-            // current_offset + sync_sf * spc - 1 = n + 393 + 15*3 - 1 = n + 393 + 45 - 1 = n + 437
+            // current_offset + sync_sf * spc - 1 が最後のアクセス位置
             // したがって required_len = 438 以上が必要
             let preamble_count = config.preamble_repeat;
             let sync_count = unified_len - preamble_count;
@@ -2135,7 +2136,8 @@ mod tests {
 
             let detector = MarySyncDetector::new(config.clone(), 0.15, 0.18);
 
-            let required_len = (sf * config.preamble_repeat + 15 * config.sync_word_bits)
+            let required_len = (sf * config.preamble_repeat
+                + params::SYNC_SPREAD_FACTOR * config.sync_word_bits)
                 * config.proc_samples_per_chip();
             assert!(i_ch.len() > required_len, "i_ch not large enough");
             let mut sync_found = None;

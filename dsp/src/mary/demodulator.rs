@@ -6,8 +6,8 @@
 //! 3. 差分検波: DQPSKの位相差を検出
 //!
 //! # 仕様
-//! - プリアンブル/Sync: Walsh[0]、DBPSK、sf=15
-//! - Payload: Walsh[0-15]、DQPSK、sf=16
+//! - プリアンブル/Sync: Walsh[0]、DBPSK、sf=SYNC_SPREAD_FACTOR
+//! - Payload: Walsh[0-15]、DQPSK、sf=PAYLOAD_SPREAD_FACTOR
 
 use crate::common::walsh::{WalshCorrelator, WalshDictionary};
 use num_complex::Complex32;
@@ -1237,7 +1237,7 @@ mod tests {
         );
 
         // 各シンボルを復調
-        let sf = 16;
+        let sf = crate::mary::params::PAYLOAD_SPREAD_FACTOR;
         let mut results = Vec::new();
 
         for sym_idx in 0..3 {
@@ -1306,7 +1306,7 @@ mod tests {
             &mut chips_q,
         );
 
-        let sf = 16;
+        let sf = crate::mary::params::PAYLOAD_SPREAD_FACTOR;
         let num_symbols = padded_len / 6;
         let mut all_llrs = Vec::with_capacity(padded_len);
 

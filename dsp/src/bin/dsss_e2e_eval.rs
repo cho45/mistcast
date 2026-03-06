@@ -895,7 +895,7 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 }
 
 fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
-    let mut tx_cfg = DspConfig::new(cli.sample_rate);
+    let mut tx_cfg = dsp::mary::params::dsp_config(cli.sample_rate);
     tx_cfg.chip_rate = cli.chip_rate;
     tx_cfg.carrier_freq = cli.carrier_freq;
     tx_cfg.mseq_order = cli.mseq_order;
