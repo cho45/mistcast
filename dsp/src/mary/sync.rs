@@ -399,20 +399,40 @@ impl MarySyncDetector {
 
             for rep in 0..repeat {
                 let rep_start = n + rep * preamble_sym_len;
-                let p = rep_start + k * self.spc + (self.spc / 2);
-                if p >= i_ch.len() || p >= q_ch.len() {
-                    break;
-                }
                 let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
                 let val = self.preamble_pn[k] * Complex32::new(sign, 0.0);
-                let sig = Complex32::new(i_ch[p], q_ch[p]);
-                let mut z = sig * val.conj();
-                if cfo_rad_per_sample != 0.0 {
-                    let t = (rep * preamble_sym_len + k * self.spc) as f32;
-                    let ang = -cfo_rad_per_sample * t;
-                    let (s, c) = ang.sin_cos();
-                    z *= Complex32::new(c, s);
+
+                let mut chip_z = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = rep_start + k * self.spc + s_idx;
+                    if p >= i_ch.len() || p >= q_ch.len() {
+                        break;
+                    }
+                    let sig = Complex32::new(i_ch[p], q_ch[p]);
+                    let mut z = sig * val.conj();
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (rep * preamble_sym_len + k * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        z *= Complex32::new(c, s);
+                    }
+                    chip_z += z;
+                    used_samples += 1;
                 }
+
+                if used_samples == 0 {
+                    break;
+                }
+                
+                // Scale back by sqrt(spc) to preserve absolute power scale,
+                // because adding identical signal samples coherently scales amplitude by `spc`
+                // while noise amplitude scales by `sqrt(spc)`.
+                // However, matching the `1.0 / sqrt(spc)` generation logic means:
+                // Expected z should be sum of spc samples, each of amplitude 1/sqrt(spc).
+                // Sum is spc * (1/sqrt(spc)) = sqrt(spc).
+                // So to get the expected original power, we divide by sqrt(spc).
+                let z = chip_z / (used_samples as f32).sqrt();
 
                 if let Some(prev) = prev_z {
                     // 差分で信号成分を消し、複素ノイズ分散を推定する。
@@ -537,14 +557,26 @@ impl MarySyncDetector {
             };
 
             for chip_idx in 0..sf {
-                let p = symbol_offset + chip_idx * self.spc + (self.spc / 2);
-                let mut y = Complex32::new(i_ch[p], q_ch[p]);
-                if cfo_rad_per_sample != 0.0 {
-                    let t = (sym_base + chip_idx * self.spc) as f32;
-                    let ang = -cfo_rad_per_sample * t;
-                    let (s, c) = ang.sin_cos();
-                    y *= Complex32::new(c, s);
+                let mut chip_y = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = symbol_offset + chip_idx * self.spc + s_idx;
+                    let mut y = Complex32::new(i_ch[p], q_ch[p]);
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        y *= Complex32::new(c, s);
+                    }
+                    chip_y += y;
+                    used_samples += 1;
                 }
+                let y = if used_samples > 0 {
+                    chip_y / (used_samples as f32).sqrt()
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+
                 let code = if is_preamble {
                     self.preamble_pn[chip_idx]
                 } else {
@@ -586,14 +618,26 @@ impl MarySyncDetector {
             };
 
             for chip_idx in 0..sf {
-                let p = symbol_offset + chip_idx * self.spc + (self.spc / 2);
-                let mut y = Complex32::new(i_ch[p], q_ch[p]);
-                if cfo_rad_per_sample != 0.0 {
-                    let t = (sym_base + chip_idx * self.spc) as f32;
-                    let ang = -cfo_rad_per_sample * t;
-                    let (s, c) = ang.sin_cos();
-                    y *= Complex32::new(c, s);
+                let mut chip_y = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = symbol_offset + chip_idx * self.spc + s_idx;
+                    let mut y = Complex32::new(i_ch[p], q_ch[p]);
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        y *= Complex32::new(c, s);
+                    }
+                    chip_y += y;
+                    used_samples += 1;
                 }
+                let y = if used_samples > 0 {
+                    chip_y / (used_samples as f32).sqrt()
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+
                 let code = if is_preamble {
                     self.preamble_pn[chip_idx]
                 } else {
@@ -646,14 +690,26 @@ impl MarySyncDetector {
             };
 
             for chip_idx in 0..sf {
-                let p = symbol_offset + chip_idx * self.spc + (self.spc / 2);
-                let mut y = samples[p];
-                if cfo_rad_per_sample != 0.0 {
-                    let t = (sym_base + chip_idx * self.spc) as f32;
-                    let ang = -cfo_rad_per_sample * t;
-                    let (s, c) = ang.sin_cos();
-                    y *= Complex32::new(c, s);
+                let mut chip_y = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = symbol_offset + chip_idx * self.spc + s_idx;
+                    let mut y = samples[p];
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        y *= Complex32::new(c, s);
+                    }
+                    chip_y += y;
+                    used_samples += 1;
                 }
+                let y = if used_samples > 0 {
+                    chip_y / (used_samples as f32).sqrt()
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+
                 let code = if is_preamble {
                     self.preamble_pn[chip_idx]
                 } else {
@@ -695,14 +751,26 @@ impl MarySyncDetector {
             };
 
             for chip_idx in 0..sf {
-                let p = symbol_offset + chip_idx * self.spc + (self.spc / 2);
-                let mut y = samples[p];
-                if cfo_rad_per_sample != 0.0 {
-                    let t = (sym_base + chip_idx * self.spc) as f32;
-                    let ang = -cfo_rad_per_sample * t;
-                    let (s, c) = ang.sin_cos();
-                    y *= Complex32::new(c, s);
+                let mut chip_y = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = symbol_offset + chip_idx * self.spc + s_idx;
+                    let mut y = samples[p];
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        y *= Complex32::new(c, s);
+                    }
+                    chip_y += y;
+                    used_samples += 1;
                 }
+                let y = if used_samples > 0 {
+                    chip_y / (used_samples as f32).sqrt()
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+
                 let code = if is_preamble {
                     self.preamble_pn[chip_idx]
                 } else {
@@ -1502,13 +1570,16 @@ mod tests {
         let len = repeat * preamble_sym_len + max_delay + spc + 8;
 
         let mut x = vec![Complex32::new(0.0, 0.0); len];
+        let chip_scale = 1.0 / (spc as f32).sqrt();
         for rep in 0..repeat {
             let rep_start = rep * preamble_sym_len;
             let sign = detector.sync_symbols.get(rep).copied().unwrap_or(1.0);
             for k in 0..sf {
-                let p = rep_start + k * spc + (spc / 2);
-                if p < len {
-                    x[p] = detector.preamble_pn[k] * Complex32::new(sign, 0.0);
+                for s_idx in 0..spc {
+                    let p = rep_start + k * spc + s_idx;
+                    if p < len {
+                        x[p] = detector.preamble_pn[k] * Complex32::new(sign * chip_scale, 0.0);
+                    }
                 }
             }
         }
@@ -1569,27 +1640,30 @@ mod tests {
         let len = total_len + max_delay + spc + 8;
 
         let mut x = vec![Complex32::new(0.0, 0.0); len];
+        let chip_scale = 1.0 / (spc as f32).sqrt();
         let mut symbol_offset = 0usize;
         for sym_idx in 0..total_symbols {
             let is_preamble = sym_idx < repeat;
             let sign = detector.sync_symbols[sym_idx];
-            let sign_c = Complex32::new(sign, 0.0);
+            let sign_c = Complex32::new(sign * chip_scale, 0.0);
             let sf = if is_preamble {
                 detector.preamble_sf
             } else {
                 detector.sync_sf
             };
             for chip_idx in 0..sf {
-                let p = symbol_offset + chip_idx * spc + (spc / 2);
-                if p >= len {
-                    break;
+                for s_idx in 0..spc {
+                    let p = symbol_offset + chip_idx * spc + s_idx;
+                    if p >= len {
+                        break;
+                    }
+                    let code = if is_preamble {
+                        detector.preamble_pn[chip_idx]
+                    } else {
+                        Complex32::new(detector.sync_pn[chip_idx], 0.0)
+                    };
+                    x[p] = code * sign_c;
                 }
-                let code = if is_preamble {
-                    detector.preamble_pn[chip_idx]
-                } else {
-                    Complex32::new(detector.sync_pn[chip_idx], 0.0)
-                };
-                x[p] = code * sign_c;
             }
             symbol_offset += if is_preamble {
                 detector.preamble_sym_len
