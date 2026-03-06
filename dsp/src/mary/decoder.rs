@@ -874,7 +874,11 @@ impl Decoder {
 
             let energies: [f32; 16] = on_corrs.map(|c| (c * st.phase_ref.conj()).norm_sqr());
             let walsh_llr = self.demodulator.walsh_llr(&energies, max_energy);
-            let dqpsk_llr = self.demodulator.dqpsk_llr(diff, max_energy);
+            // Decoder経路では prev_phase を単位振幅に正規化して保持しているため、
+            // diff = on_rot * prev* の振幅次元は |on_rot| (≒ sqrt(max_energy)) になる。
+            // よって DQPSK LLR の正規化はエネルギーではなく振幅で行う。
+            let dqpsk_norm = on_rot.norm().max(1e-6);
+            let dqpsk_llr = self.demodulator.dqpsk_llr(diff, dqpsk_norm);
 
             self.packet_llrs_buffer.extend_from_slice(&walsh_llr);
             self.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
@@ -2085,6 +2089,57 @@ mod tests {
         assert!(
             result.recovered,
             "Decoder should recover data under carrier offset (needs tracking)"
+        );
+    }
+
+    /// 回帰テスト:
+    /// Decoder経路では prev_phase が単位振幅に正規化される。
+    /// このとき diff の振幅は |corr| 次元だが、denom に |corr|^2 (max_energy) を使うと
+    /// DQPSK LLR が過小スケールになる。
+    #[test]
+    fn test_decoder_dqpsk_llr_scale_regression_with_normalized_prev_phase() {
+        let mut decoder = make_decoder();
+
+        // Decoder の Sync→Payload ハンドオーバーと同じく prev_phase は正規化される。
+        decoder.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
+
+        // 理想条件: sf=16 の完全相関（振幅16, 位相0）
+        let best_corr = Complex32::new(16.0, 0.0);
+        let phase_ref = Complex32::new(1.0, 0.0);
+        let on_rot = best_corr * phase_ref.conj();
+        let diff = on_rot * decoder.demodulator.prev_phase().conj();
+        let max_energy = best_corr.norm_sqr(); // 256
+
+        // Walsh LLR は理想条件で 1.0 スケールになる。
+        let mut energies = [0.0f32; 16];
+        energies[0] = max_energy;
+        let walsh_llr = decoder.demodulator.walsh_llr(&energies, max_energy);
+        let walsh_avg_abs = walsh_llr.iter().map(|v| v.abs()).sum::<f32>() / walsh_llr.len() as f32;
+        assert!(
+            (walsh_avg_abs - 1.0).abs() < 1e-6,
+            "Walsh LLR scale should be ~1.0 in ideal case, got {}",
+            walsh_avg_abs
+        );
+
+        // 旧式（誤り）: diff は振幅次元なのにエネルギー次元で割ると過小化する。
+        let dqpsk_llr_old = decoder.demodulator.dqpsk_llr(diff, max_energy);
+        let dqpsk_old_avg_abs =
+            dqpsk_llr_old.iter().map(|v| v.abs()).sum::<f32>() / dqpsk_llr_old.len() as f32;
+        assert!(
+            dqpsk_old_avg_abs < 0.2,
+            "Old DQPSK normalization should be too small: avg_abs={} (llr={:?})",
+            dqpsk_old_avg_abs,
+            dqpsk_llr_old
+        );
+
+        // 新式（修正）: diff の振幅次元に合わせて |on_rot| で正規化する。
+        let dqpsk_llr = decoder.demodulator.dqpsk_llr(diff, on_rot.norm());
+        let dqpsk_avg_abs = dqpsk_llr.iter().map(|v| v.abs()).sum::<f32>() / dqpsk_llr.len() as f32;
+        assert!(
+            dqpsk_avg_abs > 0.5,
+            "Fixed DQPSK normalization should keep enough soft information: avg_abs={} (llr={:?})",
+            dqpsk_avg_abs,
+            dqpsk_llr
         );
     }
 
