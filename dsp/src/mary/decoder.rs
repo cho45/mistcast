@@ -1251,13 +1251,17 @@ impl Decoder {
     ) -> Option<[num_complex::Complex32; 1]> {
         let spc = self.config.proc_samples_per_chip().max(1);
 
-        // 境界チェック: 最後にアクセスする可能性のあるインデックスを ceil で見積もる
+        // round() 後の添字がバッファ内に収まるかを事前確認する。
+        // 負値を usize へキャストした際の 0 への飽和を防ぐ。
+        let min_p = symbol_start as f32 + timing_offset + ((spc as f32 - 1.0) / 2.0);
         let max_p = symbol_start as f32
             + ((sf - 1) * spc) as f32
             + timing_offset
             + ((spc as f32 - 1.0) / 2.0);
-        let last_required_idx = max_p.ceil() as usize;
-        if last_required_idx >= self.equalized_buffer.len() {
+        let min_idx = min_p.round() as isize;
+        let max_idx = max_p.round() as isize;
+        let len = self.equalized_buffer.len() as isize;
+        if min_idx < 0 || max_idx >= len {
             return None;
         }
 
@@ -1267,8 +1271,11 @@ impl Decoder {
                 + (chip_idx * spc) as f32
                 + timing_offset
                 + ((spc as f32 - 1.0) / 2.0);
-            let i_idx = p.round() as usize;
-            let sample = self.equalized_buffer[i_idx];
+            let i_idx = p.round() as isize;
+            if i_idx < 0 || i_idx >= len {
+                return None;
+            }
+            let sample = self.equalized_buffer[i_idx as usize];
             let walsh_val = self.demodulator.correlators()[walsh_idx].sequence()[chip_idx] as f32;
             results[0] += sample * walsh_val;
         }
@@ -1285,14 +1292,21 @@ impl Decoder {
         let spc = self.config.proc_samples_per_chip().max(1);
         let sf = 16;
 
-        // 境界チェック: 最後にアクセスする可能性のあるインデックスを ceil で見積もる
+        // round() 後の添字がバッファ内に収まるかを事前確認する。
+        // 負値を usize へキャストした際の 0 への飽和を防ぐ。
+        let min_p = symbol_start as f32
+            + timing_offset
+            + sample_shift
+            + ((spc as f32 - 1.0) / 2.0);
         let max_p = symbol_start as f32
             + ((sf - 1) * spc) as f32
             + timing_offset
             + sample_shift
             + ((spc as f32 - 1.0) / 2.0);
-        let last_required_idx = max_p.ceil() as usize;
-        if last_required_idx >= self.equalized_buffer.len() {
+        let min_idx = min_p.round() as isize;
+        let max_idx = max_p.round() as isize;
+        let len = self.equalized_buffer.len() as isize;
+        if min_idx < 0 || max_idx >= len {
             return None;
         }
 
@@ -1303,8 +1317,11 @@ impl Decoder {
                 + timing_offset
                 + sample_shift
                 + ((spc as f32 - 1.0) / 2.0);
-            let i_idx = p.round() as usize;
-            let sample = self.equalized_buffer[i_idx];
+            let i_idx = p.round() as isize;
+            if i_idx < 0 || i_idx >= len {
+                return None;
+            }
+            let sample = self.equalized_buffer[i_idx as usize];
 
             for (idx, correlator) in self.demodulator.correlators().iter().enumerate() {
                 let walsh_val = correlator.sequence()[chip_idx] as f32;
@@ -2140,6 +2157,33 @@ mod tests {
             "Fixed DQPSK normalization should keep enough soft information: avg_abs={} (llr={:?})",
             dqpsk_avg_abs,
             dqpsk_llr
+        );
+    }
+
+    /// 回帰テスト:
+    /// 負方向の timing/sample shift により先頭側へはみ出す場合は
+    /// 相関計算を行わず None を返すべき。
+    #[test]
+    fn test_despread_symbol_with_timing_rejects_negative_index_underflow() {
+        let mut decoder = make_decoder();
+        let spc = decoder.config.proc_samples_per_chip().max(1);
+
+        // 上側境界には十分余裕を持たせる
+        decoder.equalized_buffer = vec![Complex32::new(0.0, 0.0); 256];
+
+        // 先頭付近のシンボルで、trackingの下限方向へ寄せる
+        let symbol_start = spc;
+        let timing_offset = -(spc as f32) * TRACKING_TIMING_LIMIT_CHIP;
+        let sample_shift = -(spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
+
+        let corrs =
+            decoder.despread_symbol_with_timing(symbol_start, timing_offset, sample_shift);
+        assert!(
+            corrs.is_none(),
+            "despread should reject negative sample index underflow: symbol_start={}, timing_offset={}, sample_shift={}",
+            symbol_start,
+            timing_offset,
+            sample_shift
         );
     }
 
