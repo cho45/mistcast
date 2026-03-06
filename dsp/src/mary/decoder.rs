@@ -819,6 +819,18 @@ impl Decoder {
 
         let (_avg_energy, success, processed) = self.process_packet_core();
         if !processed {
+            // パケット復調中に despread が範囲外になった場合は、
+            // 現在フレームを破棄して再同期へ戻す。
+            self.last_search_idx = 0;
+            self.equalizer_input_offset = 0;
+            self.equalized_buffer.clear();
+            self.state = DecoderState::Searching;
+            self.current_sync = None;
+            self.tracking_state = None;
+            self.packets_processed_in_burst = 0;
+            self.pending_warmup_samples = 0;
+            self.pending_warmup_input_samples = 0;
+            self.remaining_samples_in_frame = 0;
             return false;
         }
         let mut st = self.tracking_state.expect("st exists");
@@ -2372,6 +2384,40 @@ mod tests {
             symbol_start,
             timing_offset,
             sample_shift
+        );
+    }
+
+    /// 再現テスト:
+    /// パケット復調中に despread が underflow で失敗した場合は、
+    /// フレームを破棄して Searching へ戻るべき。
+    ///
+    /// 現状は `processed=false` で `handle_decoding()` が早期returnし、
+    /// state が EqualizedDecoding のまま据え置かれるため、以降の再同期へ進めず固着する。
+    #[test]
+    fn test_decoder_should_fallback_to_searching_on_packet_despread_underflow() {
+        let mut decoder = make_decoder();
+        let spc = decoder.config.proc_samples_per_chip().max(1);
+        let expected_symbols = interleaver_config::mary_symbols();
+        let packet_samples = expected_symbols * PAYLOAD_SPREAD_FACTOR * spc;
+
+        decoder.state = DecoderState::EqualizedDecoding;
+        decoder.config.packets_per_burst = 2;
+        decoder.packets_processed_in_burst = 1;
+        decoder.tracking_state = Some(TrackingState {
+            phase_ref: Complex32::new(1.0, 0.0),
+            phase_rate: 0.0,
+            timing_offset: -(spc as f32) * TRACKING_TIMING_LIMIT_CHIP,
+            timing_rate: 0.0,
+            phase_gate_enabled: false,
+        });
+        decoder.equalized_buffer = vec![Complex32::new(0.0, 0.0); packet_samples + spc + 8];
+
+        let advanced = decoder.handle_decoding();
+        assert!(!advanced, "underflow path should stop current decode step");
+        assert_eq!(
+            decoder.state,
+            DecoderState::Searching,
+            "decoder should fallback to Searching after packet despread underflow"
         );
     }
 
