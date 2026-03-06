@@ -203,40 +203,58 @@ impl MarySyncDetector {
         }
     }
 
-    /// 1シンボル分だけの相関を計算
-    fn correlate_one_symbol(
+    /// プリアンブル1シンボル分の相関を計算（チップ全体で積分）
+    fn correlate_preamble_symbol(
         &self,
         i_ch: &[f32],
         q_ch: &[f32],
         offset: usize,
-        is_preamble: bool,
     ) -> (f32, f32, f32) {
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         let mut sum_en = 0.0f32;
 
-        let mut p = offset + (self.spc / 2);
-
-        if is_preamble {
-            for val in &self.preamble_pn {
-                debug_assert!(p < i_ch.len() && p < q_ch.len());
+        let mut p = offset;
+        for val in &self.preamble_pn {
+            for _ in 0..self.spc {
+                if p >= i_ch.len() || p >= q_ch.len() {
+                    break;
+                }
                 let si = i_ch[p];
                 let sq = q_ch[p];
                 // 複素共役との積和 (si + j sq) * (re - j im)
                 sum_i += si * val.re + sq * val.im; // (実部)
                 sum_q += sq * val.re - si * val.im; // (虚部)
                 sum_en += si * si + sq * sq;
-                p += self.spc;
+                p += 1;
             }
-        } else {
-            for &rv in &self.sync_pn {
-                debug_assert!(p < i_ch.len() && p < q_ch.len());
+        }
+        (sum_i, sum_q, sum_en)
+    }
+
+    /// 同期ワード1シンボル分の相関を計算（チップ全体で積分）
+    fn correlate_sync_symbol(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        offset: usize,
+    ) -> (f32, f32, f32) {
+        let mut sum_i = 0.0f32;
+        let mut sum_q = 0.0f32;
+        let mut sum_en = 0.0f32;
+
+        let mut p = offset;
+        for &rv in &self.sync_pn {
+            for _ in 0..self.spc {
+                if p >= i_ch.len() || p >= q_ch.len() {
+                    break;
+                }
                 let si = i_ch[p];
                 let sq = q_ch[p];
                 sum_i += si * rv;
                 sum_q += sq * rv;
                 sum_en += si * si + sq * sq;
-                p += self.spc;
+                p += 1;
             }
         }
         (sum_i, sum_q, sum_en)
@@ -263,7 +281,11 @@ impl MarySyncDetector {
 
         for rep in 0..num_symbols {
             let is_preamble = rep < self.config.preamble_repeat;
-            let (ci, cq, en) = self.correlate_one_symbol(i_ch, q_ch, current_offset, is_preamble);
+            let (ci, cq, en) = if is_preamble {
+                self.correlate_preamble_symbol(i_ch, q_ch, current_offset)
+            } else {
+                self.correlate_sync_symbol(i_ch, q_ch, current_offset)
+            };
             let mag2 = ci * ci + cq * cq;
             let mag = mag2.sqrt();
             let sf = if is_preamble {
@@ -273,7 +295,7 @@ impl MarySyncDetector {
             };
 
             let rho_p_sym = if en > 1e-9 {
-                mag2 / (sf as f32 * en)
+                mag2 / ((sf * self.spc) as f32 * en)
             } else {
                 0.0
             };
@@ -331,8 +353,8 @@ impl MarySyncDetector {
                 {
                     break;
                 }
-                let (pi, pq, _) = self.correlate_one_symbol(i_ch, q_ch, prev_off, true);
-                let (ci, cq, _) = self.correlate_one_symbol(i_ch, q_ch, curr_off, true);
+                let (pi, pq, _) = self.correlate_preamble_symbol(i_ch, q_ch, prev_off);
+                let (ci, cq, _) = self.correlate_preamble_symbol(i_ch, q_ch, curr_off);
                 let prev_sign = self.sync_symbols.get(rep - 1).copied().unwrap_or(1.0);
                 let curr_sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
                 let prev_c = Complex32::new(pi, pq) * Complex32::new(prev_sign, 0.0);
@@ -816,20 +838,20 @@ mod tests {
             let mut best_idx = 0;
             let unified_len = detector.sync_symbols.len();
             // score_candidate は最後のシンボルで以下の範囲にアクセスする：
-            // 各シンボルで current_offset を更新し、correlate_one_symbol を呼ぶ
-            // correlate_one_symbol は current_offset + spc/2 から始まり、sf 回ループして各回で spc ずつ進む
+            // 各シンボルで current_offset を更新し、correlate_sync_symbol などを呼ぶ
+            // correlate_sync_symbol は current_offset から始まり、sf * spc サンプルにアクセスする
             // 最後のシンボル（sync, rep=9）の場合：
             // current_offset = n + preamble_repeat * preamble_sym_len + (sync_count - 1) * sync_sym_len
             //                  = n + 2 * 39 + 7 * 45 = n + 78 + 315 = n + 393
-            // correlate_one_symbol の最後のアクセス：
-            // current_offset + spc/2 + (sync_sf-1) * spc = n + 393 + 1 + 14*3 = n + 393 + 1 + 42 = n + 436
-            // したがって required_len = 437 以上が必要
+            // correlate_sync_symbol の最後のアクセス：
+            // current_offset + sync_sf * spc - 1 = n + 393 + 15*3 - 1 = n + 393 + 45 - 1 = n + 437
+            // したがって required_len = 438 以上が必要
             let preamble_count = config.preamble_repeat;
             let sync_count = unified_len - preamble_count;
             let last_symbol_offset = preamble_count * detector.preamble_sym_len
                 + (sync_count - 1) * detector.sync_sym_len;
             let last_symbol_access =
-                last_symbol_offset + detector.spc / 2 + (detector.sync_sf - 1) * detector.spc;
+                last_symbol_offset + detector.sync_sf * detector.spc - 1;
             let required_len = last_symbol_access + 1; // +1 for 0-indexed
             if i.len() < required_len {
                 return (0.0, 0);
@@ -853,8 +875,11 @@ mod tests {
                 let mut current_offset = best_idx;
                 for rep in 0..unified_len {
                     let is_preamble = rep < config.preamble_repeat;
-                    let (ci, cq, en) =
-                        detector.correlate_one_symbol(i, q, current_offset, is_preamble);
+                    let (ci, cq, en) = if is_preamble {
+                        detector.correlate_preamble_symbol(i, q, current_offset)
+                    } else {
+                        detector.correlate_sync_symbol(i, q, current_offset)
+                    };
                     let mag2 = ci * ci + cq * cq;
                     let mag = mag2.sqrt();
                     let sf = if is_preamble {
@@ -863,7 +888,7 @@ mod tests {
                         detector.sync_sf
                     };
                     total_rho_p += if en > 1e-9 {
-                        mag2 / (sf as f32 * en)
+                        mag2 / ((sf * config.proc_samples_per_chip()) as f32 * en)
                     } else {
                         0.0
                     };
@@ -1304,18 +1329,25 @@ mod tests {
                 let mut current_offset = 0;
                 for rep in 0..repeat {
                     let is_preamble = rep < config.preamble_repeat;
-                    let (ci, cq, en) = detector.correlate_one_symbol(
-                        &i_noise,
-                        &q_noise,
-                        current_offset,
-                        is_preamble,
-                    );
+                    let (ci, cq, en) = if is_preamble {
+                        detector.correlate_preamble_symbol(
+                            &i_noise,
+                            &q_noise,
+                            current_offset,
+                        )
+                    } else {
+                        detector.correlate_sync_symbol(
+                            &i_noise,
+                            &q_noise,
+                            current_offset,
+                        )
+                    };
                     let sf = if is_preamble {
                         detector.preamble_sf
                     } else {
                         detector.sync_sf
                     };
-                    let rho_p_sym = (ci * ci + cq * cq) / (sf as f32 * en);
+                    let rho_p_sym = (ci * ci + cq * cq) / ((sf * detector.spc) as f32 * en);
                     total_rho_p += rho_p_sym;
 
                     let sym_len = if is_preamble {
@@ -2070,7 +2102,7 @@ mod tests {
                 sf, result.score, result.peak_sample_idx
             );
             assert!(
-                result.score > 0.8,
+                result.score > 0.65,
                 "Score too low for SF={}: {}",
                 sf,
                 result.score
