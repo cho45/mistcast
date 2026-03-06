@@ -131,6 +131,13 @@ enum EvalMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Csv,
+    Json,
+    Table,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum MaryFdeMode {
     On,
     Off,
@@ -316,6 +323,8 @@ struct Cli {
         value_parser = PossibleValuesParser::new(DEFAULT_COLUMNS)
     )]
     columns: Option<Vec<String>>,
+    #[arg(long = "output", value_enum, default_value_t = OutputFormat::Csv)]
+    output: OutputFormat,
 }
 
 impl Cli {
@@ -1118,7 +1127,15 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 }
 
 fn print_header(cli: &Cli) {
-    println!("{}", selected_columns(cli).join(","));
+    let columns = selected_columns(cli);
+    match cli.output {
+        OutputFormat::Csv => println!("{}", columns.join(",")),
+        OutputFormat::Json => {}
+        OutputFormat::Table => {
+            println!("| {} |", columns.join(" | "));
+            println!("| {} |", vec!["---"; columns.len()].join(" | "));
+        }
+    }
 }
 
 fn fmt_opt(v: Option<f32>) -> String {
@@ -1166,12 +1183,102 @@ fn render_column(
     }
 }
 
+fn escape_json(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn escape_table_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
+fn json_value_literal(value: &str) -> String {
+    if value == "NaN" {
+        return "null".to_string();
+    }
+    if let Ok(parsed) = value.parse::<f64>() {
+        if parsed.is_finite() {
+            return value.to_string();
+        }
+    }
+    format!("\"{}\"", escape_json(value))
+}
+
+fn print_awgn_limit(cli: &Cli, phy_limit: Option<f32>) {
+    match cli.output {
+        OutputFormat::Csv => {
+            println!(
+                "# awgn_limit(target_p_complete>={:.2}, phy={}) result={}",
+                cli.target_p_complete,
+                cli.phy.as_str(),
+                phy_limit
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+        }
+        OutputFormat::Json => {
+            let result_sigma = phy_limit
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_else(|| "null".to_string());
+            println!(
+                "{{\"type\":\"awgn_limit\",\"target_p_complete\":{:.6},\"phy\":\"{}\",\"result_sigma\":{}}}",
+                cli.target_p_complete,
+                escape_json(cli.phy.as_str()),
+                result_sigma
+            );
+        }
+        OutputFormat::Table => {
+            println!(
+                "awgn_limit: target_p_complete>={:.2}, phy={}, result={}",
+                cli.target_p_complete,
+                cli.phy.as_str(),
+                phy_limit
+                    .map(|v| format!("{v:.3}"))
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+        }
+    }
+}
+
 fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
-    let cols = selected_columns(cli)
-        .into_iter()
+    let columns = selected_columns(cli);
+    let values = columns
+        .iter()
+        .copied()
         .map(|col| render_column(col, scenario, cli, imp, m))
         .collect::<Vec<_>>();
-    println!("{}", cols.join(","));
+    match cli.output {
+        OutputFormat::Csv => println!("{}", values.join(",")),
+        OutputFormat::Json => {
+            let fields = columns
+                .iter()
+                .copied()
+                .zip(values.iter())
+                .map(|(k, v)| format!("\"{}\":{}", escape_json(k), json_value_literal(v)))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("{{{fields}}}");
+        }
+        OutputFormat::Table => {
+            let cells = values
+                .iter()
+                .map(|v| escape_table_cell(v))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            println!("| {} |", cells);
+        }
+    }
 }
 
 fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
@@ -1216,14 +1323,7 @@ fn run_sweep_awgn(cli: &Cli) {
             phy_limit = Some(sigma);
         }
     }
-    println!(
-        "# awgn_limit(target_p_complete>={:.2}, phy={}) result={}",
-        cli.target_p_complete,
-        cli.phy.as_str(),
-        phy_limit
-            .map(|v| format!("{v:.3}"))
-            .unwrap_or_else(|| "none".to_string()),
-    );
+    print_awgn_limit(cli, phy_limit);
 }
 
 fn run_sweep_ppm(cli: &Cli) {
@@ -1420,6 +1520,7 @@ mod tests {
             mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
             columns: None,
+            output: OutputFormat::Csv,
         };
 
         let res = run_trial_dsss_e2e(&cli.base_impairment(), &cli, cli.seed);
@@ -1467,6 +1568,7 @@ mod tests {
             mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
             columns: None,
+            output: OutputFormat::Csv,
         };
 
         let res = run_trial_mary_e2e(&cli.base_impairment(), &cli, cli.seed);
