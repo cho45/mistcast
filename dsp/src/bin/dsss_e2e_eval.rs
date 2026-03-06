@@ -1,6 +1,6 @@
 use dsp::coding::fec;
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
-use dsp::frame::packet::Packet;
+use dsp::frame::packet::{Packet, PACKET_BYTES};
 use dsp::mary::decoder::{CirNormalizationMode, Decoder as MaryDecoder};
 use dsp::mary::encoder::Encoder as MaryEncoder;
 use dsp::params::PAYLOAD_SIZE;
@@ -1037,32 +1037,30 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let mut fountain_encoder =
         dsp::coding::fountain::FountainEncoder::new(&payload, fountain_params);
 
-    // FECレベルの生BER計測: 送信パケットのFEC符号化ビットを記録し、
-    // デコーダのLlrCallbackでハード判定エラーを集計する。
-    // Fountain符号の誤り訂正をバイパスした、チャネルのBERそのものを見ることができる。
-    let expected_fec_bits: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
-    let callback_pkt_idx: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    // FECレベルの生BER計測: 送信パケットのFEC符号化ビットを seq -> bits で記録し、
+    // 受信側LLRから復元した seq と照合してハード判定エラーを集計する。
+    // 到着順インデックスのズレに起因する過大評価を避ける。
+    let expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let raw_bit_errors_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let raw_bits_compared_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     {
         let efb = Arc::clone(&expected_fec_bits);
-        let cpi = Arc::clone(&callback_pkt_idx);
         let rbe = Arc::clone(&raw_bit_errors_acc);
         let rbc = Arc::clone(&raw_bits_compared_acc);
         decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
-            // ロック順: cpi → efb の順で取得 (デッドロック回避)
-            let idx = {
-                let mut i = cpi.lock().unwrap();
-                let cur = *i;
-                *i += 1;
-                cur
+            // LLR から復号して seq を推定できた場合のみ raw BER を積算する。
+            let decoded_bits = fec::decode_soft(llrs);
+            let p_bits_len = PACKET_BYTES * 8;
+            if decoded_bits.len() < p_bits_len {
+                return;
+            }
+            let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
+            let Ok(packet) = Packet::deserialize(&decoded_bytes) else {
+                return;
             };
-            let expected = {
-                let efb = efb.lock().unwrap();
-                if idx >= efb.len() {
-                    return;
-                }
-                efb[idx].clone()
+            let expected = match efb.lock().unwrap().get(&packet.lt_seq) {
+                Some(bits) => bits.clone(),
+                None => return,
             };
             let compare_len = expected.len().min(llrs.len());
             let mut errors = 0usize;
@@ -1093,7 +1091,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let pkt = Packet::new(seq, k, &fp.data);
                 let bits = fec::bytes_to_bits(&pkt.serialize());
                 let fec_encoded = fec::encode(&bits);
-                expected_fec_bits.lock().unwrap().push(fec_encoded);
+                expected_fec_bits.lock().unwrap().insert(seq, fec_encoded);
             }
             packets.push(fp);
         }
