@@ -222,15 +222,13 @@ impl SyncDetector {
         let mut sum_q = 0.0f32;
         let mut sum_en = 0.0f32;
 
-        let mut p = offset + (self.spc / 2);
-        for &rv in &self.pn {
-            debug_assert!(p < i_ch.len() && p < q_ch.len());
-            let si = i_ch[p];
-            let sq = q_ch[p];
+        for i in 0..self.sym_len {
+            let rv = self.pn[i / self.spc];
+            let si = i_ch[offset + i];
+            let sq = q_ch[offset + i];
             sum_i += si * rv;
             sum_q += sq * rv;
             sum_en += si * si + sq * sq;
-            p += self.spc;
         }
         (sum_i, sum_q, sum_en)
     }
@@ -261,7 +259,7 @@ impl SyncDetector {
             let mag = mag2.sqrt();
 
             let rho_p_sym = if en > 1e-9 {
-                mag2 / (self.sf as f32 * en)
+                mag2 / (self.sym_len as f32 * en)
             } else {
                 0.0
             };
@@ -1176,5 +1174,89 @@ mod tests {
             assert!((detector.sync_symbols[i] - mod_symbols[i]).abs() < 1e-6,
                 "Symbol mismatch at index {}: detector={}, mod={}", i, detector.sync_symbols[i], mod_symbols[i]);
         }
+    }
+
+    #[test]
+    fn test_sync_multiple_detections_in_single_frame() {
+        let config = crate::dsss::params::dsp_config_48k();
+        let detector = new_detector_default(config.clone());
+        let spc = config.proc_samples_per_chip();
+        let sf = config.spread_factor();
+        let sym_len = sf * spc;
+
+        // 1. 1フレーム生成
+        let (i, q) = generate_signal(&config, 0, 1.0);
+
+        // 2. 繰り返し detect を呼び出す
+        let mut search_idx = 0;
+        let mut sync_count = 0;
+        println!("--- Repeated detect on single frame ---");
+        while search_idx < i.len() {
+            let (res, next_idx) = detector.detect(&i, &q, search_idx);
+            if let Some(sync) = res {
+                sync_count += 1;
+                println!("Sync {}: peak_idx={}, score={:.4}", sync_count, sync.peak_sample_idx, sync.score);
+                // Decoder::process_samples と同様に、1シンボル分だけ進めてみる
+                search_idx = sync.peak_sample_idx - (config.preamble_repeat * sym_len) + sym_len;
+            } else {
+                search_idx = next_idx;
+                break;
+            }
+        }
+
+        println!("Total syncs found in 1 frame: {}", sync_count);
+        // 本来は 1回であるべき
+        assert!(sync_count <= 1, "Should not sync multiple times on a single frame, found {}", sync_count);
+    }
+
+    #[test]
+    fn test_sync_zombie_repro_on_payload() {
+        let mut config = crate::dsss::params::dsp_config_48k();
+        let detector = new_detector_default(config.clone());
+        let sf = config.spread_factor();
+        let spc = config.proc_samples_per_chip();
+        let sym_len = sf * spc;
+
+        // 1. 長いペイロードを持つフレームを生成
+        let mut modulator = Modulator::new(config.clone());
+        // 64バイトの適当なデータ (evalツールを模擬)
+        let payload = vec![0x55u8; 64]; 
+        let bits = crate::coding::fec::bytes_to_bits(&payload);
+        let frame_samples = modulator.encode_frame(&bits);
+        
+        // 信号をIQに変換 (テスト用補助関数を模倣)
+        let (i_raw, q_raw) = downconvert(&frame_samples, 0, &config);
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+        let mut resampler_i = Resampler::new_with_cutoff(config.sample_rate as u32, config.proc_sample_rate() as u32, Some(rrc_bw), None);
+        let mut resampler_q = Resampler::new_with_cutoff(config.sample_rate as u32, config.proc_sample_rate() as u32, Some(rrc_bw), None);
+        let mut i_res = Vec::new(); let mut q_res = Vec::new();
+        resampler_i.process(&i_raw, &mut i_res); resampler_q.process(&q_raw, &mut q_res);
+        let mut rrc_i = RrcFilter::from_config(&config); let mut rrc_q = RrcFilter::from_config(&config);
+        let i_ch: Vec<f32> = i_res.iter().map(|&s| rrc_i.process(s)).collect();
+        let q_ch: Vec<f32> = q_res.iter().map(|&s| rrc_q.process(s)).collect();
+
+        // 2. 繰り返し detect を呼び出す (しきい値を 0.6 に引き上げて検証)
+        let mut search_idx = 0;
+        let mut sync_count = 0;
+        let mut detector_robust = new_detector_default(config.clone());
+        detector_robust.threshold_fine = 0.6; // 0.14 から 0.6 に引き上げ
+        
+        println!("--- Zombie Sync Check with Threshold 0.6 ---");
+        while search_idx + (detector_robust.sync_symbols.len() * sym_len) < i_ch.len() {
+            let (res, next_idx) = detector_robust.detect(&i_ch, &q_ch, search_idx);
+            if let Some(sync) = res {
+                sync_count += 1;
+                println!("Sync {}: peak_idx={}, score={:.4}", sync_count, sync.peak_sample_idx, sync.score);
+                // 検出されたら同期ワードの長さ分スキップ (安全な進め方)
+                search_idx = sync.peak_sample_idx;
+            } else {
+                search_idx = next_idx;
+                break;
+            }
+        }
+
+        println!("Total syncs found with threshold 0.6: {}", sync_count);
+        // M系列の力を信じれば、誤同期は 0 になり、真の同期（Sync 1）だけが残るはず
+        assert_eq!(sync_count, 1, "Should sync exactly once with threshold 0.6");
     }
 }
