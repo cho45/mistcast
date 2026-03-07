@@ -365,6 +365,7 @@ impl EqualizationController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mary::sync::MarySyncDetector;
     use crate::DspConfig;
 
     #[test]
@@ -418,6 +419,19 @@ mod tests {
     }
 
     #[test]
+    fn test_select_path_with_auto_disabled_tracks_equalizer_presence() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, true);
+
+        controller.select_path(0.01, 10.0, false);
+        assert!(controller.current_frame_use_fde());
+
+        controller.set_fde_enabled(false, &config);
+        controller.select_path(10.0, 0.01, false);
+        assert!(!controller.current_frame_use_fde());
+    }
+
+    #[test]
     fn test_process_equalizer_with_warmup_drain_passthrough_without_fde() {
         let config = DspConfig::default_48k();
         let mut controller = EqualizationController::new(&config, false);
@@ -450,6 +464,22 @@ mod tests {
     }
 
     #[test]
+    fn test_consume_equalized_prefix_handles_zero_and_overflow() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, false);
+        controller.extend_test_equalized_buffer(&[
+            Complex32::new(1.0, 0.0),
+            Complex32::new(2.0, 0.0),
+        ]);
+
+        assert_eq!(controller.consume_equalized_prefix(0), 0);
+        assert_eq!(controller.equalized_len(), 2);
+
+        assert_eq!(controller.consume_equalized_prefix(10), 2);
+        assert_eq!(controller.equalized_len(), 0);
+    }
+
+    #[test]
     fn test_reset_frame_buffers_clears_buffer_and_offset() {
         let config = DspConfig::default_48k();
         let mut controller = EqualizationController::new(&config, false);
@@ -473,5 +503,105 @@ mod tests {
         assert!(!controller.fde_auto_path_select());
         assert!(!controller.current_frame_use_fde());
         assert!(controller.equalizer_ref().is_none());
+    }
+
+    #[test]
+    fn test_enabling_fde_recreates_equalizer_and_resets_frame_buffers() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, false);
+        controller.extend_test_equalized_buffer(&[Complex32::new(1.0, 0.0)]);
+        controller.advance_input_offset(7);
+
+        controller.set_fde_enabled(true, &config);
+
+        assert!(controller.equalizer_ref().is_some());
+        assert!(controller.current_frame_use_fde());
+        assert_eq!(controller.equalized_len(), 0);
+        assert_eq!(controller.input_offset(), 0);
+    }
+
+    #[test]
+    fn test_reset_rebuilds_default_equalizer_and_clears_frame_state() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, true);
+        controller.extend_test_equalized_buffer(&[Complex32::new(1.0, 0.0)]);
+        controller.advance_input_offset(9);
+
+        let cir_len = config.preamble_sf * config.proc_samples_per_chip();
+        let mut cir = vec![Complex32::new(0.0, 0.0); cir_len];
+        cir[0] = Complex32::new(0.5, 0.0);
+        controller.setup_equalizer(&cir, MmseSettings::new(3.0, 2.0, 0.5, Some(4.0)));
+
+        controller.reset(&config);
+
+        assert!(controller.equalizer_ref().is_some());
+        assert_eq!(controller.equalized_len(), 0);
+        assert_eq!(controller.input_offset(), 0);
+    }
+
+    #[test]
+    fn test_evaluate_known_interval_path_mse_returns_nan_when_bounds_invalid() {
+        let config = DspConfig::default_48k();
+        let detector = MarySyncDetector::new(
+            config.clone(),
+            MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT,
+        );
+        let mut controller = EqualizationController::new(&config, true);
+        let cir_len = config.preamble_sf * config.proc_samples_per_chip();
+        let cir = vec![Complex32::new(1.0, 0.0); cir_len];
+        let i = vec![0.0; 8];
+        let q = vec![0.0; 8];
+
+        let (mse_raw, mse_fde) =
+            controller.evaluate_known_interval_path_mse_with_live_equalizer(KnownIntervalPathMseInput {
+                sync_detector: &detector,
+                cir: &cir,
+                sample_buffer_i: &i,
+                sample_buffer_q: &q,
+                preamble_start_idx: 0,
+                known_end_idx: 16,
+                cir_len,
+                mmse: MmseSettings::default(),
+                cfo_rad_per_sample: 0.0,
+            });
+
+        assert!(mse_raw.is_nan());
+        assert!(mse_fde.is_nan());
+    }
+
+    #[test]
+    fn test_evaluate_known_interval_path_mse_without_equalizer_returns_raw_and_nan_fde() {
+        let config = DspConfig::default_48k();
+        let detector = MarySyncDetector::new(
+            config.clone(),
+            MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT,
+        );
+        let mut controller = EqualizationController::new(&config, false);
+        let cir_len = config.preamble_sf * config.proc_samples_per_chip();
+        let cir = vec![Complex32::new(1.0, 0.0); cir_len];
+        let total = detector.known_interval_len_samples();
+        let i = vec![1.0; total];
+        let q = vec![0.0; total];
+
+        let (mse_raw, mse_fde) =
+            controller.evaluate_known_interval_path_mse_with_live_equalizer(KnownIntervalPathMseInput {
+                sync_detector: &detector,
+                cir: &cir,
+                sample_buffer_i: &i,
+                sample_buffer_q: &q,
+                preamble_start_idx: 0,
+                known_end_idx: total,
+                cir_len,
+                mmse: MmseSettings::default(),
+                cfo_rad_per_sample: 0.0,
+            });
+
+        let expected_raw = detector
+            .known_sequence_mse_iq(&i, &q, 0, 0.0)
+            .expect("non-zero known interval should produce a raw MSE estimate");
+        assert_eq!(mse_raw, expected_raw);
+        assert!(mse_fde.is_nan());
     }
 }
