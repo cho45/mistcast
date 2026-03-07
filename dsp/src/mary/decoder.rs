@@ -589,6 +589,99 @@ impl Decoder {
         true
     }
 
+    fn build_frame_start_plan(&mut self, sync: &crate::mary::sync::SyncResult) -> FrameStartPlan {
+        let spc = self.config.proc_samples_per_chip().max(1);
+        let sf_preamble = self.config.preamble_sf;
+        let sf_sync = SYNC_SPREAD_FACTOR;
+        let sf_payload = PAYLOAD_SPREAD_FACTOR;
+        let repeat = self.config.preamble_repeat;
+        let sync_word_bits = self.config.sync_word_bits;
+        let packets_per_frame = self.config.packets_per_burst;
+        let expected_symbols = interleaver_config::mary_symbols();
+
+        let sync_start = sync.peak_sample_idx.saturating_sub(spc / 2);
+        let preamble_len = sf_preamble * repeat * spc;
+        let preamble_start_idx = sync
+            .peak_sample_idx
+            .saturating_sub(preamble_len)
+            .saturating_sub(spc / 2);
+
+        let cir_len = sf_preamble * spc;
+        self.cir_buffer.fill(Complex32::new(0.0, 0.0));
+        let mut chq = ChannelQualityEstimate::default();
+        {
+            let cir_slice = &mut self.cir_buffer[..cir_len];
+            self.sync_detector.estimate_channel_quality(
+                &self.pipeline.sample_buffer_i,
+                &self.pipeline.sample_buffer_q,
+                preamble_start_idx,
+                cir_slice,
+                &mut chq,
+            );
+            postprocess_cir(
+                cir_slice,
+                self.equalization.cir_normalization_mode(),
+                self.equalization.cir_tap_threshold_alpha(),
+            );
+        }
+
+        let mut mmse = self.equalization.fde_mmse_settings();
+        if let Some(snr_db) = chq.snr_db {
+            mmse.snr_db = snr_db.clamp(-20.0, 40.0);
+        }
+
+        let mut pred_mse_fde = f32::NAN;
+        let mut pred_mse_raw = f32::NAN;
+        if self.equalization.equalizer_ref().is_some() {
+            let known_end_idx = preamble_start_idx + self.sync_detector.known_interval_len_samples();
+            let (mse_raw, mse_fde) = self.equalization.known_interval_path_mse(
+                &self.sync_detector,
+                &self.cir_buffer,
+                &self.pipeline.sample_buffer_i,
+                &self.pipeline.sample_buffer_q,
+                preamble_start_idx,
+                known_end_idx,
+                cir_len,
+                mmse,
+                chq.cfo_rad_per_sample,
+            );
+            pred_mse_fde = mse_fde;
+            pred_mse_raw = mse_raw;
+            self.equalization
+                .select_path(mse_raw, mse_fde, self.equalization.fde_auto_path_select());
+        }
+
+        let use_fde_this_frame = self.equalization.current_frame_use_fde();
+        self.stats.last_pred_mse_fde = pred_mse_fde;
+        self.stats.last_pred_mse_raw = pred_mse_raw;
+        self.stats.last_est_snr_db = chq.snr_db.unwrap_or(f32::NAN);
+        if use_fde_this_frame {
+            self.stats.fde_selected_frames += 1;
+            self.stats.last_path_used = 1;
+        } else {
+            self.stats.raw_selected_frames += 1;
+            self.stats.last_path_used = 0;
+        }
+
+        let overlap = if use_fde_this_frame {
+            self.equalization.equalizer_ref().map_or(0, |eq| eq.overlap_len())
+        } else {
+            0
+        };
+
+        let frame_samples =
+            (sync_word_bits * sf_sync + packets_per_frame * (expected_symbols * sf_payload)) * spc;
+
+        FrameStartPlan {
+            use_fde_this_frame,
+            mmse,
+            cir_len,
+            sync_start,
+            overlap,
+            frame_samples,
+        }
+    }
+
     fn handle_searching(&mut self) -> bool {
         let spc = self.config.proc_samples_per_chip().max(1);
         let sf_preamble = self.config.preamble_sf;
@@ -608,96 +701,8 @@ impl Decoder {
         );
 
         if let Some(s) = sync_opt {
-            let spc = self.config.proc_samples_per_chip().max(1);
-            let sf_preamble = self.config.preamble_sf;
-            let sf_sync = SYNC_SPREAD_FACTOR;
-            let sf_payload = PAYLOAD_SPREAD_FACTOR;
-            let repeat = self.config.preamble_repeat;
-            let sync_word_bits = self.config.sync_word_bits;
-            let packets_per_frame = self.config.packets_per_burst;
-            let expected_symbols = interleaver_config::mary_symbols();
-
-            let sync_start = s.peak_sample_idx.saturating_sub(spc / 2);
-            let preamble_len = sf_preamble * repeat * spc;
-            let preamble_start_idx = s
-                .peak_sample_idx
-                .saturating_sub(preamble_len)
-                .saturating_sub(spc / 2);
-
-            // 1. 新しい CIR を推定 (絶対にバッファを削る前に行う)
-            // ゼロアロケーション: 事前確保バッファ使用
-            let cir_len = sf_preamble * spc;
-            self.cir_buffer.fill(Complex32::new(0.0, 0.0));
-            let mut chq = ChannelQualityEstimate::default();
-            {
-                let cir_slice = &mut self.cir_buffer[..cir_len];
-                self.sync_detector.estimate_channel_quality(
-                    &self.pipeline.sample_buffer_i,
-                    &self.pipeline.sample_buffer_q,
-                    preamble_start_idx,
-                    cir_slice,
-                    &mut chq,
-                );
-                postprocess_cir(
-                    cir_slice,
-                    self.equalization.cir_normalization_mode(),
-                    self.equalization.cir_tap_threshold_alpha(),
-                );
-            }
-            let mut mmse = self.equalization.fde_mmse_settings();
-            if let Some(snr_db) = chq.snr_db {
-                mmse.snr_db = snr_db.clamp(-20.0, 40.0);
-            }
-
-            let mut pred_mse_fde = f32::NAN;
-            let mut pred_mse_raw = f32::NAN;
-            if self.equalization.equalizer_ref().is_some() {
-                let known_end_idx =
-                    preamble_start_idx + self.sync_detector.known_interval_len_samples();
-                let (mse_raw, mse_fde) = self.equalization.known_interval_path_mse(
-                    &self.sync_detector,
-                    &self.cir_buffer,
-                    &self.pipeline.sample_buffer_i,
-                    &self.pipeline.sample_buffer_q,
-                    preamble_start_idx,
-                    known_end_idx,
-                    cir_len,
-                    mmse,
-                    chq.cfo_rad_per_sample,
-                );
-                pred_mse_fde = mse_fde;
-                pred_mse_raw = mse_raw;
-                self.equalization.select_path(mse_raw, mse_fde, self.equalization.fde_auto_path_select());
-            }
-            let use_fde_this_frame = self.equalization.current_frame_use_fde();
-            self.stats.last_pred_mse_fde = pred_mse_fde;
-            self.stats.last_pred_mse_raw = pred_mse_raw;
-            self.stats.last_est_snr_db = chq.snr_db.unwrap_or(f32::NAN);
-            if use_fde_this_frame {
-                self.stats.fde_selected_frames += 1;
-                self.stats.last_path_used = 1;
-            } else {
-                self.stats.raw_selected_frames += 1;
-                self.stats.last_path_used = 0;
-            }
-
-            let overlap = if use_fde_this_frame {
-                self.equalization.equalizer_ref().map_or(0, |eq| eq.overlap_len())
-            } else {
-                0
-            };
-
-            let frame_samples = (sync_word_bits * sf_sync
-                + packets_per_frame * (expected_symbols * sf_payload))
-                * spc;
-            self.begin_frame_from_sync(FrameStartPlan {
-                use_fde_this_frame,
-                mmse,
-                cir_len,
-                sync_start,
-                overlap,
-                frame_samples,
-            });
+            let plan = self.build_frame_start_plan(&s);
+            self.begin_frame_from_sync(plan);
             true
         } else {
             self.search.last_search_idx = next_search_idx;
