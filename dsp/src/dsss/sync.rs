@@ -1021,4 +1021,160 @@ mod tests {
 
         (i_ch, q_ch)
     }
+
+    #[test]
+    fn test_sync_rigorous_center_and_score() {
+        let mut config = crate::dsss::params::dsp_config_48k();
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 16;
+        let detector = new_detector_default(config.clone());
+        let spc = config.proc_samples_per_chip();
+        let sf = config.spread_factor();
+        let sym_len = sf * spc;
+
+        // 1. 信号生成 (オフセット 0)
+        let (i, q) = generate_signal(&config, 0, 1.0);
+
+        // 2. 同期捕捉
+        let (res, _) = detector.detect(&i, &q, 0);
+        let sync = res.expect("Should find sync");
+
+        // 3. スコアの質を確認
+        println!("Ideal sync score: {:.4}", sync.score);
+        assert!(sync.score > 0.8, "Ideal score should be high, got {:.4}", sync.score);
+
+        // 4. タイミングの正確性を 1サンプル単位で検証
+        // 理論的なピーク位置 (center) = (各フィルタの遅延の合計)
+        let mod_ = Modulator::new(config.clone());
+        let rate_ratio = config.sample_rate / config.proc_sample_rate();
+        let mod_delay = (mod_.delay() as f32 / rate_ratio).round() as usize;
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+        let rx_resampler = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+            Some(config.rx_resampler_taps),
+        );
+        let rx_resampler_delay = rx_resampler.delay();
+        let rx_rrc_delay = (config.rrc_num_taps() - 1) / 2;
+        
+        let theoretical_center = mod_delay + rx_resampler_delay + rx_rrc_delay;
+        
+        // detector.detect は内部で preamble_len 分のオフセットを加えて返す
+        let preamble_len = config.preamble_repeat * sym_len;
+        let detected_start = sync.peak_sample_idx - preamble_len;
+
+        println!("Theoretical start center: {}", theoretical_center);
+        println!("Detected start: {}", detected_start);
+        println!("Diff: {}", detected_start as i32 - theoretical_center as i32);
+
+        // --- 5. スコアのオフセット感度を詳細に調査 ---
+        println!("\n--- Score sensitivity around peak ---");
+        for offset in -15..=15 {
+            let n = (theoretical_center as i32 + offset) as usize;
+            let (score, _) = detector.score_candidate(&i, &q, n, detector.sync_symbols.len(), sym_len);
+            println!("Offset: {:>3} | Score: {:.4}", offset, score);
+        }
+
+        // 1サンプル以上のズレがある場合は不具合の可能性が高い
+        assert!((detected_start as i32 - theoretical_center as i32).abs() <= 1,
+            "Timing offset too large: detected={}, theoretical={}", detected_start, theoretical_center);
+    }
+
+    #[test]
+    fn test_sync_noise_score_distribution() {
+        let config = crate::dsss::params::dsp_config_48k();
+        let detector = new_detector_default(config.clone());
+        let sf = config.spread_factor();
+        let spc = config.proc_samples_per_chip();
+        let sym_len = sf * spc;
+        let unified_len = detector.sync_symbols.len();
+        let required_len = sym_len * unified_len;
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let dist = Normal::new(0.0, 0.1).unwrap();
+        
+        let mut max_score = 0.0f32;
+        let trials = 1000;
+        let buf_len = required_len + trials;
+        let i: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
+        let q: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
+
+        for n in 0..trials {
+            let (score, _) = detector.score_candidate(&i, &q, n, unified_len, sym_len);
+            if score > max_score {
+                max_score = score;
+            }
+        }
+
+        println!("Max noise score over {} samples: {:.4}", trials, max_score);
+        println!("Threshold fine: {:.4}", detector.threshold_fine);
+        
+        // もし max_score が threshold_fine に近い、あるいは超えているなら、
+        // 拡散率 SF=15 に対してしきい値が低すぎることを意味する。
+    }
+
+    #[test]
+    fn test_sync_pattern_match_modulator() {
+        let mut config = crate::dsss::params::dsp_config_48k();
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 16;
+        let detector = new_detector_default(config.clone());
+        let sf = config.spread_factor();
+
+        let mut modulator = Modulator::new(config.clone());
+        
+        // 遅延を排してチップレベルで比較するために、内部メソッドを模倣
+        let mut mseq = crate::common::msequence::MSequence::new(config.mseq_order);
+        let pn = mseq.generate(sf);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        
+        // Modulator.encode_frame のロジックを追跡
+        // 1. Preamble
+        for rep in 0..config.preamble_repeat {
+            let sign = if rep == config.preamble_repeat - 1 { -1.0 } else { 1.0 };
+            for &chip in &pn {
+                chips_i.push(sign * chip as f32);
+                chips_q.push(0.0);
+            }
+        }
+        // 2. Sync Word (DBPSK)
+        let sync_bits: Vec<u8> = (0..config.sync_word_bits)
+            .rev()
+            .map(|i| ((crate::params::SYNC_WORD >> i) & 1) as u8)
+            .collect();
+        
+        let mut prev_phase = 0u8;
+        for &bit in &sync_bits {
+            let delta = if bit == 0 { 0 } else { 2 };
+            prev_phase = (prev_phase + delta) & 0x03;
+            let (si, sq) = match prev_phase {
+                0 => (1.0, 0.0),
+                1 => (0.0, 1.0),
+                2 => (-1.0, 0.0),
+                _ => (0.0, -1.0),
+            };
+            for &chip in &pn {
+                chips_i.push(si * chip as f32);
+                chips_q.push(sq * chip as f32);
+            }
+        }
+
+        // detector.sync_symbols と比較
+        println!("Detector sync_symbols: {:?}", detector.sync_symbols);
+        
+        // Modulator の各シンボルの位相（I成分）
+        let mut mod_symbols = Vec::new();
+        for s_idx in 0..(config.preamble_repeat + config.sync_word_bits) {
+            mod_symbols.push(chips_i[s_idx * sf]);
+        }
+        println!("Modulator symbols (I): {:?}", mod_symbols);
+
+        assert_eq!(detector.sync_symbols.len(), mod_symbols.len());
+        for i in 0..detector.sync_symbols.len() {
+            assert!((detector.sync_symbols[i] - mod_symbols[i]).abs() < 1e-6,
+                "Symbol mismatch at index {}: detector={}, mod={}", i, detector.sync_symbols[i], mod_symbols[i]);
+        }
+    }
 }
