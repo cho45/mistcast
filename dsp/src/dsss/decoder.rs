@@ -42,6 +42,7 @@ const LLR_TIMING_ERR_ERASE: f32 = 0.45;
 
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
+    pub synced_frames: usize,
     pub received_packets: usize,
     pub needed_packets: usize,
     pub rank_packets: usize,
@@ -89,6 +90,7 @@ pub struct Decoder {
     pub stats_sync_calls: usize,
     pub stats_sync_time: Duration,
     pub stats_total_samples: usize,
+    pub stats_synced_frames: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +176,7 @@ impl Decoder {
             stats_sync_calls: 0,
             stats_sync_time: Duration::ZERO,
             stats_total_samples: 0,
+            stats_synced_frames: 0,
         }
     }
 
@@ -250,6 +253,7 @@ impl Decoder {
                 }
 
                 if let Some(s) = sync_opt {
+                    self.stats_synced_frames += 1;
                     self.current_sync = Some(s.clone());
                     s
                 } else {
@@ -572,6 +576,7 @@ impl Decoder {
         let needed = self.fountain_decoder.needed_count();
         let rank = self.fountain_decoder.rank();
         DecodeProgress {
+            synced_frames: self.stats_synced_frames,
             received_packets: received,
             needed_packets: needed,
             rank_packets: rank,
@@ -732,6 +737,10 @@ impl Decoder {
         self.crc_error_packets = 0;
         self.parse_error_packets = 0;
         self.invalid_neighbor_packets = 0;
+        self.stats_sync_calls = 0;
+        self.stats_sync_time = Duration::ZERO;
+        self.stats_total_samples = 0;
+        self.stats_synced_frames = 0;
         self.rebuild_fountain_decoder(self.fountain_decoder.params().k);
     }
 

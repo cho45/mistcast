@@ -119,6 +119,7 @@ impl DspConfig {
 
 #[wasm_bindgen]
 pub struct WasmDsssDecodeProgress {
+    pub synced_frames: usize,
     pub received_packets: usize,
     pub needed_packets: usize,
     pub rank_packets: usize,
@@ -167,6 +168,7 @@ impl WasmDsssDecoder {
     pub fn process_samples(&mut self, samples: &[f32]) -> WasmDsssDecodeProgress {
         let progress = self.inner.process_samples(samples);
         WasmDsssDecodeProgress {
+            synced_frames: progress.synced_frames,
             received_packets: progress.received_packets,
             needed_packets: progress.needed_packets,
             rank_packets: progress.rank_packets,
