@@ -3,6 +3,8 @@
 Mistcastは、ブラウザ上で動作する**音響データ通信（Data-over-Sound）ウェブアプリケーション**です。
 スピーカーとマイクを使用し、音響空間を介したデータ伝送を実装しています。
 
+https://github.com/user-attachments/assets/9e2b40ab-bfc8-4fa5-8e5b-f9ce8e6f0eb9
+
 ## 特徴
 
 - **ハイブリッド変調アーキテクチャ**: 安定性重視の DSSS (Slow) モードと、高速・高密度な M-ARY (Fast) モードを選択可能。
