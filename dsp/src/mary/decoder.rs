@@ -21,7 +21,7 @@ use crate::mary::packet_decoder::{
 };
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
 use crate::mary::signal_pipeline::SignalPipeline;
-use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
+use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector};
 use crate::mary::tracking::{self, TrackingState};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
@@ -42,8 +42,48 @@ enum DecoderState {
     EqualizedDecoding,
 }
 
+#[derive(Default)]
+struct SearchState {
+    last_search_idx: usize,
+}
+
+struct FrameSession {
+    pending_warmup_samples: usize,
+    pending_warmup_input_samples: usize,
+    remaining_samples_in_frame: isize,
+}
+
+impl FrameSession {
+    fn new(warmup_samples: usize, frame_samples: usize) -> Self {
+        Self {
+            pending_warmup_samples: warmup_samples,
+            pending_warmup_input_samples: warmup_samples,
+            remaining_samples_in_frame: frame_samples as isize,
+        }
+    }
+
+    fn input_fully_consumed(&self) -> bool {
+        self.pending_warmup_input_samples == 0 && self.remaining_samples_in_frame <= 0
+    }
+
+    fn raw_drain_limit(&self) -> usize {
+        self.pending_warmup_input_samples + self.remaining_samples_in_frame.max(0) as usize
+    }
+
+    fn consume_raw_input(&mut self, drained_raw_samples: usize) {
+        let warmup_drain = drained_raw_samples.min(self.pending_warmup_input_samples);
+        self.pending_warmup_input_samples -= warmup_drain;
+        let payload_drain = drained_raw_samples - warmup_drain;
+        self.remaining_samples_in_frame -= payload_drain as isize;
+    }
+
+    fn consume_equalized_warmup(&mut self, added_samples: usize) {
+        let warmup_to_drain = added_samples.min(self.pending_warmup_samples);
+        self.pending_warmup_samples -= warmup_to_drain;
+    }
+}
+
 struct FrameStartPlan {
-    sync: SyncResult,
     use_fde_this_frame: bool,
     mmse: MmseSettings,
     cir_len: usize,
@@ -64,14 +104,11 @@ pub struct Decoder {
 
     // 同期・追従状態
     state: DecoderState,
-    last_search_idx: usize,
-    current_sync: Option<SyncResult>,
+    search: SearchState,
+    frame_session: Option<FrameSession>,
     tracking_state: Option<TrackingState>,
     packets_processed_in_burst: usize,
     consecutive_crc_errors: usize,
-    pending_warmup_samples: usize,
-    pending_warmup_input_samples: usize,
-    remaining_samples_in_frame: isize,
     viterbi_list_size: usize,
     llr_erasure_second_pass_enabled: bool,
     llr_erasure_quantile: f32,
@@ -108,14 +145,11 @@ impl Decoder {
             sync_detector: MarySyncDetector::new(dsp_config.clone(), tc, tf),
             config: dsp_config.clone(),
             state: DecoderState::Searching,
-            last_search_idx: 0,
-            current_sync: None,
+            search: SearchState::default(),
+            frame_session: None,
             tracking_state: None,
             packets_processed_in_burst: 0,
             consecutive_crc_errors: 0,
-            pending_warmup_samples: 0,
-            pending_warmup_input_samples: 0,
-            remaining_samples_in_frame: 0,
             viterbi_list_size: 1,
             llr_erasure_second_pass_enabled: false,
             llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
@@ -219,7 +253,9 @@ impl Decoder {
     }
 
     fn frame_input_fully_consumed(&self) -> bool {
-        self.pending_warmup_input_samples == 0 && self.remaining_samples_in_frame <= 0
+        self.frame_session
+            .as_ref()
+            .is_some_and(FrameSession::input_fully_consumed)
     }
 
     fn frame_is_complete(&self, max_packets: usize) -> bool {
@@ -227,26 +263,21 @@ impl Decoder {
     }
 
     fn transition_to_searching_after_frame_end(&mut self) {
-        self.last_search_idx = 0;
+        self.search.last_search_idx = 0;
         self.equalization.set_equalizer_input_offset(0);
         self.equalization.clear_equalized_buffer();
         self.state = DecoderState::Searching;
-        self.current_sync = None;
-        self.pending_warmup_samples = 0;
-        self.pending_warmup_input_samples = 0;
+        self.frame_session = None;
     }
 
     fn abort_current_frame(&mut self) {
-        self.last_search_idx = 0;
+        self.search.last_search_idx = 0;
         self.equalization.set_equalizer_input_offset(0);
         self.equalization.clear_equalized_buffer();
         self.state = DecoderState::Searching;
-        self.current_sync = None;
+        self.frame_session = None;
         self.tracking_state = None;
         self.packets_processed_in_burst = 0;
-        self.pending_warmup_samples = 0;
-        self.pending_warmup_input_samples = 0;
-        self.remaining_samples_in_frame = 0;
     }
 
     fn trim_search_buffers_if_needed(&mut self) {
@@ -256,7 +287,7 @@ impl Decoder {
             let drain_len = self.pipeline.sample_buffer_i.len() - keep_len;
             self.pipeline.sample_buffer_i.drain(0..drain_len);
             self.pipeline.sample_buffer_q.drain(0..drain_len);
-            self.last_search_idx = self.last_search_idx.saturating_sub(drain_len);
+            self.search.last_search_idx = self.search.last_search_idx.saturating_sub(drain_len);
             let new_offset = self
                 .equalization
                 .equalizer_input_offset()
@@ -267,7 +298,6 @@ impl Decoder {
 
     fn begin_frame_from_sync(&mut self, plan: FrameStartPlan) {
         let FrameStartPlan {
-            sync,
             use_fde_this_frame,
             mmse,
             cir_len,
@@ -283,7 +313,7 @@ impl Decoder {
         }
 
         self.equalization.clear_equalized_buffer();
-        self.last_search_idx = 0;
+        self.search.last_search_idx = 0;
         self.equalization.set_equalizer_input_offset(0);
 
         if use_fde_this_frame {
@@ -296,14 +326,12 @@ impl Decoder {
             .min(self.pipeline.sample_buffer_i.len());
         self.fill_complex_buffer_from_pipeline(0, warmup_real_len);
 
-        self.pending_warmup_samples = warmup_real_len;
-        self.pending_warmup_input_samples = warmup_real_len;
-        self.remaining_samples_in_frame = frame_samples as isize;
+        self.frame_session = Some(FrameSession::new(warmup_real_len, frame_samples));
 
         self.equalize_from_complex_buffer(warmup_real_len, warmup_real_len);
 
-        self.current_sync = Some(sync);
         self.packets_processed_in_burst = 0;
+        self.consecutive_crc_errors = 0;
         self.tracking_state = Some(TrackingState {
             phase_ref: Complex32::new(1.0, 0.0),
             phase_rate: 0.0,
@@ -496,14 +524,14 @@ impl Decoder {
         let sync_word_bits = self.config.sync_word_bits;
 
         let required_len = (sf_preamble * repeat + sf_sync * sync_word_bits) * spc;
-        if self.pipeline.sample_buffer_i.len() < self.last_search_idx + required_len {
+        if self.pipeline.sample_buffer_i.len() < self.search.last_search_idx + required_len {
             return false;
         }
 
         let (sync_opt, next_search_idx) = self.sync_detector.detect(
             &self.pipeline.sample_buffer_i,
             &self.pipeline.sample_buffer_q,
-            self.last_search_idx,
+            self.search.last_search_idx,
         );
 
         if let Some(s) = sync_opt {
@@ -590,7 +618,6 @@ impl Decoder {
                 + packets_per_frame * (expected_symbols * sf_payload))
                 * spc;
             self.begin_frame_from_sync(FrameStartPlan {
-                sync: s,
                 use_fde_this_frame,
                 mmse,
                 cir_len,
@@ -600,7 +627,7 @@ impl Decoder {
             });
             true
         } else {
-            self.last_search_idx = next_search_idx;
+            self.search.last_search_idx = next_search_idx;
             self.trim_search_buffers_if_needed();
             false
         }
@@ -756,8 +783,10 @@ impl Decoder {
 
         // B. 生バッファの物理削除 (投入時に実行)
         // フレーム境界を壊さないよう、ウォームアップ + remaining を上限にする。
-        let limit =
-            self.pending_warmup_input_samples + self.remaining_samples_in_frame.max(0) as usize;
+        let limit = self
+            .frame_session
+            .as_ref()
+            .map_or(0, FrameSession::raw_drain_limit);
         let to_drain_raw = raw_consumed.min(limit).min(self.pipeline.sample_buffer_i.len());
         if to_drain_raw > 0 {
             self.pipeline.sample_buffer_i.drain(0..to_drain_raw);
@@ -765,25 +794,26 @@ impl Decoder {
             let new_offset = self.equalization.equalizer_input_offset().saturating_sub(to_drain_raw);
             self.equalization.set_equalizer_input_offset(new_offset);
 
-            let warmup_drain = to_drain_raw.min(self.pending_warmup_input_samples);
-            self.pending_warmup_input_samples -= warmup_drain;
-            let payload_drain = to_drain_raw - warmup_drain;
-            self.remaining_samples_in_frame -= payload_drain as isize;
+            if let Some(frame_session) = self.frame_session.as_mut() {
+                frame_session.consume_raw_input(to_drain_raw);
+            }
         }
 
         // C. 等化実行
-        let added = self.equalization.process_equalizer_with_warmup_drain(
-            input,
-            self.pending_warmup_samples,
-        );
+        let pending_warmup_samples = self
+            .frame_session
+            .as_ref()
+            .map_or(0, |frame_session| frame_session.pending_warmup_samples);
+        let added = self
+            .equalization
+            .process_equalizer_with_warmup_drain(input, pending_warmup_samples);
         if added == 0 {
             return;
         }
 
         // D. ウォームアップ由来の中間状態を先頭から捨てる
-        let warmup_to_drain = added.min(self.pending_warmup_samples);
-        if warmup_to_drain > 0 {
-            self.pending_warmup_samples -= warmup_to_drain;
+        if let Some(frame_session) = self.frame_session.as_mut() {
+            frame_session.consume_equalized_warmup(added);
         }
     }
 
@@ -857,14 +887,11 @@ impl Decoder {
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
         self.state = DecoderState::Searching;
-        self.last_search_idx = 0;
-        self.current_sync = None;
+        self.search = SearchState::default();
+        self.frame_session = None;
         self.tracking_state = None;
         self.packets_processed_in_burst = 0;
         self.consecutive_crc_errors = 0;
-        self.pending_warmup_samples = 0;
-        self.pending_warmup_input_samples = 0;
-        self.remaining_samples_in_frame = 0;
         self.stats.reset();
         self.packet_decode_buffers.clear();
     }
