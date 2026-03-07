@@ -477,10 +477,8 @@ mod tests {
     fn test_consume_equalized_prefix_handles_zero_and_overflow() {
         let config = DspConfig::default_48k();
         let mut controller = EqualizationController::new(&config, false);
-        controller.extend_test_equalized_buffer(&[
-            Complex32::new(1.0, 0.0),
-            Complex32::new(2.0, 0.0),
-        ]);
+        controller
+            .extend_test_equalized_buffer(&[Complex32::new(1.0, 0.0), Complex32::new(2.0, 0.0)]);
 
         assert_eq!(controller.consume_equalized_prefix(0), 0);
         assert_eq!(controller.equalized_len(), 2);

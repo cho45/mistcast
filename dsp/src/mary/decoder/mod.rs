@@ -2100,16 +2100,12 @@ mod tests {
             "expected at least one detected frame observation"
         );
         assert!(
-            observations
-                .iter()
-                .all(|(_, raw, _, _)| raw.is_finite()),
+            observations.iter().all(|(_, raw, _, _)| raw.is_finite()),
             "expected raw replay MSE to stay finite: {:?}",
             observations
         );
         assert!(
-            observations
-                .iter()
-                .all(|(_, _, fde, _)| fde.is_finite()),
+            observations.iter().all(|(_, _, fde, _)| fde.is_finite()),
             "expected FDE replay MSE to stay finite: {:?}",
             observations
         );

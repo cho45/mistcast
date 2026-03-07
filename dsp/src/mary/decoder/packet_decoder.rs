@@ -635,7 +635,10 @@ mod tests {
 
         let mut crc_bits = valid_bits.clone();
         crc_bits[5] ^= 1;
-        assert!(matches!(decode_packet(&crc_bits), Err(PacketDecodeError::Crc)));
+        assert!(matches!(
+            decode_packet(&crc_bits),
+            Err(PacketDecodeError::Crc)
+        ));
 
         let mut parse_bits = valid_bits.clone();
         parse_bits.extend_from_slice(&[0; 8]);
@@ -752,8 +755,7 @@ mod tests {
             },
             &options,
             |symbol_start, _timing_offset, _sample_shift| {
-                let sym_idx =
-                    (symbol_start - options.spc) / (PAYLOAD_SPREAD_FACTOR * options.spc);
+                let sym_idx = (symbol_start - options.spc) / (PAYLOAD_SPREAD_FACTOR * options.spc);
                 symbol_corrs.get(sym_idx).copied()
             },
         );
@@ -764,7 +766,10 @@ mod tests {
             stats.phase_gate_on_symbols + stats.phase_gate_off_symbols,
             interleaver_config::mary_symbols()
         );
-        assert_eq!(stats.phase_err_abs_count, interleaver_config::mary_symbols());
+        assert_eq!(
+            stats.phase_err_abs_count,
+            interleaver_config::mary_symbols()
+        );
     }
 
     #[test]
@@ -777,13 +782,7 @@ mod tests {
         let mut llr_callback: Option<LlrCallback> = None;
         let options = default_options();
 
-        let decoded = decode_llrs(
-            &llrs,
-            &mut stats,
-            &mut buffers,
-            &mut llr_callback,
-            &options,
-        );
+        let decoded = decode_llrs(&llrs, &mut stats, &mut buffers, &mut llr_callback, &options);
 
         assert!(decoded.is_none());
         assert_eq!(stats.crc_error_packets, 0);
