@@ -8,6 +8,7 @@
 //! 5. Fountainデコーディング
 
 use crate::coding::fountain::{FountainDecoder, FountainParams};
+use crate::common::equalization::MmseSettings;
 use crate::common::walsh::WalshCorrelator;
 use crate::frame::packet::Packet;
 use crate::mary::decoder_stats::DecoderStats;
@@ -39,6 +40,16 @@ pub use crate::mary::equalization::CirNormalizationMode;
 enum DecoderState {
     Searching,
     EqualizedDecoding,
+}
+
+struct FrameStartPlan {
+    sync: SyncResult,
+    use_fde_this_frame: bool,
+    mmse: MmseSettings,
+    cir_len: usize,
+    sync_start: usize,
+    overlap: usize,
+    frame_samples: usize,
 }
 
 /// MaryDQPSKデコーダ
@@ -187,6 +198,296 @@ impl Decoder {
         self.progress()
     }
 
+    fn fill_complex_buffer_from_pipeline(&mut self, start: usize, len: usize) {
+        self.complex_buffer.clear();
+        if self.complex_buffer.capacity() < len {
+            self.complex_buffer.reserve(len);
+        }
+        unsafe {
+            self.complex_buffer.set_len(len);
+        }
+        for (dst_idx, src_idx) in (start..start + len).enumerate() {
+            self.complex_buffer[dst_idx] = Complex32::new(
+                self.pipeline.sample_buffer_i[src_idx],
+                self.pipeline.sample_buffer_q[src_idx],
+            );
+        }
+    }
+
+    fn packets_decoded_in_burst(&self) -> usize {
+        self.packets_processed_in_burst.saturating_sub(1)
+    }
+
+    fn frame_input_fully_consumed(&self) -> bool {
+        self.pending_warmup_input_samples == 0 && self.remaining_samples_in_frame <= 0
+    }
+
+    fn frame_is_complete(&self, max_packets: usize) -> bool {
+        self.frame_input_fully_consumed() && self.packets_decoded_in_burst() >= max_packets
+    }
+
+    fn transition_to_searching_after_frame_end(&mut self) {
+        self.last_search_idx = 0;
+        self.equalization.set_equalizer_input_offset(0);
+        self.equalization.clear_equalized_buffer();
+        self.state = DecoderState::Searching;
+        self.current_sync = None;
+        self.pending_warmup_samples = 0;
+        self.pending_warmup_input_samples = 0;
+    }
+
+    fn abort_current_frame(&mut self) {
+        self.last_search_idx = 0;
+        self.equalization.set_equalizer_input_offset(0);
+        self.equalization.clear_equalized_buffer();
+        self.state = DecoderState::Searching;
+        self.current_sync = None;
+        self.tracking_state = None;
+        self.packets_processed_in_burst = 0;
+        self.pending_warmup_samples = 0;
+        self.pending_warmup_input_samples = 0;
+        self.remaining_samples_in_frame = 0;
+    }
+
+    fn trim_search_buffers_if_needed(&mut self) {
+        let max_buffer_len = 100_000;
+        let keep_len = 50_000;
+        if self.pipeline.sample_buffer_i.len() > max_buffer_len {
+            let drain_len = self.pipeline.sample_buffer_i.len() - keep_len;
+            self.pipeline.sample_buffer_i.drain(0..drain_len);
+            self.pipeline.sample_buffer_q.drain(0..drain_len);
+            self.last_search_idx = self.last_search_idx.saturating_sub(drain_len);
+            let new_offset = self
+                .equalization
+                .equalizer_input_offset()
+                .saturating_sub(drain_len);
+            self.equalization.set_equalizer_input_offset(new_offset);
+        }
+    }
+
+    fn begin_frame_from_sync(&mut self, plan: FrameStartPlan) {
+        let FrameStartPlan {
+            sync,
+            use_fde_this_frame,
+            mmse,
+            cir_len,
+            sync_start,
+            overlap,
+            frame_samples,
+        } = plan;
+
+        let initial_drain_len = sync_start.saturating_sub(overlap);
+        if initial_drain_len > 0 {
+            self.pipeline.sample_buffer_i.drain(0..initial_drain_len);
+            self.pipeline.sample_buffer_q.drain(0..initial_drain_len);
+        }
+
+        self.equalization.clear_equalized_buffer();
+        self.last_search_idx = 0;
+        self.equalization.set_equalizer_input_offset(0);
+
+        if use_fde_this_frame {
+            self.equalization
+                .setup_equalizer(&self.cir_buffer[..cir_len], mmse);
+        }
+
+        let warmup_real_len = sync_start
+            .saturating_sub(initial_drain_len)
+            .min(self.pipeline.sample_buffer_i.len());
+        self.fill_complex_buffer_from_pipeline(0, warmup_real_len);
+
+        self.pending_warmup_samples = warmup_real_len;
+        self.pending_warmup_input_samples = warmup_real_len;
+        self.remaining_samples_in_frame = frame_samples as isize;
+
+        self.equalize_from_complex_buffer(warmup_real_len, warmup_real_len);
+
+        self.current_sync = Some(sync);
+        self.packets_processed_in_burst = 0;
+        self.tracking_state = Some(TrackingState {
+            phase_ref: Complex32::new(1.0, 0.0),
+            phase_rate: 0.0,
+            timing_offset: 0.0,
+            timing_rate: 0.0,
+            phase_gate_enabled: false,
+        });
+        self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
+        self.state = DecoderState::EqualizedDecoding;
+    }
+
+    fn feed_unprocessed_samples_to_equalizer(&mut self) -> usize {
+        let start = self.equalization.equalizer_input_offset();
+        let to_process = self.pipeline.sample_buffer_i.len().saturating_sub(start);
+        if to_process == 0 {
+            return 0;
+        }
+
+        self.fill_complex_buffer_from_pipeline(start, to_process);
+        self.equalize_from_complex_buffer(to_process, to_process);
+        to_process
+    }
+
+    fn perform_sync_handoff_if_needed(&mut self, spc: usize, sync_word_bits: usize) -> bool {
+        if self.packets_processed_in_burst != 0 {
+            return true;
+        }
+
+        let required_sync_samples = sync_word_bits * SYNC_SPREAD_FACTOR * spc;
+        if self.equalization.equalized_buffer().len() < required_sync_samples {
+            return false;
+        }
+
+        let repeat = self.config.preamble_repeat;
+        let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
+
+        let mut best_timing_offset = 0usize;
+        let mut best_sync_score = f32::NEG_INFINITY;
+        for t_offset in 0..spc {
+            let mut total_energy = 0.0f32;
+            let mut used = 0usize;
+            for i in 0..sync_word_bits {
+                let symbol_start = t_offset + i * SYNC_SPREAD_FACTOR * spc;
+                let corr = if let Some(c) =
+                    self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
+                {
+                    c
+                } else {
+                    break;
+                };
+                total_energy += corr[0].norm_sqr();
+                used += 1;
+            }
+            if used == sync_word_bits {
+                let score = total_energy / used as f32;
+                if score > best_sync_score {
+                    best_sync_score = score;
+                    best_timing_offset = t_offset;
+                }
+            }
+        }
+        if best_timing_offset > 0 {
+            self.equalization.drain_equalized_buffer(best_timing_offset);
+        }
+
+        let mut st = self.tracking_state.expect("st must exist");
+
+        self.complex_buffer.clear();
+        if self.complex_buffer.capacity() < sync_word_bits {
+            self.complex_buffer.reserve(sync_word_bits);
+        }
+        let mut prev_y: Option<Complex32> = None;
+        let mut sum_diff = Complex32::new(0.0, 0.0);
+        let mut sw = 0.0f32;
+        let mut sx = 0.0f32;
+        let mut sy = 0.0f32;
+        let mut sxx = 0.0f32;
+        let mut sxy = 0.0f32;
+        for i in 0..sync_word_bits {
+            let symbol_start = i * SYNC_SPREAD_FACTOR * spc;
+            let on = if let Some(c) =
+                self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
+            {
+                c[0]
+            } else {
+                break;
+            };
+
+            let expected_sign = self.sync_detector.sync_symbols()[repeat + i];
+            let y = on * Complex32::new(expected_sign, 0.0);
+            if let Some(prev) = prev_y {
+                sum_diff += y * prev.conj();
+            }
+            prev_y = Some(y);
+            self.complex_buffer.push(y);
+
+            let early =
+                self.despread_symbol_inner(symbol_start, -early_late_delta, SYNC_SPREAD_FACTOR, 0);
+            let late =
+                self.despread_symbol_inner(symbol_start, early_late_delta, SYNC_SPREAD_FACTOR, 0);
+            if let (Some(e), Some(l)) = (early, late) {
+                let err = tracking::timing_error_from_early_late(e[0].norm(), l[0].norm());
+                let w = on.norm_sqr().max(1e-6);
+                let x = i as f32;
+                sw += w;
+                sx += w * x;
+                sy += w * err;
+                sxx += w * x * x;
+                sxy += w * x * err;
+            }
+        }
+
+        if self.complex_buffer.is_empty() {
+            return false;
+        }
+
+        let omega_sync = if sum_diff.norm_sqr() > 1e-12 {
+            sum_diff.arg()
+        } else {
+            0.0
+        };
+
+        let mut sum_base = Complex32::new(0.0, 0.0);
+        for (i, &y) in self.complex_buffer.iter().enumerate() {
+            let ang = -omega_sync * i as f32;
+            let (s, c) = ang.sin_cos();
+            sum_base += y * Complex32::new(c, s);
+        }
+        let phi0 = if sum_base.norm_sqr() > 1e-12 {
+            sum_base.arg()
+        } else {
+            0.0
+        };
+
+        let sync_to_payload_scale = PAYLOAD_SPREAD_FACTOR as f32 / SYNC_SPREAD_FACTOR as f32;
+        st.phase_rate = (omega_sync * sync_to_payload_scale).clamp(
+            -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+            tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+        );
+
+        let last_sync_idx = (self.complex_buffer.len() - 1) as f32;
+        let phi_last = phi0 + omega_sync * last_sync_idx;
+        let phi_payload0 = phi_last + st.phase_rate;
+        let (s_ref, c_ref) = phi_payload0.sin_cos();
+        st.phase_ref = Complex32::new(c_ref, s_ref);
+
+        if let Some(&last_y) = self.complex_buffer.last() {
+            let last_sign = self.sync_detector.sync_symbols()[repeat + self.complex_buffer.len() - 1];
+            let last_corr = last_y * Complex32::new(last_sign, 0.0);
+            let (s_last, c_last) = (-phi_last).sin_cos();
+            let prev = last_corr * Complex32::new(c_last, s_last);
+            let norm = prev.norm().max(1e-6);
+            self.demodulator.set_prev_phase(prev / norm);
+        } else {
+            self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
+        }
+
+        let timing_limit = spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
+        let timing_rate_limit = spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
+        if sw > 1e-9 {
+            let denom = sw * sxx - sx * sx;
+            if denom.abs() > 1e-9 {
+                let slope = (sw * sxy - sx * sy) / denom;
+                let intercept = (sy - slope * sx) / sw;
+                st.timing_offset = (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
+                st.timing_rate = (slope * early_late_delta * sync_to_payload_scale)
+                    .clamp(-timing_rate_limit, timing_rate_limit);
+            } else {
+                let intercept = sy / sw;
+                st.timing_offset = (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
+                st.timing_rate = 0.0;
+            }
+        } else {
+            st.timing_offset = 0.0;
+            st.timing_rate = 0.0;
+        }
+
+        self.tracking_state = Some(st);
+        self.packets_processed_in_burst = 1;
+        self.equalization
+            .drain_equalized_buffer(required_sync_samples.saturating_sub(spc));
+        true
+    }
+
     fn handle_searching(&mut self) -> bool {
         let spc = self.config.proc_samples_per_chip().max(1);
         let sf_preamble = self.config.preamble_sf;
@@ -285,294 +586,45 @@ impl Decoder {
                 0
             };
 
-            // 1. 同期検出直後の初期クリーニング
-            // プリアンブル以前の不要なデータを即座に物理削除
-            let initial_drain_len = sync_start.saturating_sub(overlap);
-            if initial_drain_len > 0 {
-                self.pipeline.sample_buffer_i.drain(0..initial_drain_len);
-                self.pipeline.sample_buffer_q.drain(0..initial_drain_len);
-            }
-
-            // --- 新しいフレームの準備 ---
-            self.equalization.clear_equalized_buffer();
-            self.last_search_idx = 0;
-            self.equalization.set_equalizer_input_offset(0);
-
-            // EQ リセット
-            if use_fde_this_frame {
-                self.equalization.setup_equalizer(&self.cir_buffer[..cir_len], mmse);
-            }
-
-            // 2. ワームアップ投入
-            // EQ.reset() は内部に overlap 分のゼロ履歴を持つため、ここで不足分をゼロ埋めすると
-            // 履歴を二重に積んで時間軸を押し出してしまう。実サンプルのみ投入する。
-            let warmup_real_len = sync_start
-                .saturating_sub(initial_drain_len)
-                .min(self.pipeline.sample_buffer_i.len());
-
-            // ゼロアロケーション: 事前確保バッファ使用
-            self.complex_buffer.clear();
-            if self.complex_buffer.capacity() < warmup_real_len {
-                self.complex_buffer.reserve(warmup_real_len);
-            }
-            unsafe {
-                self.complex_buffer.set_len(warmup_real_len);
-            }
-            for i in 0..warmup_real_len {
-                self.complex_buffer[i] =
-                    Complex32::new(self.pipeline.sample_buffer_i[i], self.pipeline.sample_buffer_q[i]);
-            }
-            // 3. カウンタ初期化
-            self.pending_warmup_samples = warmup_real_len;
-            self.pending_warmup_input_samples = warmup_real_len;
             let frame_samples = (sync_word_bits * sf_sync
                 + packets_per_frame * (expected_symbols * sf_payload))
                 * spc;
-            self.remaining_samples_in_frame = frame_samples as isize;
-
-            self.equalize_from_complex_buffer(warmup_real_len, warmup_real_len);
-
-            // 4. 状態移行
-            self.current_sync = Some(s.clone());
-            self.packets_processed_in_burst = 0;
-            self.tracking_state = Some(TrackingState {
-                phase_ref: Complex32::new(1.0, 0.0),
-                phase_rate: 0.0,
-                timing_offset: 0.0,
-                timing_rate: 0.0,
-                phase_gate_enabled: false,
+            self.begin_frame_from_sync(FrameStartPlan {
+                sync: s,
+                use_fde_this_frame,
+                mmse,
+                cir_len,
+                sync_start,
+                overlap,
+                frame_samples,
             });
-            self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
-            self.state = DecoderState::EqualizedDecoding;
-
             true
         } else {
-            // 検出されなかった
             self.last_search_idx = next_search_idx;
-
-            let max_buffer_len = 100_000;
-            let keep_len = 50_000;
-            if self.pipeline.sample_buffer_i.len() > max_buffer_len {
-                let drain_len = self.pipeline.sample_buffer_i.len() - keep_len;
-                self.pipeline.sample_buffer_i.drain(0..drain_len);
-                self.pipeline.sample_buffer_q.drain(0..drain_len);
-                self.last_search_idx = self.last_search_idx.saturating_sub(drain_len);
-                let new_offset = self.equalization.equalizer_input_offset().saturating_sub(drain_len);
-                self.equalization.set_equalizer_input_offset(new_offset);
-            }
+            self.trim_search_buffers_if_needed();
             false
         }
     }
 
     fn handle_decoding(&mut self) -> bool {
         let spc = self.config.proc_samples_per_chip().max(1);
-        let sf_sync = SYNC_SPREAD_FACTOR;
         let sf_payload = PAYLOAD_SPREAD_FACTOR;
         let sync_word_bits = self.config.sync_word_bits;
 
-        // 1. 等化器への投入 (統合口 equalize を使用)
-        // 未投入領域のみを投入する。物理削除と remaining_samples_in_frame の減算は equalize 内で行う。
-        let to_process = self
-            .pipeline
-            .sample_buffer_i
-            .len()
-            .saturating_sub(self.equalization.equalizer_input_offset());
-        if to_process > 0 {
-            // ゼロアロケーション: 事前確保バッファ使用
-            self.complex_buffer.clear();
-            if self.complex_buffer.capacity() < to_process {
-                self.complex_buffer.reserve(to_process);
-            }
-            unsafe {
-                self.complex_buffer.set_len(to_process);
-            }
-            for (idx, i) in
-                (self.equalization.equalizer_input_offset()..self.equalization.equalizer_input_offset() + to_process).enumerate()
-            {
-                self.complex_buffer[idx] =
-                    Complex32::new(self.pipeline.sample_buffer_i[i], self.pipeline.sample_buffer_q[i]);
-            }
-            self.equalize_from_complex_buffer(to_process, to_process);
+        let to_process = self.feed_unprocessed_samples_to_equalizer();
+
+        if !self.perform_sync_handoff_if_needed(spc, sync_word_bits) {
+            return false;
         }
 
-        // 2. 同期語の再復調と位相基準の確立
-        if self.packets_processed_in_burst == 0 {
-            let required_sync_samples = sync_word_bits * sf_sync * spc;
-
-            if self.equalization.equalized_buffer_mut().len() < required_sync_samples {
-                return false;
-            }
-
-            // 同期語の非コヒーレント(エネルギー)整合度で、chip内のサンプル位相(0..spc-1)を決定する。
-            // CFO 下ではコヒーレント和が位相回転で打ち消されるため、タイミング決定は位相非依存にする。
-            let mut best_timing_offset = 0usize;
-            let mut best_sync_score = f32::NEG_INFINITY;
-            for t_offset in 0..spc {
-                let mut total_energy = 0.0f32;
-                let mut used = 0usize;
-                for i in 0..sync_word_bits {
-                    let symbol_start = t_offset + i * sf_sync * spc;
-                    let corr = if let Some(c) =
-                        self.despread_symbol_inner(symbol_start, 0.0, sf_sync, 0)
-                    {
-                        c
-                    } else {
-                        break;
-                    };
-                    total_energy += corr[0].norm_sqr();
-                    used += 1;
-                }
-                if used == sync_word_bits {
-                    let score = total_energy / used as f32;
-                    if score > best_sync_score {
-                        best_sync_score = score;
-                        best_timing_offset = t_offset;
-                    }
-                }
-            }
-            if best_timing_offset > 0 {
-                self.equalization.drain_equalized_buffer(best_timing_offset);
-            }
-
-            let mut st = self.tracking_state.expect("st must exist");
-            let repeat = self.config.preamble_repeat;
-            let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-
-            // sync語全体を使った一括推定:
-            // y_i = corr_i * expected_sign_i ≈ A * exp(j*(phi0 + i*omega_sync))
-            self.complex_buffer.clear();
-            if self.complex_buffer.capacity() < sync_word_bits {
-                self.complex_buffer.reserve(sync_word_bits);
-            }
-            let mut prev_y: Option<Complex32> = None;
-            let mut sum_diff = Complex32::new(0.0, 0.0);
-
-            // timing LS 用の統計量（重み付き直線近似 e_i ≈ a + b*i）
-            let mut sw = 0.0f32;
-            let mut sx = 0.0f32;
-            let mut sy = 0.0f32;
-            let mut sxx = 0.0f32;
-            let mut sxy = 0.0f32;
-            for i in 0..sync_word_bits {
-                let symbol_start = i * sf_sync * spc;
-                let on = if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, sf_sync, 0)
-                {
-                    c[0]
-                } else {
-                    break;
-                };
-
-                let expected_sign = self.sync_detector.sync_symbols()[repeat + i];
-                let y = on * Complex32::new(expected_sign, 0.0);
-                if let Some(prev) = prev_y {
-                    sum_diff += y * prev.conj();
-                }
-                prev_y = Some(y);
-                self.complex_buffer.push(y);
-
-                let early = self.despread_symbol_inner(symbol_start, -early_late_delta, sf_sync, 0);
-                let late = self.despread_symbol_inner(symbol_start, early_late_delta, sf_sync, 0);
-                if let (Some(e), Some(l)) = (early, late) {
-                    let err = tracking::timing_error_from_early_late(e[0].norm(), l[0].norm());
-                    let w = on.norm_sqr().max(1e-6);
-                    let x = i as f32;
-                    sw += w;
-                    sx += w * x;
-                    sy += w * err;
-                    sxx += w * x * x;
-                    sxy += w * x * err;
-                }
-            }
-
-            if self.complex_buffer.is_empty() {
-                return false;
-            }
-
-            let omega_sync = if sum_diff.norm_sqr() > 1e-12 {
-                sum_diff.arg()
-            } else {
-                0.0
-            };
-
-            let mut sum_base = Complex32::new(0.0, 0.0);
-            for (i, &y) in self.complex_buffer.iter().enumerate() {
-                let ang = -omega_sync * i as f32;
-                let (s, c) = ang.sin_cos();
-                sum_base += y * Complex32::new(c, s);
-            }
-            let phi0 = if sum_base.norm_sqr() > 1e-12 {
-                sum_base.arg()
-            } else {
-                0.0
-            };
-
-            let sync_to_payload_scale = PAYLOAD_SPREAD_FACTOR as f32 / SYNC_SPREAD_FACTOR as f32;
-            st.phase_rate = (omega_sync * sync_to_payload_scale).clamp(
-                -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
-                tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
-            );
-
-            let last_sync_idx = (self.complex_buffer.len() - 1) as f32;
-            let phi_last = phi0 + omega_sync * last_sync_idx;
-            let phi_payload0 = phi_last + st.phase_rate;
-            let (s_ref, c_ref) = phi_payload0.sin_cos();
-            st.phase_ref = Complex32::new(c_ref, s_ref);
-
-            if let Some(&last_y) = self.complex_buffer.last() {
-                let last_sign =
-                    self.sync_detector.sync_symbols()[repeat + self.complex_buffer.len() - 1];
-                let last_corr = last_y * Complex32::new(last_sign, 0.0);
-                let (s_last, c_last) = (-phi_last).sin_cos();
-                let prev = last_corr * Complex32::new(c_last, s_last);
-                let norm = prev.norm().max(1e-6);
-                self.demodulator.set_prev_phase(prev / norm);
-            } else {
-                self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
-            }
-
-            let timing_limit = spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
-            let timing_rate_limit = spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
-            if sw > 1e-9 {
-                let denom = sw * sxx - sx * sx;
-                if denom.abs() > 1e-9 {
-                    let slope = (sw * sxy - sx * sy) / denom;
-                    let intercept = (sy - slope * sx) / sw;
-                    st.timing_offset =
-                        (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
-                    st.timing_rate = (slope * early_late_delta * sync_to_payload_scale)
-                        .clamp(-timing_rate_limit, timing_rate_limit);
-                } else {
-                    let intercept = sy / sw;
-                    st.timing_offset =
-                        (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
-                    st.timing_rate = 0.0;
-                }
-            } else {
-                st.timing_offset = 0.0;
-                st.timing_rate = 0.0;
-            }
-
-            self.tracking_state = Some(st);
-            self.packets_processed_in_burst = 1;
-            let drain_len = required_sync_samples.saturating_sub(spc);
-            self.equalization.drain_equalized_buffer(drain_len);
-        }
-
-        // 3. パケット復調
         let expected_symbols = interleaver_config::mary_symbols();
         let packet_samples = expected_symbols * sf_payload * spc;
         let max_packets = self.config.packets_per_burst;
-        let packets_decoded = self.packets_processed_in_burst.saturating_sub(1);
+        let packets_decoded = self.packets_decoded_in_burst();
 
         if packets_decoded >= max_packets {
-            if self.pending_warmup_input_samples == 0 && self.remaining_samples_in_frame <= 0 {
-                self.last_search_idx = 0;
-                self.equalization.set_equalizer_input_offset(0);
-                self.equalization.clear_equalized_buffer();
-                self.state = DecoderState::Searching;
-                self.current_sync = None;
-                self.pending_warmup_samples = 0;
-                self.pending_warmup_input_samples = 0;
+            if self.frame_is_complete(max_packets) {
+                self.transition_to_searching_after_frame_end();
                 return true;
             }
             return to_process > 0;
@@ -584,18 +636,7 @@ impl Decoder {
 
         let result = self.process_packet_core();
         if !result.processed {
-            // パケット復調中に despread が範囲外になった場合は、
-            // 現在フレームを破棄して再同期へ戻す。
-            self.last_search_idx = 0;
-            self.equalization.set_equalizer_input_offset(0);
-            self.equalization.clear_equalized_buffer();
-            self.state = DecoderState::Searching;
-            self.current_sync = None;
-            self.tracking_state = None;
-            self.packets_processed_in_burst = 0;
-            self.pending_warmup_samples = 0;
-            self.pending_warmup_input_samples = 0;
-            self.remaining_samples_in_frame = 0;
+            self.abort_current_frame();
             return false;
         }
         let mut st = self.tracking_state.expect("st exists");
@@ -619,19 +660,8 @@ impl Decoder {
         }
         self.packets_processed_in_burst += 1;
 
-        // フレーム入力を規定量消費し、規定パケット数を処理し終えたら Searching へ戻る
-        let packets_decoded = self.packets_processed_in_burst.saturating_sub(1);
-        if self.pending_warmup_input_samples == 0
-            && self.remaining_samples_in_frame <= 0
-            && packets_decoded >= max_packets
-        {
-            self.last_search_idx = 0;
-            self.equalization.set_equalizer_input_offset(0);
-            self.equalization.clear_equalized_buffer();
-            self.state = DecoderState::Searching;
-            self.current_sync = None;
-            self.pending_warmup_samples = 0;
-            self.pending_warmup_input_samples = 0;
+        if self.frame_is_complete(max_packets) {
+            self.transition_to_searching_after_frame_end();
         }
 
         true
@@ -802,6 +832,7 @@ impl Decoder {
         Some(results)
     }
 
+    #[cfg(test)]
     fn despread_symbol_with_timing(
         &self,
         symbol_start: usize,
@@ -884,15 +915,15 @@ fn despread_symbol_with_timing_from(
     Some(results)
 }
 
-#[inline]
-fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
-    packet_decoder::apply_llr_erasure_quantile(llrs, quantile);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::walsh::WalshDictionary;
+
+    #[inline]
+    fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
+        packet_decoder::apply_llr_erasure_quantile(llrs, quantile);
+    }
 
     fn make_decoder() -> Decoder {
         let config = DspConfig::default_48k();
