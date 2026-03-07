@@ -284,7 +284,7 @@ pub fn decode_soft_list(llrs: &[f32], list_size: usize) -> Vec<Vec<u8>> {
                 decoded[t] = sv.bit;
             }
             state = sv.prev_state as usize;
-            rank = sv.prev_rank as usize;
+            rank = sv.prev_rank;
         }
 
         if valid_path && !outputs.iter().any(|v| v == &decoded) {

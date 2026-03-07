@@ -1184,7 +1184,7 @@ mod tests {
         let mut output = Vec::new();
 
         // 最初の投入: fft_size に満たない場合は 0 が返るはず
-        let count1 = fde.process(&vec![Complex::new(1.0, 0.0); 10], &mut output);
+        let count1 = fde.process(&[Complex::new(1.0, 0.0); 10], &mut output);
         assert_eq!(count1, 0);
         assert_eq!(output.len(), 0);
 

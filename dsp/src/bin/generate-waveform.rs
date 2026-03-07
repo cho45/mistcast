@@ -100,16 +100,12 @@ fn run_mary_encoder(dsp_config: DspConfig, data: &[u8], target_duration_sec: f32
     let mut frame_count = 0;
 
     // フレーム単位で終わるようにする
-    loop {
-        if let Some(frame) = encoder.encode_frame() {
-            samples.extend_from_slice(&frame);
-            frame_count += 1;
+    while let Some(frame) = encoder.encode_frame() {
+        samples.extend_from_slice(&frame);
+        frame_count += 1;
 
-            // 目標時間を超えていたら、フレームの境界で終了
-            if samples.len() >= target_total {
-                break;
-            }
-        } else {
+        // 目標時間を超えていたら、フレームの境界で終了
+        if samples.len() >= target_total {
             break;
         }
     }

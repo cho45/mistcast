@@ -698,7 +698,7 @@ mod tests {
         let delta_f_tight = (tighter_transition / source_rate as f64).max(1e-6);
         let base_taps_tight = (5.5 / delta_f_tight).ceil() as usize;
         let taps_tight = base_taps_tight.saturating_mul(scale.max(1));
-        let taps_tight_norm = if taps_tight % 2 == 0 {
+        let taps_tight_norm = if taps_tight.is_multiple_of(2) {
             taps_tight + 1
         } else {
             taps_tight
@@ -711,7 +711,7 @@ mod tests {
         let delta_f_wide = (wider_transition / source_rate as f64).max(1e-6);
         let base_taps_wide = (5.5 / delta_f_wide).ceil() as usize;
         let taps_wide = base_taps_wide.saturating_mul(scale.max(1));
-        let taps_wide_norm = if taps_wide % 2 == 0 {
+        let taps_wide_norm = if taps_wide.is_multiple_of(2) {
             taps_wide + 1
         } else {
             taps_wide

@@ -108,8 +108,8 @@ mod tests {
 
         // R(0)
         let mut r0 = Complex32::new(0.0, 0.0);
-        for i in 0..n_zc {
-            r0 += seq[i] * seq[i].conj();
+        for s in &seq {
+            r0 += s * s.conj();
         }
 
         assert!(
