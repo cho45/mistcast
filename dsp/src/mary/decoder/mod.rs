@@ -817,7 +817,7 @@ impl Decoder {
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
-        self.stats.reset();
+        self.stats.reset_fountain_session();
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -1052,6 +1052,23 @@ mod tests {
         assert!(decoder.recovered_data.is_none());
         assert!(decoder.pipeline.sample_buffer_i.is_empty());
         assert!(decoder.pipeline.sample_buffer_q.is_empty());
+    }
+
+    #[test]
+    fn test_rebuild_fountain_decoder_preserves_frame_diagnostics() {
+        let mut decoder = make_decoder();
+        decoder.stats.last_pred_mse_fde = 0.125;
+        decoder.stats.last_pred_mse_raw = 0.250;
+        decoder.stats.last_est_snr_db = 12.5;
+        decoder.stats.last_path_used = 1;
+
+        let packet = Packet::new(0, 3, &[0x42; PAYLOAD_SIZE]);
+        decoder.receive_decoded_packet(packet);
+
+        assert_eq!(decoder.stats.last_pred_mse_fde, 0.125);
+        assert_eq!(decoder.stats.last_pred_mse_raw, 0.250);
+        assert_eq!(decoder.stats.last_est_snr_db, 12.5);
+        assert_eq!(decoder.stats.last_path_used, 1);
     }
 
     #[test]

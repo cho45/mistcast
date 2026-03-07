@@ -118,6 +118,18 @@ impl DecoderStats {
         *self = Self::new();
     }
 
+    pub fn reset_fountain_session(&mut self) {
+        self.received_packets = 0;
+        self.stalled_packets = 0;
+        self.dependent_packets = 0;
+        self.duplicate_packets = 0;
+        self.crc_error_packets = 0;
+        self.parse_error_packets = 0;
+        self.invalid_neighbor_packets = 0;
+        self.last_packet_seq = None;
+        self.last_rank_up_seq = None;
+    }
+
     /// DecodeProgress構造体を生成
     pub fn to_progress(
         &self,
@@ -229,6 +241,30 @@ mod tests {
         stats.received_packets = 10;
         stats.reset();
         assert_eq!(stats.received_packets, 0);
+    }
+
+    #[test]
+    fn test_decoder_stats_reset_fountain_session_preserves_frame_diagnostics() {
+        let mut stats = DecoderStats::new();
+        stats.received_packets = 4;
+        stats.last_packet_seq = Some(7);
+        stats.last_rank_up_seq = Some(6);
+        stats.last_pred_mse_fde = 0.25;
+        stats.last_pred_mse_raw = 0.5;
+        stats.last_est_snr_db = 12.0;
+        stats.last_path_used = 1;
+        stats.fde_selected_frames = 3;
+
+        stats.reset_fountain_session();
+
+        assert_eq!(stats.received_packets, 0);
+        assert_eq!(stats.last_packet_seq, None);
+        assert_eq!(stats.last_rank_up_seq, None);
+        assert_eq!(stats.last_pred_mse_fde, 0.25);
+        assert_eq!(stats.last_pred_mse_raw, 0.5);
+        assert_eq!(stats.last_est_snr_db, 12.0);
+        assert_eq!(stats.last_path_used, 1);
+        assert_eq!(stats.fde_selected_frames, 3);
     }
 
     #[test]
