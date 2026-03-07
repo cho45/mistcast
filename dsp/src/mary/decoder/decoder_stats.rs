@@ -125,6 +125,7 @@ impl DecoderStats {
 
     pub fn reset_fountain_session(&mut self) {
         // synced_frames is not reset as it's a global counter for the decoder instance
+        self.synced_frames = 0;
         self.received_packets = 0;
         self.stalled_packets = 0;
         self.dependent_packets = 0;

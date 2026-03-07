@@ -708,6 +708,11 @@ impl Decoder {
         }
     }
 
+    pub fn reset_fountain_decoder(&mut self) {
+        self.rebuild_fountain_decoder(self.fountain_decoder.params().k);
+        self.stats_synced_frames = 0;
+    }
+
     pub fn reset(&mut self) {
         self.interleaver.reset();
         self.resampler_i.reconfigure(

@@ -1,16 +1,16 @@
 mod channel;
-mod metrics;
 mod config;
 mod engine;
-mod utils;
-mod runner;
+mod metrics;
 mod report;
+mod runner;
+mod utils;
 
 use channel::{ChannelImpairment, MultipathProfile};
+use config::{parse_cli, Cli, EvalMode, Phy};
 use metrics::Metrics;
-use config::{Cli, EvalMode, Phy, parse_cli};
-use runner::{run_trial_dsss_e2e, run_trial_mary_e2e};
 use report::{print_awgn_limit, print_header, print_row};
+use runner::{run_trial_dsss_e2e, run_trial_mary_e2e};
 
 fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
     let metrics = if matches!(cli.phy, Phy::Mary) {
@@ -135,7 +135,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use config::{MaryFdeMode, CirNormArg, OutputFormat};
+    use config::{CirNormArg, MaryFdeMode, OutputFormat};
 
     #[test]
     fn test_e2e_dsss_smoke() {

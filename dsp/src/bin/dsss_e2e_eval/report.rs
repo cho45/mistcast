@@ -68,7 +68,9 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
         ber: m.ber(),
         raw_ber: m.raw_ber(),
         goodput_effective_bps: m.goodput_effective_bps(cli.payload_bytes * 8),
-        goodput_success_mean_bps: m.goodput_success_mean_bps(cli.payload_bytes * 8).unwrap_or(f32::NAN),
+        goodput_success_mean_bps: m
+            .goodput_success_mean_bps(cli.payload_bytes * 8)
+            .unwrap_or(f32::NAN),
         p95_complete_s: m.p95_completion_sec().unwrap_or(f32::NAN),
         mean_complete_s: m.mean_completion_sec().unwrap_or(f32::NAN),
         avg_proc_ns_sample: m.avg_process_time_per_sample_ns(),
@@ -109,7 +111,7 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
             let mut writer = csv::WriterBuilder::new()
                 .has_headers(false)
                 .from_writer(Vec::new());
-            
+
             let json_val = serde_json::to_value(&row).unwrap();
             let mut values = Vec::new();
             for col in cols {

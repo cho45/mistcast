@@ -1,4 +1,4 @@
-use crate::utils::{PreFecStats, PostFecStats};
+use crate::utils::{PostFecStats, PreFecStats};
 
 pub fn ratio(num: usize, den: usize) -> f32 {
     if den == 0 {
@@ -182,16 +182,21 @@ impl Metrics {
         }
     }
 
-    /// デコーダの累積報告値を受け取り、前回からの増分を統計に加算する。
-    /// synced, accepted, crc_err はその「チャンク」でのインクリメンタルな値である必要がある。
-    pub fn add_packet_stats(&mut self, synced: usize, accepted: usize, crc_err: usize) {
+    pub fn add_frame_event(&mut self, synced: usize, accepted_packets: usize, crc_error_packets: usize) {
+        println!("Frame event: synced={}+{}, accepted_packets={}+{}, crc_error_packets={}+{}", self.total_synced_frames, synced, self.total_accepted_packets, accepted_packets, self.total_crc_error_packets, crc_error_packets);
         self.total_synced_frames += synced;
-        self.total_accepted_packets += accepted;
-        self.total_crc_error_packets += crc_err;
+        self.total_accepted_packets += accepted_packets;
+        self.total_crc_error_packets += crc_error_packets;
     }
 
     /// データ復元成功イベントを記録する
-    pub fn add_recovery_event(&mut self, completion_sec: f32, bit_errors: usize, bits_compared: usize) {
+    pub fn add_recovery_event(
+        &mut self,
+        completion_sec: f32,
+        bit_errors: usize,
+        bits_compared: usize,
+    ) {
+        println!("Recovery event: completion_sec={:.3} bit_errors={} bits_compared={}", completion_sec, bit_errors, bits_compared); 
         self.completion_secs.push(completion_sec);
         self.total_successes += 1;
         self.total_bit_errors += bit_errors;
@@ -546,12 +551,12 @@ mod tests {
         let mut m = Metrics::new(3); // packets_per_frame = 3
         m.total_sim_sec = 10.0;
         m.total_frame_attempts = 100; // total_packets_sent = 300
-        
+
         // 1. Packet stats
         m.total_synced_frames = 80;
         m.total_accepted_packets = 200;
         m.total_crc_error_packets = 40;
-        
+
         assert_eq!(m.p_complete(), 200.0 / 300.0); // 200 / (100 * 3)
         assert_eq!(m.synced_frame_ratio(), 80.0 / 100.0);
         assert_eq!(m.crc_pass_ratio(), 200.0 / 240.0); // 200 / (200 + 40)
@@ -566,14 +571,16 @@ mod tests {
         m.add_recovery_event(2.0, 0, 0); // success 1
         m.add_recovery_event(4.0, 0, 0); // success 2
         m.add_recovery_event(6.0, 0, 0); // success 3
-        
+
         assert_eq!(m.total_successes, 3);
         assert_eq!(m.mean_completion_sec().unwrap(), (2.0 + 4.0 + 6.0) / 3.0);
         // goodput_effective_bps = (512 * 3) / 10.0 = 153.6
         assert_eq!(m.goodput_effective_bps(payload_bits), 153.6);
         // goodput_success_mean_bps = (512/2 + 512/4 + 512/6) / 3 = (256 + 128 + 85.33) / 3 = 156.444
-        let expected_mean_bps = (512.0/2.0 + 512.0/4.0 + 512.0/6.0) / 3.0;
-        assert!((m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4);
+        let expected_mean_bps = (512.0 / 2.0 + 512.0 / 4.0 + 512.0 / 6.0) / 3.0;
+        assert!(
+            (m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4
+        );
 
         // 4. Power and SNR
         m.total_tx_signal_energy = 1000.0;
@@ -600,7 +607,7 @@ mod tests {
         m.total_phase_err_abs_sum_rad = 50.0;
         m.total_phase_err_abs_count = 1000;
         m.total_phase_err_abs_ge_0p5_symbols = 100;
-        
+
         assert_eq!(m.phase_gate_on_ratio(), 0.7);
         assert_eq!(m.phase_err_abs_mean_rad().unwrap(), 50.0 / 1000.0);
         assert_eq!(m.phase_err_abs_ge_0p5_ratio(), 100.0 / 1000.0);
@@ -612,7 +619,7 @@ mod tests {
         assert_eq!(quantile(&values, 0.0).unwrap(), 1.0);
         assert_eq!(quantile(&values, 0.5).unwrap(), 3.0);
         assert_eq!(quantile(&values, 1.0).unwrap(), 5.0);
-        
+
         let usizes = vec![0, 10, 20, 30, 40];
         assert_eq!(quantile_usize(&usizes, 0.9).unwrap(), 40.0);
         assert_eq!(quantile_usize(&usizes, 0.1).unwrap(), 0.0);

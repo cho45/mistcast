@@ -1,6 +1,6 @@
+use crate::channel::{ChannelImpairment, MultipathProfile};
 use clap::{builder::PossibleValuesParser, Parser, ValueEnum};
 use dsp::mary::decoder::CirNormalizationMode;
-use crate::channel::{ChannelImpairment, MultipathProfile};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Phy {

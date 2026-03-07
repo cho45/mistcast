@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use dsp::coding::fec;
 use dsp::frame::packet::{Packet, PACKET_BYTES};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub fn count_bit_errors_bytes(tx: &[u8], rx: Option<&[u8]>) -> usize {
     let Some(rx) = rx else {
@@ -261,8 +261,7 @@ impl BerAccumulator {
         let post_error_runs = *self.post_error_runs.lock().unwrap();
         let post_error_run_bits = *self.post_error_run_bits.lock().unwrap();
         let post_error_run_max = *self.post_error_run_max.lock().unwrap();
-        let post_codeword_error_weights =
-            self.post_codeword_error_weights.lock().unwrap().clone();
+        let post_codeword_error_weights = self.post_codeword_error_weights.lock().unwrap().clone();
         let post_codeword_count = post_codeword_error_weights.len();
         let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
         let post_codeword_error_max = post_codeword_error_weights
