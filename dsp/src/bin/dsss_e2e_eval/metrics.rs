@@ -110,36 +110,67 @@ pub struct Metrics {
     pub total_process_time_ns: u64,
     /// 各データ復元成功までの到達時間のリスト [sec]
     pub completion_secs: Vec<f32>,
+    /// FEC前（生）のビットエラー総数
     pub total_raw_bit_errors: usize,
+    /// FEC前（生）の比較ビット総数
     pub total_raw_bits_compared: usize,
+    /// FEC前（生）のエラーラン総数
     pub total_raw_error_runs: usize,
+    /// FEC前（生）のエラーランに含まれるビット総数
     pub total_raw_error_run_bits: usize,
+    /// FEC前（生）の最大エラーラン長
     pub max_raw_error_run_len: usize,
+    /// FEC前（生）の総コードワード数
     pub total_codewords: usize,
+    /// FEC前（生）のコードワードあたりのエラービット総数
     pub total_codeword_error_sum: usize,
+    /// FEC前（生）のコードワードあたりの最大エラービット数
     pub max_codeword_error: usize,
+    /// FEC前（生）のコードワードエラー重みのリスト
     pub codeword_error_weights: Vec<usize>,
+    /// FEC適用後のビットエラー総数
     pub total_post_bit_errors: usize,
+    /// FEC適用後の比較ビット総数
     pub total_post_bits_compared: usize,
+    /// FEC適用後のエラーラン総数
     pub total_post_error_runs: usize,
+    /// FEC適用後のエラーランに含まれるビット総数
     pub total_post_error_run_bits: usize,
+    /// FEC適用後の最大エラーラン長
     pub max_post_error_run_len: usize,
+    /// FEC適用後の総コードワード数
     pub total_post_codewords: usize,
+    /// FEC適用後のコードワードあたりのエラービット総数
     pub total_post_codeword_error_sum: usize,
+    /// FEC適用後のコードワードあたりの最大エラービット数
     pub max_post_codeword_error: usize,
+    /// FEC適用後のコードワードエラー重みのリスト
     pub post_codeword_error_weights: Vec<usize>,
+    /// Post-FECデコード試行総数
     pub total_post_decode_attempts: usize,
+    /// Post-FECデコード結果が送信データと一致した総数
     pub total_post_decode_matched: usize,
+    /// 推定SNRの合計 (平均計算用)
     pub sum_last_est_snr_db: f64,
+    /// 推定SNRのサンプル数
     pub count_last_est_snr_db: usize,
+    /// 位相ゲートがONだったシンボル総数
     pub total_phase_gate_on_symbols: usize,
+    /// 位相ゲートがOFFだったシンボル総数
     pub total_phase_gate_off_symbols: usize,
+    /// 位相変化が棄却されたシンボル総数
     pub total_phase_innovation_reject_symbols: usize,
+    /// 絶対位相誤差の合計 [rad]
     pub total_phase_err_abs_sum_rad: f64,
+    /// 位相誤差が計算されたシンボル総数
     pub total_phase_err_abs_count: usize,
+    /// 0.5 rad 以上の位相誤差が発生したシンボル総数
     pub total_phase_err_abs_ge_0p5_symbols: usize,
+    /// 1.0 rad 以上の位相誤差が発生したシンボル総数
     pub total_phase_err_abs_ge_1p0_symbols: usize,
+    /// LLR消去第2パスがトリガーされた回数
     pub total_llr_second_pass_attempts: usize,
+    /// LLR消去第2パスによって救済されたパケット総数
     pub total_llr_second_pass_rescued: usize,
 }
 
@@ -151,21 +182,15 @@ impl Metrics {
         }
     }
 
-    pub fn add_packet_stats<SF, AP, EP>(
-        &mut self,
-        synced_frames: SF,
-        accepted_packets: AP,
-        crc_error_packets: EP,
-    ) where
-        SF: Into<usize>,
-        AP: Into<usize>,
-        EP: Into<usize>,
-    {
-        self.total_synced_frames += synced_frames.into();
-        self.total_accepted_packets += accepted_packets.into();
-        self.total_crc_error_packets += crc_error_packets.into();
+    /// デコーダの累積報告値を受け取り、前回からの増分を統計に加算する。
+    /// synced, accepted, crc_err はその「チャンク」でのインクリメンタルな値である必要がある。
+    pub fn add_packet_stats(&mut self, synced: usize, accepted: usize, crc_err: usize) {
+        self.total_synced_frames += synced;
+        self.total_accepted_packets += accepted;
+        self.total_crc_error_packets += crc_err;
     }
 
+    /// データ復元成功イベントを記録する
     pub fn add_recovery_event(&mut self, completion_sec: f32, bit_errors: usize, bits_compared: usize) {
         self.completion_secs.push(completion_sec);
         self.total_successes += 1;
@@ -173,31 +198,34 @@ impl Metrics {
         self.total_bits_compared += bits_compared;
     }
 
+    /// Mary生ビットエラー統計を反映
     pub fn set_mary_raw_ber(&mut self, stats: PreFecStats) {
-        self.total_raw_bit_errors += stats.bit_errors;
-        self.total_raw_bits_compared += stats.bits_compared;
-        self.total_raw_error_runs += stats.error_runs;
-        self.total_raw_error_run_bits += stats.error_run_bits;
-        self.max_raw_error_run_len = self.max_raw_error_run_len.max(stats.error_run_max);
-        self.total_codewords += stats.codeword_count;
-        self.total_codeword_error_sum += stats.codeword_error_sum;
-        self.max_codeword_error = self.max_codeword_error.max(stats.codeword_error_max);
-        self.codeword_error_weights.extend(stats.codeword_error_weights);
+        self.total_raw_bit_errors = stats.bit_errors;
+        self.total_raw_bits_compared = stats.bits_compared;
+        self.total_raw_error_runs = stats.error_runs;
+        self.total_raw_error_run_bits = stats.error_run_bits;
+        self.max_raw_error_run_len = stats.error_run_max;
+        self.total_codewords = stats.codeword_count;
+        self.total_codeword_error_sum = stats.codeword_error_sum;
+        self.max_codeword_error = stats.codeword_error_max;
+        self.codeword_error_weights = stats.codeword_error_weights;
     }
 
+    /// Mary FEC適用後統計を反映
     pub fn set_mary_post_ber(&mut self, stats: PostFecStats) {
-        self.total_post_bit_errors += stats.bit_errors;
-        self.total_post_bits_compared += stats.bits_compared;
-        self.total_post_error_runs += stats.error_runs;
-        self.total_post_error_run_bits += stats.error_run_bits;
-        self.max_post_error_run_len = self.max_post_error_run_len.max(stats.error_run_max);
-        self.total_post_codewords += stats.codeword_count;
-        self.total_post_codeword_error_sum += stats.codeword_error_sum;
-        self.max_post_codeword_error = self.max_post_codeword_error.max(stats.codeword_error_max);
-        self.post_codeword_error_weights.extend(stats.codeword_error_weights);
+        self.total_post_bit_errors = stats.bit_errors;
+        self.total_post_bits_compared = stats.bits_compared;
+        self.total_post_error_runs = stats.error_runs;
+        self.total_post_error_run_bits = stats.error_run_bits;
+        self.max_post_error_run_len = stats.error_run_max;
+        self.total_post_codewords = stats.codeword_count;
+        self.total_post_codeword_error_sum = stats.codeword_error_sum;
+        self.max_post_codeword_error = stats.codeword_error_max;
+        self.post_codeword_error_weights = stats.codeword_error_weights;
     }
 
-    pub fn set_mary_phase(&mut self, stats: PhaseStats) {
+    /// Mary 位相統計を反映（加算）
+    pub fn add_mary_phase(&mut self, stats: PhaseStats) {
         if stats.last_est_snr_db.is_finite() {
             self.sum_last_est_snr_db += stats.last_est_snr_db as f64;
             self.count_last_est_snr_db += 1;
@@ -211,12 +239,14 @@ impl Metrics {
         self.total_phase_err_abs_ge_1p0_symbols += stats.phase_err_abs_ge_1p0_symbols;
     }
 
-    pub fn set_mary_llr(&mut self, attempts: usize, rescued: usize) {
+    /// LLR救済統計を加算
+    pub fn add_mary_llr(&mut self, attempts: usize, rescued: usize) {
         self.total_llr_second_pass_attempts += attempts;
         self.total_llr_second_pass_rescued += rescued;
     }
 
-    pub fn set_mary_decode_stats(&mut self, attempts: usize, matched: usize) {
+    /// Viterbiデコード一致統計を加算
+    pub fn add_mary_decode_stats(&mut self, attempts: usize, matched: usize) {
         self.total_post_decode_attempts += attempts;
         self.total_post_decode_matched += matched;
     }
@@ -240,6 +270,7 @@ impl Metrics {
         )
     }
 
+    /// LLR消去第2パスのトリガー率
     pub fn llr_second_pass_trigger_ratio(&self) -> f32 {
         ratio(
             self.total_llr_second_pass_attempts,
@@ -247,6 +278,7 @@ impl Metrics {
         )
     }
 
+    /// LLR消去第2パスによる救済率
     pub fn llr_second_pass_rescue_ratio(&self) -> f32 {
         ratio(
             self.total_llr_second_pass_rescued,
@@ -298,6 +330,7 @@ impl Metrics {
         Some(sum / self.completion_secs.len() as f32)
     }
 
+    /// 送信信号の平均電力
     pub fn tx_signal_power(&self) -> Option<f32> {
         if self.total_tx_signal_samples == 0 {
             None
@@ -306,6 +339,7 @@ impl Metrics {
         }
     }
 
+    /// サンプルあたりの平均処理時間 [ns/sample]
     pub fn avg_process_time_per_sample_ns(&self) -> f32 {
         if self.total_tx_signal_samples == 0 {
             0.0
@@ -314,6 +348,7 @@ impl Metrics {
         }
     }
 
+    /// FEC前（生）のビットエラーレート
     pub fn raw_ber(&self) -> f32 {
         if self.total_raw_bits_compared == 0 {
             f32::NAN
@@ -322,6 +357,7 @@ impl Metrics {
         }
     }
 
+    /// 生ビットのエラーラン平均長
     pub fn raw_err_run_mean(&self) -> Option<f32> {
         if self.total_raw_error_runs == 0 {
             None
@@ -330,6 +366,7 @@ impl Metrics {
         }
     }
 
+    /// 生ビットの最大エラーラン長
     pub fn raw_err_run_max(&self) -> Option<usize> {
         if self.max_raw_error_run_len == 0 {
             None
@@ -338,6 +375,7 @@ impl Metrics {
         }
     }
 
+    /// コードワードあたりの平均エラービット数
     pub fn err_w_cw_mean(&self) -> Option<f32> {
         if self.total_codewords == 0 {
             None
@@ -370,6 +408,7 @@ impl Metrics {
         error_weight_hist(&self.codeword_error_weights)
     }
 
+    /// FEC適用後のビットエラーレート
     pub fn post_ber(&self) -> f32 {
         if self.total_post_bits_compared == 0 {
             f32::NAN
@@ -378,6 +417,7 @@ impl Metrics {
         }
     }
 
+    /// Post-FECデコード結果が送信データと一致した割合
     pub fn post_decode_match_ratio(&self) -> f32 {
         ratio(
             self.total_post_decode_matched,
@@ -433,6 +473,7 @@ impl Metrics {
         error_weight_hist(&self.post_codeword_error_weights)
     }
 
+    /// 平均推定SNR [dB]
     pub fn avg_last_est_snr_db(&self) -> Option<f32> {
         if self.count_last_est_snr_db == 0 {
             None
@@ -441,6 +482,7 @@ impl Metrics {
         }
     }
 
+    /// 設定値 sigma から計算した理論上のAWGN SNR [dB]
     pub fn awgn_snr_db(&self, sigma: f32) -> Option<f32> {
         if sigma <= 0.0 {
             return None;
@@ -453,6 +495,7 @@ impl Metrics {
         Some(10.0 * (p_sig / p_noise).log10())
     }
 
+    /// 位相ゲート有効率
     pub fn phase_gate_on_ratio(&self) -> f32 {
         ratio(
             self.total_phase_gate_on_symbols,
@@ -460,6 +503,7 @@ impl Metrics {
         )
     }
 
+    /// 位相変化棄却率
     pub fn phase_innovation_reject_ratio(&self) -> f32 {
         ratio(
             self.total_phase_innovation_reject_symbols,
@@ -467,6 +511,7 @@ impl Metrics {
         )
     }
 
+    /// 平均絶対位相誤差 [rad]
     pub fn phase_err_abs_mean_rad(&self) -> Option<f32> {
         if self.total_phase_err_abs_count == 0 {
             None
@@ -475,6 +520,7 @@ impl Metrics {
         }
     }
 
+    /// 0.5 rad 以上の位相誤差が発生した割合
     pub fn phase_err_abs_ge_0p5_ratio(&self) -> f32 {
         ratio(
             self.total_phase_err_abs_ge_0p5_symbols,
@@ -482,10 +528,93 @@ impl Metrics {
         )
     }
 
+    /// 1.0 rad 以上の位相誤差が発生した割合
     pub fn phase_err_abs_ge_1p0_ratio(&self) -> f32 {
         ratio(
             self.total_phase_err_abs_ge_1p0_symbols,
             self.total_phase_err_abs_count,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_consistency() {
+        let mut m = Metrics::new(3); // packets_per_frame = 3
+        m.total_sim_sec = 10.0;
+        m.total_frame_attempts = 100; // total_packets_sent = 300
+        
+        // 1. Packet stats
+        m.total_synced_frames = 80;
+        m.total_accepted_packets = 200;
+        m.total_crc_error_packets = 40;
+        
+        assert_eq!(m.p_complete(), 200.0 / 300.0); // 200 / (100 * 3)
+        assert_eq!(m.synced_frame_ratio(), 80.0 / 100.0);
+        assert_eq!(m.crc_pass_ratio(), 200.0 / 240.0); // 200 / (200 + 40)
+
+        // 2. Bit errors
+        m.total_bit_errors = 50;
+        m.total_bits_compared = 10000;
+        assert_eq!(m.ber(), 50.0 / 10000.0);
+
+        // 3. Recovery and Goodput
+        let payload_bits = 512;
+        m.add_recovery_event(2.0, 0, 0); // success 1
+        m.add_recovery_event(4.0, 0, 0); // success 2
+        m.add_recovery_event(6.0, 0, 0); // success 3
+        
+        assert_eq!(m.total_successes, 3);
+        assert_eq!(m.mean_completion_sec().unwrap(), (2.0 + 4.0 + 6.0) / 3.0);
+        // goodput_effective_bps = (512 * 3) / 10.0 = 153.6
+        assert_eq!(m.goodput_effective_bps(payload_bits), 153.6);
+        // goodput_success_mean_bps = (512/2 + 512/4 + 512/6) / 3 = (256 + 128 + 85.33) / 3 = 156.444
+        let expected_mean_bps = (512.0/2.0 + 512.0/4.0 + 512.0/6.0) / 3.0;
+        assert!((m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4);
+
+        // 4. Power and SNR
+        m.total_tx_signal_energy = 1000.0;
+        m.total_tx_signal_samples = 2000;
+        // power = 1000 / 2000 = 0.5
+        assert_eq!(m.tx_signal_power().unwrap(), 0.5);
+        // AWGN SNR for sigma=1.0: 10 * log10(0.5 / 1.0) = -3.0103
+        assert!((m.awgn_snr_db(1.0).unwrap() - (-3.0103)).abs() < 1e-4);
+
+        // 5. Raw BER
+        m.total_raw_bit_errors = 100;
+        m.total_raw_bits_compared = 1000;
+        assert_eq!(m.raw_ber(), 100.0 / 1000.0);
+
+        // 6. LLR Rescue
+        m.total_llr_second_pass_attempts = 20;
+        m.total_llr_second_pass_rescued = 5;
+        assert_eq!(m.llr_second_pass_trigger_ratio(), 20.0 / 240.0);
+        assert_eq!(m.llr_second_pass_rescue_ratio(), 5.0 / 20.0);
+
+        // 7. Phase
+        m.total_phase_gate_on_symbols = 700;
+        m.total_phase_gate_off_symbols = 300;
+        m.total_phase_err_abs_sum_rad = 50.0;
+        m.total_phase_err_abs_count = 1000;
+        m.total_phase_err_abs_ge_0p5_symbols = 100;
+        
+        assert_eq!(m.phase_gate_on_ratio(), 0.7);
+        assert_eq!(m.phase_err_abs_mean_rad().unwrap(), 50.0 / 1000.0);
+        assert_eq!(m.phase_err_abs_ge_0p5_ratio(), 100.0 / 1000.0);
+    }
+
+    #[test]
+    fn test_quantiles() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(quantile(&values, 0.0).unwrap(), 1.0);
+        assert_eq!(quantile(&values, 0.5).unwrap(), 3.0);
+        assert_eq!(quantile(&values, 1.0).unwrap(), 5.0);
+        
+        let usizes = vec![0, 10, 20, 30, 40];
+        assert_eq!(quantile_usize(&usizes, 0.9).unwrap(), 40.0);
+        assert_eq!(quantile_usize(&usizes, 0.1).unwrap(), 0.0);
     }
 }
