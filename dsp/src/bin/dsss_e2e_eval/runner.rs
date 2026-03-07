@@ -148,15 +148,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         completion_secs.push(state.elapsed_sec - last_reset_sec);
     }
 
-    let avg_completion = if completion_secs.is_empty() {
-        None
-    } else {
-        Some(completion_secs.iter().sum::<f32>() / completion_secs.len() as f32)
-    };
-
     TrialResultBuilder::new(&state, cli.packets_per_frame)
         .bit_errors(total_bit_errors, total_bits_compared)
-        .completion_sec(avg_completion)
+        .completion_secs(completion_secs)
         .packet_stats(
             total_synced_frames,
             total_accepted_packets,
@@ -319,19 +313,13 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         completion_secs.push(state.elapsed_sec - last_reset_sec);
     }
 
-    let avg_completion = if completion_secs.is_empty() {
-        None
-    } else {
-        Some(completion_secs.iter().sum::<f32>() / completion_secs.len() as f32)
-    };
-
     let pre_fec = ber_accum.extract_pre_fec();
     let post_fec = ber_accum.extract_post_fec();
     let (post_decode_attempts, post_decode_matched) = ber_accum.extract_decode_stats();
 
     let mut builder = TrialResultBuilder::new(&state, cli.packets_per_frame)
         .bit_errors(total_bit_errors, total_bits_compared)
-        .completion_sec(avg_completion)
+        .completion_secs(completion_secs)
         .packet_stats(
             total_synced_frames,
             total_accepted_packets,

@@ -70,18 +70,25 @@ pub fn error_weight_hist(weights: &[usize]) -> Option<String> {
 
 #[derive(Default, Clone, Debug)]
 pub struct TrialResult {
-    pub avg_completion_sec: Option<f32>,
+    /// 各データ復元成功までにかかった時間のリスト（前回のリセットまたは開始からの秒数）
+    pub completion_secs: Vec<f32>,
+    /// シミュレーション総時間
     pub elapsed_sec: f32,
+    /// 送信フレーム数
     pub frame_attempts: usize,
+    /// 1フレームあたりのパケット数
     pub packets_per_frame: usize,
     /// 同期成立したフレーム数
     pub synced_frames: usize,
-    /// CRC通過パケット数（Accepted）
+    /// CRC通過パケット数
     pub accepted_packets: usize,
     /// CRCエラーパケット数
     pub crc_error_packets: usize,
+    /// 全復元データにおけるビットエラー総数
     pub bit_errors: usize,
+    /// 比較された全ビット数
     pub bits_compared: usize,
+    /// 消失（ドロップ）したフレーム数
     pub dropped_frames: usize,
     pub tx_signal_energy_sum: f64,
     pub tx_signal_samples: usize,
@@ -121,93 +128,58 @@ pub struct TrialResult {
 /// 評価シミュレーションの集計メトリクス
 #[derive(Default, Clone, Debug)]
 pub struct Metrics {
-    /// シミュレーション上の信号の総時間 [sec]
+    /// シミュレーション総時間 [sec]
     pub total_sim_sec: f32,
-    /// 送信を試みた総フレーム数
+    /// 総送信フレーム数
     pub total_frame_attempts: usize,
-    /// 1フレームに含まれるパケット数
+    /// 1フレームあたりのパケット数
     pub packets_per_frame: usize,
-    /// 受信側で同期（Preamble等）が成立した総フレーム数
+    /// 総同期フレーム数
     pub total_synced_frames: usize,
-    /// CRCを通過し、正常に復元された総パケット数
+    /// 総正常受信パケット数 (Fountainパケット単位)
     pub total_accepted_packets: usize,
-    /// CRCエラーとなった総パケット数
+    /// 総CRCエラーパケット数
     pub total_crc_error_packets: usize,
-    /// 復元された全ビットにおけるエラービットの総数
+    /// 総復元成功回数 (データ全体単位)
+    pub total_successes: usize,
     pub total_bit_errors: usize,
-    /// BER計算のために比較された総ビット数
     pub total_bits_compared: usize,
-    /// 通信路で意図的にドロップ（消失）された総フレーム数
     pub dropped_frames: usize,
-    /// 送信信号の総エネルギー（SNR算出用）
     pub total_tx_signal_energy: f64,
-    /// 送信信号の総サンプル数（SNR算出用）
     pub total_tx_signal_samples: usize,
-    /// 信号処理（デコード）に要した合計CPU時間 [ns]
     pub total_process_time_ns: u64,
-    /// 各パケットの復元成功までにかかった時間のリスト（MTTD算出用）
+    /// 全ての成功イベントの到達時間のリスト [sec]
     pub completion_secs: Vec<f32>,
-    /// FEC適用前のハード判定におけるエラービット総数
     pub total_raw_bit_errors: usize,
-    /// FEC適用前に比較された総ビット数
     pub total_raw_bits_compared: usize,
-    /// FEC適用前のエラーラン（連続エラー）の総数
     pub total_raw_error_runs: usize,
-    /// FEC適用前のエラーランに含まれるエラービット総数
     pub total_raw_error_run_bits: usize,
-    /// FEC適用前の最大エラーラン長
     pub max_raw_error_run_len: usize,
-    /// 処理された総コードワード数
     pub total_codewords: usize,
-    /// 各コードワード内のエラービット数の総和
     pub total_codeword_error_sum: usize,
-    /// コードワードあたりの最大エラービット数
     pub max_codeword_error: usize,
-    /// 各コードワードのエラービット分布
     pub codeword_error_weights: Vec<usize>,
-    /// FEC適用後のビットエラー総数
     pub total_post_bit_errors: usize,
-    /// FEC適用後に比較された総ビット数
     pub total_post_bits_compared: usize,
-    /// FEC適用後のエラーランの総数
     pub total_post_error_runs: usize,
-    /// FEC適用後のエラーランに含まれるエラービット総数
     pub total_post_error_run_bits: usize,
-    /// FEC適用後の最大エラーラン長
     pub max_post_error_run_len: usize,
-    /// FEC適用後の総コードワード数
     pub total_post_codewords: usize,
-    /// FEC適用後のコードワード内エラービット総和
     pub total_post_codeword_error_sum: usize,
-    /// FEC適用後の最大コードワードエラー数
     pub max_post_codeword_error: usize,
-    /// FEC適用後のコードワードエラー分布
     pub post_codeword_error_weights: Vec<usize>,
-    /// Post-FECデコードを試みた総回数
     pub total_post_decode_attempts: usize,
-    /// 送信側データと一致したPost-FECデコード数
     pub total_post_decode_matched: usize,
-    /// 推定SNRの累積和 [dB]
     pub sum_last_est_snr_db: f64,
-    /// 推定SNRのサンプル数
     pub count_last_est_snr_db: usize,
-    /// 位相ゲート（Phase Gate）がON（有効）だったシンボル数
     pub total_phase_gate_on_symbols: usize,
-    /// 位相ゲートがOFF（無効）だったシンボル数
     pub total_phase_gate_off_symbols: usize,
-    /// 位相変化が急峻すぎて棄却されたシンボル数
     pub total_phase_innovation_reject_symbols: usize,
-    /// 位相誤差の絶対値の累積 [rad]
     pub total_phase_err_abs_sum_rad: f64,
-    /// 位相誤差計測の総サンプル数
     pub total_phase_err_abs_count: usize,
-    /// 位相誤差が 0.5 rad を超えたシンボル数
     pub total_phase_err_abs_ge_0p5_symbols: usize,
-    /// 位相誤差が 1.0 rad を超えたシンボル数
     pub total_phase_err_abs_ge_1p0_symbols: usize,
-    /// LLR消去（Erasure）第2パスを試みた総回数
     pub total_llr_second_pass_attempts: usize,
-    /// LLR第2パスによって救済されたパケット総数
     pub total_llr_second_pass_rescued: usize,
 }
 
@@ -232,7 +204,7 @@ pub struct PhaseStats {
 }
 
 pub struct TrialResultBuilder {
-    pub avg_completion_sec: Option<f32>,
+    pub completion_secs: Vec<f32>,
     pub elapsed_sec: f32,
     pub frame_attempts: usize,
     pub packets_per_frame: usize,
@@ -280,7 +252,7 @@ pub struct TrialResultBuilder {
 impl TrialResultBuilder {
     pub fn new(state: &TrialState, packets_per_frame: usize) -> Self {
         Self {
-            avg_completion_sec: None,
+            completion_secs: Vec::new(),
             elapsed_sec: state.elapsed_sec,
             frame_attempts: state.frame_attempts,
             packets_per_frame,
@@ -326,8 +298,8 @@ impl TrialResultBuilder {
         }
     }
 
-    pub fn completion_sec(mut self, avg: Option<f32>) -> Self {
-        self.avg_completion_sec = avg;
+    pub fn completion_secs(mut self, secs: Vec<f32>) -> Self {
+        self.completion_secs = secs;
         self
     }
 
@@ -410,7 +382,7 @@ impl TrialResultBuilder {
 
     pub fn build(self) -> TrialResult {
         TrialResult {
-            avg_completion_sec: self.avg_completion_sec,
+            completion_secs: self.completion_secs,
             elapsed_sec: self.elapsed_sec,
             frame_attempts: self.frame_attempts,
             packets_per_frame: self.packets_per_frame,
@@ -465,6 +437,7 @@ impl Metrics {
         self.total_synced_frames += t.synced_frames;
         self.total_accepted_packets += t.accepted_packets;
         self.total_crc_error_packets += t.crc_error_packets;
+        self.total_successes += t.completion_secs.len();
         self.total_bit_errors += t.bit_errors;
         self.total_bits_compared += t.bits_compared;
         self.dropped_frames += t.dropped_frames;
@@ -506,19 +479,16 @@ impl Metrics {
         self.total_llr_second_pass_attempts += t.llr_second_pass_attempts;
         self.total_llr_second_pass_rescued += t.llr_second_pass_rescued;
 
-        if let Some(c) = t.avg_completion_sec {
-            self.completion_secs.push(c);
-        }
+        self.completion_secs.extend(t.completion_secs);
     }
 
     /// パケット到達率 (PDR: Packet Delivery Ratio)
     /// 分母 = 総送信フレーム数 * 1フレームあたりのパケット数
-    /// 送信を試みた総フレーム数
+    /// 分子 = 正常にCRCを通過した総パケット数 (Fountainパケット単位)
     pub fn p_complete(&self) -> f32 {
         let total_packets_sent = self.total_frame_attempts * self.packets_per_frame;
         ratio(self.total_accepted_packets, total_packets_sent)
     }
-
 
     /// フレーム同期成功率
     /// 分母 = 総送信フレーム数
@@ -562,12 +532,12 @@ impl Metrics {
         }
     }
 
-    /// パケット到達時間の95パーセンタイル [sec]
+    /// データ復元成功時間の95パーセンタイル [sec]
     pub fn p95_completion_sec(&self) -> Option<f32> {
         quantile(&self.completion_secs, 0.95)
     }
 
-    /// 平均パケット到達時間 (MTTD: Mean Time To Deliver) [sec]
+    /// 平均データ復元成功時間 (MTTD: Mean Time To Deliver) [sec]
     pub fn mean_completion_sec(&self) -> Option<f32> {
         if self.completion_secs.is_empty() {
             None
@@ -577,17 +547,17 @@ impl Metrics {
     }
 
     /// 実効スループット (Effective Goodput) [bps]
-    /// 成功パケットの総ビット数 / シミュレーション総時間
+    /// (成功回数 * ペイロードビット数) / シミュレーション総時間
     pub fn goodput_effective_bps(&self, payload_bits: usize) -> f32 {
         if self.total_sim_sec <= 0.0 {
             0.0
         } else {
-            (payload_bits * self.total_accepted_packets) as f32 / self.total_sim_sec
+            (payload_bits * self.total_successes) as f32 / self.total_sim_sec
         }
     }
 
-    /// 成功パケットごとのスループット平均 [bps]
-    /// 各パケットの (ビット数 / 到達時間) の平均
+    /// 復元成功ごとのスループット平均 [bps]
+    /// 各成功イベントの (ペイロードビット数 / 到達時間) の平均
     pub fn goodput_success_mean_bps(&self, payload_bits: usize) -> Option<f32> {
         if self.completion_secs.is_empty() {
             return None;
