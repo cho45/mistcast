@@ -8,15 +8,6 @@ pub enum Phy {
     Mary,
 }
 
-impl Phy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Dsss => "dsss",
-            Self::Mary => "mary",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum EvalMode {
@@ -42,16 +33,6 @@ pub enum MaryFdeMode {
     On,
     Off,
     Auto,
-}
-
-impl MaryFdeMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::On => "on",
-            Self::Off => "off",
-            Self::Auto => "auto",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
