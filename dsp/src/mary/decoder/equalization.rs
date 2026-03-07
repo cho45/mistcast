@@ -66,12 +66,6 @@ pub struct EqualizationController {
     fde_enabled: bool,
     current_frame_use_fde: bool,
     fde_auto_path_select: bool,
-    fde_selected_frames: usize,
-    raw_selected_frames: usize,
-    last_path_used: i32,
-    last_pred_mse_fde: f32,
-    last_pred_mse_raw: f32,
-    last_est_snr_db: f32,
     fde_mmse_settings: MmseSettings,
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
@@ -104,12 +98,6 @@ impl EqualizationController {
             fde_enabled,
             current_frame_use_fde: fde_enabled,
             fde_auto_path_select: false,
-            fde_selected_frames: 0,
-            raw_selected_frames: 0,
-            last_path_used: -1,
-            last_pred_mse_fde: f32::NAN,
-            last_pred_mse_raw: f32::NAN,
-            last_est_snr_db: f32::NAN,
             fde_mmse_settings: MmseSettings::default(),
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
@@ -135,14 +123,7 @@ impl EqualizationController {
         if self.fde_enabled {
             self.equalizer = Some(Self::build_default_equalizer(config));
         }
-        self.equalized_buffer.clear();
-        self.equalizer_input_offset = 0;
-        self.fde_selected_frames = 0;
-        self.raw_selected_frames = 0;
-        self.last_path_used = -1;
-        self.last_pred_mse_fde = f32::NAN;
-        self.last_pred_mse_raw = f32::NAN;
-        self.last_est_snr_db = f32::NAN;
+        self.reset_frame_buffers();
     }
 
     /// FDE有効/無効を設定
@@ -158,8 +139,7 @@ impl EqualizationController {
             self.current_frame_use_fde = false;
             self.fde_auto_path_select = false;
         }
-        self.equalized_buffer.clear();
-        self.equalizer_input_offset = 0;
+        self.reset_frame_buffers();
     }
 
     /// 自動パス選択を設定
@@ -263,18 +243,6 @@ impl EqualizationController {
         };
 
         self.current_frame_use_fde = use_fde;
-
-        if use_fde {
-            self.fde_selected_frames += 1;
-            self.last_path_used = 1;
-            self.last_pred_mse_fde = mse_fde;
-            self.last_pred_mse_raw = mse_raw;
-        } else {
-            self.raw_selected_frames += 1;
-            self.last_path_used = 0;
-            self.last_pred_mse_fde = mse_fde;
-            self.last_pred_mse_raw = mse_raw;
-        }
     }
 
     /// 等化器処理を実行（warmup drain 含む）
@@ -306,7 +274,7 @@ impl EqualizationController {
         // ウォームアップ由来の中間状態を先頭から捨てる
         let warmup_to_drain = added.min(pending_warmup_samples);
         if warmup_to_drain > 0 {
-            self.drain_equalized_buffer(warmup_to_drain);
+            self.consume_equalized_prefix(warmup_to_drain);
         }
 
         added
@@ -328,11 +296,11 @@ impl EqualizationController {
         &self.equalized_buffer
     }
 
-    pub fn equalized_buffer_mut(&mut self) -> &mut Vec<Complex32> {
-        &mut self.equalized_buffer
+    pub fn equalized_len(&self) -> usize {
+        self.equalized_buffer.len()
     }
 
-    pub fn equalizer_input_offset(&self) -> usize {
+    pub fn input_offset(&self) -> usize {
         self.equalizer_input_offset
     }
 
@@ -356,23 +324,39 @@ impl EqualizationController {
         self.cir_tap_threshold_alpha
     }
 
-    pub fn clear_equalized_buffer(&mut self) {
+    pub fn reset_frame_buffers(&mut self) {
         self.equalized_buffer.clear();
         self.equalizer_input_offset = 0;
     }
 
-    pub fn set_equalizer_input_offset(&mut self, value: usize) {
-        self.equalizer_input_offset = value;
+    pub fn advance_input_offset(&mut self, consumed: usize) {
+        self.equalizer_input_offset = self.equalizer_input_offset.saturating_add(consumed);
     }
 
-    pub fn drain_equalized_buffer(&mut self, count: usize) {
-        if count >= self.equalized_buffer.len() {
+    pub fn rewind_input_offset(&mut self, drained: usize) {
+        self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(drained);
+    }
+
+    pub fn consume_equalized_prefix(&mut self, count: usize) -> usize {
+        let drained = count.min(self.equalized_buffer.len());
+        if drained == self.equalized_buffer.len() {
             self.equalized_buffer.clear();
-        } else {
-            self.equalized_buffer.drain(0..count);
+        } else if drained > 0 {
+            self.equalized_buffer.drain(0..drained);
         }
+        drained
     }
 
+    #[cfg(test)]
+    pub(crate) fn extend_test_equalized_buffer(&mut self, samples: &[Complex32]) {
+        self.equalized_buffer.extend_from_slice(samples);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_test_equalized_buffer(&mut self, samples: Vec<Complex32>) {
+        self.equalized_buffer = samples;
+        self.equalizer_input_offset = 0;
+    }
 }
 
 #[cfg(test)]
@@ -388,10 +372,7 @@ mod tests {
 
     #[test]
     fn test_postprocess_cir_unit_energy() {
-        let mut cir = vec![
-            Complex32::new(1.0, 0.0),
-            Complex32::new(0.0, 1.0),
-        ];
+        let mut cir = vec![Complex32::new(1.0, 0.0), Complex32::new(0.0, 1.0)];
         postprocess_cir(&mut cir, CirNormalizationMode::UnitEnergy, 0.0);
         let energy = cir.iter().map(|c| c.norm_sqr()).sum::<f32>();
         assert!((energy - 1.0).abs() < 1e-6);
@@ -399,10 +380,7 @@ mod tests {
 
     #[test]
     fn test_postprocess_cir_peak_normalization() {
-        let mut cir = vec![
-            Complex32::new(1.0, 0.0),
-            Complex32::new(0.5, 0.0),
-        ];
+        let mut cir = vec![Complex32::new(1.0, 0.0), Complex32::new(0.5, 0.0)];
         postprocess_cir(&mut cir, CirNormalizationMode::Peak, 0.0);
         let peak = cir.iter().map(|c| c.norm()).fold(0.0f32, |a, b| a.max(b));
         assert!((peak - 1.0).abs() < 1e-6);

@@ -14,21 +14,21 @@ mod packet_decoder;
 mod signal_pipeline;
 mod tracking;
 
+use self::decoder_stats::DecoderStats;
+use self::equalization::{postprocess_cir, EqualizationController, KnownIntervalPathMseInput};
+use self::packet_decoder::{
+    LlrCallback, PacketDecodeBuffers, PacketDecodeOptions, PacketDecodeRuntime,
+};
+use self::signal_pipeline::SignalPipeline;
+use self::tracking::TrackingState;
 use crate::coding::fountain::{FountainDecoder, FountainParams};
 use crate::common::equalization::MmseSettings;
 use crate::common::walsh::WalshCorrelator;
 use crate::frame::packet::Packet;
-use self::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
-use self::equalization::{EqualizationController, KnownIntervalPathMseInput, postprocess_cir};
 use crate::mary::interleaver_config;
-use self::packet_decoder::{
-    LlrCallback, PacketDecodeBuffers, PacketDecodeOptions, PacketDecodeRuntime,
-};
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
-use self::signal_pipeline::SignalPipeline;
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector};
-use self::tracking::TrackingState;
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 use num_complex::Complex32;
@@ -228,7 +228,8 @@ impl Decoder {
         lambda_floor: f32,
         max_inv_gain: Option<f32>,
     ) {
-        self.equalization.set_fde_mmse_settings(snr_db, lambda_scale, lambda_floor, max_inv_gain);
+        self.equalization
+            .set_fde_mmse_settings(snr_db, lambda_scale, lambda_floor, max_inv_gain);
     }
 
     pub fn set_cir_postprocess(
@@ -236,7 +237,8 @@ impl Decoder {
         normalization_mode: CirNormalizationMode,
         tap_threshold_alpha: f32,
     ) {
-        self.equalization.set_cir_postprocess(normalization_mode, tap_threshold_alpha);
+        self.equalization
+            .set_cir_postprocess(normalization_mode, tap_threshold_alpha);
     }
 
     pub fn set_viterbi_list_size(&mut self, list_size: usize) {
@@ -317,15 +319,13 @@ impl Decoder {
 
     fn transition_to_searching_after_frame_end(&mut self) {
         self.search.last_search_idx = 0;
-        self.equalization.set_equalizer_input_offset(0);
-        self.equalization.clear_equalized_buffer();
+        self.equalization.reset_frame_buffers();
         self.frame_session = None;
     }
 
     fn abort_current_frame(&mut self) {
         self.search.last_search_idx = 0;
-        self.equalization.set_equalizer_input_offset(0);
-        self.equalization.clear_equalized_buffer();
+        self.equalization.reset_frame_buffers();
         self.frame_session = None;
     }
 
@@ -337,11 +337,7 @@ impl Decoder {
             self.pipeline.sample_buffer_i.drain(0..drain_len);
             self.pipeline.sample_buffer_q.drain(0..drain_len);
             self.search.last_search_idx = self.search.last_search_idx.saturating_sub(drain_len);
-            let new_offset = self
-                .equalization
-                .equalizer_input_offset()
-                .saturating_sub(drain_len);
-            self.equalization.set_equalizer_input_offset(new_offset);
+            self.equalization.rewind_input_offset(drain_len);
         }
     }
 
@@ -361,9 +357,8 @@ impl Decoder {
             self.pipeline.sample_buffer_q.drain(0..initial_drain_len);
         }
 
-        self.equalization.clear_equalized_buffer();
+        self.equalization.reset_frame_buffers();
         self.search.last_search_idx = 0;
-        self.equalization.set_equalizer_input_offset(0);
 
         if use_fde_this_frame {
             self.equalization
@@ -384,7 +379,7 @@ impl Decoder {
     }
 
     fn feed_unprocessed_samples_to_equalizer(&mut self) -> usize {
-        let start = self.equalization.equalizer_input_offset();
+        let start = self.equalization.input_offset();
         let to_process = self.pipeline.sample_buffer_i.len().saturating_sub(start);
         if to_process == 0 {
             return 0;
@@ -395,7 +390,11 @@ impl Decoder {
         to_process
     }
 
-    fn compute_sync_handoff(&mut self, spc: usize, sync_word_bits: usize) -> Option<SyncHandoffResult> {
+    fn compute_sync_handoff(
+        &mut self,
+        spc: usize,
+        sync_word_bits: usize,
+    ) -> Option<SyncHandoffResult> {
         let required_sync_samples = sync_word_bits * SYNC_SPREAD_FACTOR * spc;
         if self.equalization.equalized_buffer().len() < required_sync_samples {
             return None;
@@ -411,13 +410,13 @@ impl Decoder {
             let mut used = 0usize;
             for i in 0..sync_word_bits {
                 let symbol_start = t_offset + i * SYNC_SPREAD_FACTOR * spc;
-                let corr =
-                    if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
-                    {
-                        c
-                    } else {
-                        break;
-                    };
+                let corr = if let Some(c) =
+                    self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
+                {
+                    c
+                } else {
+                    break;
+                };
                 total_energy += corr[0].norm_sqr();
                 used += 1;
             }
@@ -430,7 +429,8 @@ impl Decoder {
             }
         }
         if best_timing_offset > 0 {
-            self.equalization.drain_equalized_buffer(best_timing_offset);
+            self.equalization
+                .consume_equalized_prefix(best_timing_offset);
         }
 
         let mut tracking_state = self.frame_session().tracking_state;
@@ -448,7 +448,8 @@ impl Decoder {
         let mut sxy = 0.0f32;
         for i in 0..sync_word_bits {
             let symbol_start = i * SYNC_SPREAD_FACTOR * spc;
-            let on = if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
+            let on = if let Some(c) =
+                self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
             {
                 c[0]
             } else {
@@ -514,7 +515,8 @@ impl Decoder {
         tracking_state.phase_ref = Complex32::new(c_ref, s_ref);
 
         let prev_phase = if let Some(&last_y) = self.complex_buffer.last() {
-            let last_sign = self.sync_detector.sync_symbols()[repeat + self.complex_buffer.len() - 1];
+            let last_sign =
+                self.sync_detector.sync_symbols()[repeat + self.complex_buffer.len() - 1];
             let last_corr = last_y * Complex32::new(last_sign, 0.0);
             let (s_last, c_last) = (-phi_last).sin_cos();
             let prev = last_corr * Complex32::new(c_last, s_last);
@@ -565,7 +567,7 @@ impl Decoder {
         self.frame_session_mut()
             .complete_sync_handoff(handoff.tracking_state);
         self.equalization
-            .drain_equalized_buffer(required_sync_samples.saturating_sub(spc));
+            .consume_equalized_prefix(required_sync_samples.saturating_sub(spc));
         true
     }
 
@@ -582,16 +584,14 @@ impl Decoder {
         tracking_state.timing_offset -= offset_int as f32;
         self.frame_session_mut().tracking_state = tracking_state;
 
-        let buffer_len = self.equalization.equalized_buffer().len();
-        self.equalization
-            .equalized_buffer_mut()
-            .drain(0..actual_drain_len.min(buffer_len));
+        self.equalization.consume_equalized_prefix(actual_drain_len);
 
         if let Some(packet) = result.packet {
             self.receive_decoded_packet(packet);
         }
 
-        self.frame_session_mut().record_packet_result(result.success);
+        self.frame_session_mut()
+            .record_packet_result(result.success);
         true
     }
 
@@ -639,24 +639,28 @@ impl Decoder {
         let mut pred_mse_fde = f32::NAN;
         let mut pred_mse_raw = f32::NAN;
         if self.equalization.equalizer_ref().is_some() {
-            let known_end_idx = preamble_start_idx + self.sync_detector.known_interval_len_samples();
-            let (mse_raw, mse_fde) = self.equalization.known_interval_path_mse(
-                KnownIntervalPathMseInput {
-                    sync_detector: &self.sync_detector,
-                    cir: &self.cir_buffer,
-                    sample_buffer_i: &self.pipeline.sample_buffer_i,
-                    sample_buffer_q: &self.pipeline.sample_buffer_q,
-                    preamble_start_idx,
-                    known_end_idx,
-                    cir_len,
-                    mmse,
-                    cfo_rad_per_sample: chq.cfo_rad_per_sample,
-                },
-            );
+            let known_end_idx =
+                preamble_start_idx + self.sync_detector.known_interval_len_samples();
+            let (mse_raw, mse_fde) =
+                self.equalization
+                    .known_interval_path_mse(KnownIntervalPathMseInput {
+                        sync_detector: &self.sync_detector,
+                        cir: &self.cir_buffer,
+                        sample_buffer_i: &self.pipeline.sample_buffer_i,
+                        sample_buffer_q: &self.pipeline.sample_buffer_q,
+                        preamble_start_idx,
+                        known_end_idx,
+                        cir_len,
+                        mmse,
+                        cfo_rad_per_sample: chq.cfo_rad_per_sample,
+                    });
             pred_mse_fde = mse_fde;
             pred_mse_raw = mse_raw;
-            self.equalization
-                .select_path(mse_raw, mse_fde, self.equalization.fde_auto_path_select());
+            self.equalization.select_path(
+                mse_raw,
+                mse_fde,
+                self.equalization.fde_auto_path_select(),
+            );
         }
 
         let use_fde_this_frame = self.equalization.current_frame_use_fde();
@@ -672,7 +676,9 @@ impl Decoder {
         }
 
         let overlap = if use_fde_this_frame {
-            self.equalization.equalizer_ref().map_or(0, |eq| eq.overlap_len())
+            self.equalization
+                .equalizer_ref()
+                .map_or(0, |eq| eq.overlap_len())
         } else {
             0
         };
@@ -743,7 +749,7 @@ impl Decoder {
             return to_process > 0;
         }
 
-        if self.equalization.equalized_buffer_mut().len() < packet_samples + spc {
+        if self.equalization.equalized_len() < packet_samples + spc {
             return false;
         }
 
@@ -805,11 +811,8 @@ impl Decoder {
             self.rebuild_fountain_decoder(pkt_k);
         }
 
-        let result = fountain_receiver::receive_packet(
-            &mut self.fountain_decoder,
-            &mut self.stats,
-            packet,
-        );
+        let result =
+            fountain_receiver::receive_packet(&mut self.fountain_decoder, &mut self.stats, packet);
         if let Some(data) = result.recovered_data {
             self.recovered_data = Some(data);
         }
@@ -823,7 +826,11 @@ impl Decoder {
     }
 
     fn progress(&self) -> DecodeProgress {
-        self.stats.to_progress(&self.fountain_decoder, &self.config, self.recovered_data.is_some())
+        self.stats.to_progress(
+            &self.fountain_decoder,
+            &self.config,
+            self.recovered_data.is_some(),
+        )
     }
 
     fn equalize_from_complex_buffer(&mut self, valid_len: usize, raw_consumed: usize) {
@@ -842,8 +849,7 @@ impl Decoder {
         }
 
         // A. 等化器へ投入済みオフセットを先に進める（drainで前方を削った分は後で戻す）
-        let new_offset = self.equalization.equalizer_input_offset().saturating_add(raw_consumed);
-        self.equalization.set_equalizer_input_offset(new_offset);
+        self.equalization.advance_input_offset(raw_consumed);
 
         // B. 生バッファの物理削除 (投入時に実行)
         // フレーム境界を壊さないよう、ウォームアップ + remaining を上限にする。
@@ -851,12 +857,13 @@ impl Decoder {
             .frame_session
             .as_ref()
             .map_or(0, FrameSession::raw_drain_limit);
-        let to_drain_raw = raw_consumed.min(limit).min(self.pipeline.sample_buffer_i.len());
+        let to_drain_raw = raw_consumed
+            .min(limit)
+            .min(self.pipeline.sample_buffer_i.len());
         if to_drain_raw > 0 {
             self.pipeline.sample_buffer_i.drain(0..to_drain_raw);
             self.pipeline.sample_buffer_q.drain(0..to_drain_raw);
-            let new_offset = self.equalization.equalizer_input_offset().saturating_sub(to_drain_raw);
-            self.equalization.set_equalizer_input_offset(new_offset);
+            self.equalization.rewind_input_offset(to_drain_raw);
 
             if let Some(frame_session) = self.frame_session.as_mut() {
                 frame_session.consume_raw_input(to_drain_raw);
@@ -1274,8 +1281,8 @@ mod tests {
         if let Some(s) = sync_opt {
             // peak_sample_idx は同期語 0 番目の最初のチップの中央
             // 期待値 = (プリアンブル終了点) + (チップ 0 の半分) + (受信側遅延) + (送信側遅延)
-            let rx_delay = decoder.pipeline.resampler_i.delay()
-                + decoder.pipeline.rrc_filter_i.delay();
+            let rx_delay =
+                decoder.pipeline.resampler_i.delay() + decoder.pipeline.rrc_filter_i.delay();
             let detector_delay = decoder.sync_detector.filter_delay();
             // 同期位置は「送信側RRC群遅延」ではなく、TX resampler の遅延寄与で整合する。
             let tx_rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
@@ -1772,7 +1779,9 @@ mod tests {
         let spc = decoder.config.proc_samples_per_chip().max(1);
 
         // 上側境界には十分余裕を持たせる
-        decoder.equalization.equalized_buffer_mut().extend_from_slice(&vec![Complex32::new(0.0, 0.0); 256]);
+        decoder
+            .equalization
+            .extend_test_equalized_buffer(&vec![Complex32::new(0.0, 0.0); 256]);
 
         // 先頭付近のシンボルで、trackingの下限方向へ寄せる
         let symbol_start = spc;
@@ -1817,8 +1826,10 @@ mod tests {
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: packet_samples as isize,
         });
-        decoder.equalization.clear_equalized_buffer();
-        decoder.equalization.equalized_buffer_mut().extend_from_slice(&vec![Complex32::new(0.0, 0.0); packet_samples + spc + 8]);
+        decoder.equalization.replace_test_equalized_buffer(vec![
+            Complex32::new(0.0, 0.0);
+            packet_samples + spc + 8
+        ]);
 
         let advanced = decoder.handle_decoding();
         assert!(!advanced, "underflow path should stop current decode step");
