@@ -74,6 +74,10 @@ mod tests {
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.last_packet_seq, Some(0));
         assert_eq!(stats.last_rank_up_seq, Some(0));
+        assert_eq!(stats.stalled_packets, 0);
+        assert_eq!(stats.dependent_packets, 0);
+        assert_eq!(stats.duplicate_packets, 0);
+        assert_eq!(stats.parse_error_packets, 0);
         assert_eq!(result.recovered_data.as_deref(), Some(data.as_slice()));
     }
 
@@ -95,6 +99,9 @@ mod tests {
         assert!(second.recovered_data.is_none());
         assert_eq!(stats.received_packets, 1);
         assert_eq!(stats.duplicate_packets, 1);
+        assert_eq!(stats.stalled_packets, 0);
+        assert_eq!(stats.dependent_packets, 0);
+        assert_eq!(stats.parse_error_packets, 0);
         assert_eq!(stats.last_packet_seq, Some(0));
         assert_eq!(stats.last_rank_up_seq, Some(0));
     }
@@ -121,7 +128,31 @@ mod tests {
         assert_eq!(stats.received_packets, 2);
         assert_eq!(stats.stalled_packets, 1);
         assert_eq!(stats.dependent_packets, 1);
+        assert_eq!(stats.duplicate_packets, 0);
+        assert_eq!(stats.parse_error_packets, 0);
         assert_eq!(stats.last_packet_seq, Some(1));
         assert_eq!(stats.last_rank_up_seq, Some(0));
+    }
+
+    #[test]
+    fn test_receive_packet_duplicate_after_decode_keeps_rank_progress_unchanged() {
+        let data = vec![0x7c; PAYLOAD_SIZE];
+        let params = FountainParams::new(1, PAYLOAD_SIZE);
+        let mut encoder = FountainEncoder::new(&data, params.clone());
+        let mut decoder = FountainDecoder::new(params);
+        let mut stats = DecoderStats::new();
+
+        let fountain_packet = encoder.next_packet();
+        let packet = Packet::new(fountain_packet.seq as u16, 1, &fountain_packet.data);
+
+        let first = receive_packet(&mut decoder, &mut stats, packet.clone());
+        let second = receive_packet(&mut decoder, &mut stats, packet);
+
+        assert_eq!(first.recovered_data.as_deref(), Some(data.as_slice()));
+        assert_eq!(second.recovered_data.as_deref(), Some(data.as_slice()));
+        assert_eq!(stats.received_packets, 1);
+        assert_eq!(stats.last_packet_seq, Some(0));
+        assert_eq!(stats.last_rank_up_seq, Some(0));
+        assert_eq!(stats.duplicate_packets, 1);
     }
 }
