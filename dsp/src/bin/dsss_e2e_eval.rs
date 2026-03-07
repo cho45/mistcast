@@ -837,6 +837,149 @@ where
     false
 }
 
+/// ウォームアップ処理を実行する
+fn run_warmup<E, D>(
+    encoder: &mut E,
+    decoder: &mut D,
+    state: &mut TrialState,
+    sample_rate: f32,
+    imp: &ChannelImpairment,
+    rng: &mut StdRng,
+    chunk: usize,
+) where
+    E: WarmupSignal,
+    D: ProcessSamples,
+{
+    let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
+    state.tx_signal_energy_sum += signal_energy(&warmup);
+    state.tx_signal_samples += warmup.len();
+    let warmup_rx = apply_channel(&warmup, imp, rng, false);
+    state.elapsed_sec += warmup_rx.len() as f32 / sample_rate;
+    process_samples_in_chunks(&warmup_rx, chunk, decoder, state, |_, _| {
+        ControlFlow::Continue
+    });
+}
+
+/// ギャップ処理を実行する（完了チェック付き）
+fn run_gap_with_completion<D, F>(
+    decoder: &mut D,
+    state: &mut TrialState,
+    sample_rate: f32,
+    imp: &ChannelImpairment,
+    rng: &mut StdRng,
+    chunk: usize,
+    gap_samples: usize,
+    mut on_complete: F,
+) where
+    D: ProcessSamples,
+    F: FnMut(&D::Progress, &mut TrialState) -> bool,
+{
+    if gap_samples == 0 {
+        return;
+    }
+    let mut gap_sig = vec![0.0f32; gap_samples];
+    add_awgn_with_rng(&mut gap_sig, imp.sigma, rng);
+    if imp.ppm.abs() >= 1.0 {
+        gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
+    }
+    state.elapsed_sec += gap_sig.len() as f32 / sample_rate;
+    process_samples_in_chunks(&gap_sig, chunk, decoder, state, |progress, state| {
+        if on_complete(progress, state) {
+            ControlFlow::Complete
+        } else {
+            ControlFlow::Continue
+        }
+    });
+}
+
+/// フラッシュ処理を実行する
+fn run_flush<E, D>(
+    encoder: &mut E,
+    decoder: &mut D,
+    state: &mut TrialState,
+    sample_rate: f32,
+    imp: &ChannelImpairment,
+    rng: &mut StdRng,
+    chunk: usize,
+) where
+    E: FlushSignal,
+    D: ProcessSamples,
+{
+    let flush = encoder.flush();
+    if flush.is_empty() {
+        return;
+    }
+    state.tx_signal_energy_sum += signal_energy(&flush);
+    state.tx_signal_samples += flush.len();
+    let flush_rx = apply_channel(&flush, imp, rng, false);
+    state.elapsed_sec += flush_rx.len() as f32 / sample_rate;
+    process_samples_in_chunks(&flush_rx, chunk, decoder, state, |_, _| {
+        ControlFlow::Continue
+    });
+}
+
+/// テール処理を実行する
+fn run_tail<E, D>(
+    encoder: &mut E,
+    decoder: &mut D,
+    state: &mut TrialState,
+    sample_rate: f32,
+    imp: &ChannelImpairment,
+    rng: &mut StdRng,
+    chunk: usize,
+) where
+    E: WarmupSignal,
+    D: ProcessSamples,
+{
+    let tail = encoder.modulate_silence(TX_TAIL_SAMPLES);
+    if tail.is_empty() {
+        return;
+    }
+    state.tx_signal_energy_sum += signal_energy(&tail);
+    state.tx_signal_samples += tail.len();
+    let tail_rx = apply_channel(&tail, imp, rng, false);
+    state.elapsed_sec += tail_rx.len() as f32 / sample_rate;
+    process_samples_in_chunks(&tail_rx, chunk, decoder, state, |_, _| {
+        ControlFlow::Continue
+    });
+}
+
+/// ウォームアップ/テール信号生成のためのトレイト
+trait WarmupSignal {
+    fn modulate_silence(&mut self, samples: usize) -> Vec<f32>;
+}
+
+/// フラッシュ信号生成のためのトレイト
+trait FlushSignal {
+    fn flush(&mut self) -> Vec<f32>;
+}
+
+// DsssEncoderにトレイトを実装
+impl WarmupSignal for dsp::dsss::encoder::Encoder {
+    fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        dsp::dsss::encoder::Encoder::modulate_silence(self, samples)
+    }
+}
+
+impl FlushSignal for dsp::dsss::encoder::Encoder {
+    fn flush(&mut self) -> Vec<f32> {
+        dsp::dsss::encoder::Encoder::flush(self)
+    }
+}
+
+// MaryEncoderにトレイトを実装
+impl WarmupSignal for dsp::mary::encoder::Encoder {
+    fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        dsp::mary::encoder::Encoder::modulate_silence(self, samples)
+    }
+}
+
+impl FlushSignal for dsp::mary::encoder::Encoder {
+    fn flush(&mut self) -> Vec<f32> {
+        dsp::mary::encoder::Encoder::flush(self)
+    }
+}
+
 impl Metrics {
     fn push(&mut self, t: TrialResult) {
         self.trials += 1;
@@ -1475,14 +1618,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
     let chunk = cli.chunk_samples.max(1);
     let gap = cli.gap_samples;
-    let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
-    state.tx_signal_energy_sum += signal_energy(&warmup);
-    state.tx_signal_samples += warmup.len();
-    let warmup_rx = apply_channel(&warmup, imp, &mut rng, false);
-    state.elapsed_sec += warmup_rx.len() as f32 / tx_cfg.sample_rate;
-    process_samples_in_chunks(&warmup_rx, chunk, &mut decoder, &mut state, |_, _| {
-        ControlFlow::Continue
-    });
+
+    run_warmup(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
     {
         let mut stream = encoder.encode_stream(&payload);
         loop {
@@ -1520,55 +1657,31 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     .build();
             }
 
-            if gap > 0 {
-                let mut gap_sig = vec![0.0f32; gap];
-                add_awgn_with_rng(&mut gap_sig, imp.sigma, &mut rng);
-                if imp.ppm.abs() >= 1.0 {
-                    gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
+            let mut complete = false;
+            run_gap_with_completion(&mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk, gap, |progress, _state| {
+                if progress.complete {
+                    complete = true;
+                    true
+                } else {
+                    false
                 }
-                state.elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
-                let complete = process_samples_in_chunks(&gap_sig, chunk, &mut decoder, &mut state, |progress, _state| {
-                    if progress.complete {
-                        ControlFlow::Complete
-                    } else {
-                        ControlFlow::Continue
-                    }
-                });
-                if complete {
-                    let progress = decoder.process_samples(&[]);
-                    let recovered = decoder.recovered_data();
-                    let errs = count_bit_errors_bytes(&payload, recovered);
-                    let bits_compared = payload.len() * 8;
-                    return TrialResultBuilder::new(&state)
-                        .success(errs == 0, errs, bits_compared)
-                        .frame_stats(progress.synced_frames, progress.received_packets, progress.crc_error_packets)
-                        .build();
-                }
+            });
+            if complete {
+                let progress = decoder.process_samples(&[]);
+                let recovered = decoder.recovered_data();
+                let errs = count_bit_errors_bytes(&payload, recovered);
+                let bits_compared = payload.len() * 8;
+                return TrialResultBuilder::new(&state)
+                    .success(errs == 0, errs, bits_compared)
+                    .frame_stats(progress.synced_frames, progress.received_packets, progress.crc_error_packets)
+                    .build();
             }
         }
     }
 
-    let flush = encoder.flush();
-    if !flush.is_empty() {
-        state.tx_signal_energy_sum += signal_energy(&flush);
-        state.tx_signal_samples += flush.len();
-        let flush_rx = apply_channel(&flush, imp, &mut rng, false);
-        state.elapsed_sec += flush_rx.len() as f32 / tx_cfg.sample_rate;
-        process_samples_in_chunks(&flush_rx, chunk, &mut decoder, &mut state, |_, _| {
-            ControlFlow::Continue
-        });
-    }
+    run_flush(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
 
-    let tail = encoder.modulate_silence(TX_TAIL_SAMPLES);
-    if !tail.is_empty() {
-        state.tx_signal_energy_sum += signal_energy(&tail);
-        state.tx_signal_samples += tail.len();
-        let tail_rx = apply_channel(&tail, imp, &mut rng, false);
-        state.elapsed_sec += tail_rx.len() as f32 / tx_cfg.sample_rate;
-        process_samples_in_chunks(&tail_rx, chunk, &mut decoder, &mut state, |_, _| {
-            ControlFlow::Continue
-        });
-    }
+    run_tail(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
 
     let bits_compared = payload.len() * 8;
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
@@ -1713,14 +1826,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         }));
     }
 
-    let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
-    state.tx_signal_energy_sum += signal_energy(&warmup);
-    state.tx_signal_samples += warmup.len();
-    let warmup_rx = apply_channel(&warmup, imp, &mut rng, false);
-    state.elapsed_sec += warmup_rx.len() as f32 / tx_cfg.sample_rate;
-    process_samples_in_chunks(&warmup_rx, chunk, &mut decoder, &mut state, |_, _| {
-        ControlFlow::Continue
-    });
+    run_warmup(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
 
     loop {
         if state.elapsed_sec >= cli.max_sec {
