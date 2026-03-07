@@ -87,7 +87,7 @@ pub struct ChannelImpairment {
     pub sigma: f32,
     pub cfo_hz: f32,
     pub ppm: f32,
-    pub burst_loss: f32,
+    pub frame_loss: f32,
     pub fading_depth: f32,
     pub multipath: MultipathProfile,
 }
@@ -174,9 +174,9 @@ pub fn apply_channel(
     tx: &[f32],
     imp: &ChannelImpairment,
     rng: &mut StdRng,
-    drop_burst: bool,
+    drop_frame: bool,
 ) -> Vec<f32> {
-    let mut sig = if drop_burst {
+    let mut sig = if drop_frame {
         vec![0.0f32; tx.len()]
     } else {
         apply_multipath(tx, &imp.multipath)

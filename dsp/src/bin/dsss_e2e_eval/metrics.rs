@@ -118,51 +118,96 @@ pub struct TrialResult {
     pub llr_second_pass_rescued: usize,
 }
 
+/// 評価シミュレーションの集計メトリクス
 #[derive(Default, Clone, Debug)]
 pub struct Metrics {
+    /// シミュレーション上の信号の総時間 [sec]
     pub total_sim_sec: f32,
+    /// 送信を試みた総フレーム数
     pub total_frame_attempts: usize,
+    /// 1フレームに含まれるパケット数
     pub packets_per_frame: usize,
+    /// 受信側で同期（Preamble等）が成立した総フレーム数
     pub total_synced_frames: usize,
+    /// CRCを通過し、正常に復元された総パケット数
     pub total_accepted_packets: usize,
+    /// CRCエラーとなった総パケット数
     pub total_crc_error_packets: usize,
+    /// 復元された全ビットにおけるエラービットの総数
     pub total_bit_errors: usize,
+    /// BER計算のために比較された総ビット数
     pub total_bits_compared: usize,
+    /// 通信路で意図的にドロップ（消失）された総フレーム数
     pub dropped_frames: usize,
+    /// 送信信号の総エネルギー（SNR算出用）
     pub total_tx_signal_energy: f64,
+    /// 送信信号の総サンプル数（SNR算出用）
     pub total_tx_signal_samples: usize,
+    /// 信号処理（デコード）に要した合計CPU時間 [ns]
     pub total_process_time_ns: u64,
+    /// 各パケットの復元成功までにかかった時間のリスト（MTTD算出用）
     pub completion_secs: Vec<f32>,
+    /// FEC適用前のハード判定におけるエラービット総数
     pub total_raw_bit_errors: usize,
+    /// FEC適用前に比較された総ビット数
     pub total_raw_bits_compared: usize,
+    /// FEC適用前のエラーラン（連続エラー）の総数
     pub total_raw_error_runs: usize,
+    /// FEC適用前のエラーランに含まれるエラービット総数
     pub total_raw_error_run_bits: usize,
+    /// FEC適用前の最大エラーラン長
     pub max_raw_error_run_len: usize,
+    /// 処理された総コードワード数
     pub total_codewords: usize,
+    /// 各コードワード内のエラービット数の総和
     pub total_codeword_error_sum: usize,
+    /// コードワードあたりの最大エラービット数
     pub max_codeword_error: usize,
+    /// 各コードワードのエラービット分布
     pub codeword_error_weights: Vec<usize>,
+    /// FEC適用後のビットエラー総数
     pub total_post_bit_errors: usize,
+    /// FEC適用後に比較された総ビット数
     pub total_post_bits_compared: usize,
+    /// FEC適用後のエラーランの総数
     pub total_post_error_runs: usize,
+    /// FEC適用後のエラーランに含まれるエラービット総数
     pub total_post_error_run_bits: usize,
+    /// FEC適用後の最大エラーラン長
     pub max_post_error_run_len: usize,
+    /// FEC適用後の総コードワード数
     pub total_post_codewords: usize,
+    /// FEC適用後のコードワード内エラービット総和
     pub total_post_codeword_error_sum: usize,
+    /// FEC適用後の最大コードワードエラー数
     pub max_post_codeword_error: usize,
+    /// FEC適用後のコードワードエラー分布
     pub post_codeword_error_weights: Vec<usize>,
+    /// Post-FECデコードを試みた総回数
     pub total_post_decode_attempts: usize,
+    /// 送信側データと一致したPost-FECデコード数
     pub total_post_decode_matched: usize,
+    /// 推定SNRの累積和 [dB]
     pub sum_last_est_snr_db: f64,
+    /// 推定SNRのサンプル数
     pub count_last_est_snr_db: usize,
+    /// 位相ゲート（Phase Gate）がON（有効）だったシンボル数
     pub total_phase_gate_on_symbols: usize,
+    /// 位相ゲートがOFF（無効）だったシンボル数
     pub total_phase_gate_off_symbols: usize,
+    /// 位相変化が急峻すぎて棄却されたシンボル数
     pub total_phase_innovation_reject_symbols: usize,
+    /// 位相誤差の絶対値の累積 [rad]
     pub total_phase_err_abs_sum_rad: f64,
+    /// 位相誤差計測の総サンプル数
     pub total_phase_err_abs_count: usize,
+    /// 位相誤差が 0.5 rad を超えたシンボル数
     pub total_phase_err_abs_ge_0p5_symbols: usize,
+    /// 位相誤差が 1.0 rad を超えたシンボル数
     pub total_phase_err_abs_ge_1p0_symbols: usize,
+    /// LLR消去（Erasure）第2パスを試みた総回数
     pub total_llr_second_pass_attempts: usize,
+    /// LLR第2パスによって救済されたパケット総数
     pub total_llr_second_pass_rescued: usize,
 }
 
@@ -466,15 +511,25 @@ impl Metrics {
         }
     }
 
+    /// パケット到達率 (PDR: Packet Delivery Ratio)
+    /// 分母 = 総送信フレーム数 * 1フレームあたりのパケット数
+    /// 送信を試みた総フレーム数
     pub fn p_complete(&self) -> f32 {
         let total_packets_sent = self.total_frame_attempts * self.packets_per_frame;
         ratio(self.total_accepted_packets, total_packets_sent)
     }
 
+
+    /// フレーム同期成功率
+    /// 分母 = 総送信フレーム数
+    /// 分子 = 受信側で同期が成立した総フレーム数
     pub fn synced_frame_ratio(&self) -> f32 {
         ratio(self.total_synced_frames, self.total_frame_attempts)
     }
 
+    /// CRC通過率（同期したパケットのうち、正常だった割合）
+    /// 分母 = 処理された全パケット (Accepted + CRC Error)
+    /// 分子 = Accepted パケット
     pub fn crc_pass_ratio(&self) -> f32 {
         ratio(
             self.total_accepted_packets,
@@ -482,6 +537,7 @@ impl Metrics {
         )
     }
 
+    /// LLR消去第2パスのトリガー率
     pub fn llr_second_pass_trigger_ratio(&self) -> f32 {
         ratio(
             self.total_llr_second_pass_attempts,
@@ -489,6 +545,7 @@ impl Metrics {
         )
     }
 
+    /// LLR消去第2パスによる救済率
     pub fn llr_second_pass_rescue_ratio(&self) -> f32 {
         ratio(
             self.total_llr_second_pass_rescued,
@@ -496,6 +553,7 @@ impl Metrics {
         )
     }
 
+    /// ビットエラーレート (BER)
     pub fn ber(&self) -> f32 {
         if self.total_bits_compared == 0 {
             0.0
@@ -504,10 +562,12 @@ impl Metrics {
         }
     }
 
+    /// パケット到達時間の95パーセンタイル [sec]
     pub fn p95_completion_sec(&self) -> Option<f32> {
         quantile(&self.completion_secs, 0.95)
     }
 
+    /// 平均パケット到達時間 (MTTD: Mean Time To Deliver) [sec]
     pub fn mean_completion_sec(&self) -> Option<f32> {
         if self.completion_secs.is_empty() {
             None
@@ -516,6 +576,8 @@ impl Metrics {
         }
     }
 
+    /// 実効スループット (Effective Goodput) [bps]
+    /// 成功パケットの総ビット数 / シミュレーション総時間
     pub fn goodput_effective_bps(&self, payload_bits: usize) -> f32 {
         if self.total_sim_sec <= 0.0 {
             0.0
@@ -524,6 +586,8 @@ impl Metrics {
         }
     }
 
+    /// 成功パケットごとのスループット平均 [bps]
+    /// 各パケットの (ビット数 / 到達時間) の平均
     pub fn goodput_success_mean_bps(&self, payload_bits: usize) -> Option<f32> {
         if self.completion_secs.is_empty() {
             return None;
@@ -536,6 +600,7 @@ impl Metrics {
         Some(sum / self.completion_secs.len() as f32)
     }
 
+    /// 送信信号の平均電力
     pub fn tx_signal_power(&self) -> Option<f32> {
         if self.total_tx_signal_samples == 0 {
             None
@@ -544,6 +609,7 @@ impl Metrics {
         }
     }
 
+    /// サンプルあたりの平均処理時間 [ns/sample]
     pub fn avg_process_time_per_sample_ns(&self) -> f32 {
         if self.total_tx_signal_samples == 0 {
             0.0
@@ -552,6 +618,7 @@ impl Metrics {
         }
     }
 
+    /// FEC前（生）のビットエラーレート
     pub fn raw_ber(&self) -> f32 {
         if self.total_raw_bits_compared == 0 {
             f32::NAN
@@ -560,6 +627,7 @@ impl Metrics {
         }
     }
 
+    /// 生ビットのエラーラン平均長
     pub fn raw_err_run_mean(&self) -> Option<f32> {
         if self.total_raw_error_runs == 0 {
             None
@@ -568,6 +636,7 @@ impl Metrics {
         }
     }
 
+    /// 生ビットの最大エラーラン長
     pub fn raw_err_run_max(&self) -> Option<usize> {
         if self.max_raw_error_run_len == 0 {
             None
@@ -576,6 +645,7 @@ impl Metrics {
         }
     }
 
+    /// コードワードあたりの平均エラービット数
     pub fn err_w_cw_mean(&self) -> Option<f32> {
         if self.total_codewords == 0 {
             None
@@ -608,6 +678,7 @@ impl Metrics {
         error_weight_hist(&self.codeword_error_weights)
     }
 
+    /// FEC適用後のビットエラーレート
     pub fn post_ber(&self) -> f32 {
         if self.total_post_bits_compared == 0 {
             f32::NAN
@@ -616,6 +687,7 @@ impl Metrics {
         }
     }
 
+    /// Post-FECデコード結果が送信データと一致した割合
     pub fn post_decode_match_ratio(&self) -> f32 {
         ratio(
             self.total_post_decode_matched,
@@ -671,6 +743,7 @@ impl Metrics {
         error_weight_hist(&self.post_codeword_error_weights)
     }
 
+    /// 平均推定SNR [dB]
     pub fn avg_last_est_snr_db(&self) -> Option<f32> {
         if self.count_last_est_snr_db == 0 {
             None
@@ -679,6 +752,7 @@ impl Metrics {
         }
     }
 
+    /// 設定値 sigma から計算した理論上のAWGN SNR [dB]
     pub fn awgn_snr_db(&self, sigma: f32) -> Option<f32> {
         if sigma <= 0.0 {
             return None;
@@ -691,6 +765,7 @@ impl Metrics {
         Some(10.0 * (p_sig / p_noise).log10())
     }
 
+    /// 位相ゲート有効率
     pub fn phase_gate_on_ratio(&self) -> f32 {
         ratio(
             self.total_phase_gate_on_symbols,
@@ -698,6 +773,7 @@ impl Metrics {
         )
     }
 
+    /// 位相変化棄却率
     pub fn phase_innovation_reject_ratio(&self) -> f32 {
         ratio(
             self.total_phase_innovation_reject_symbols,
@@ -705,6 +781,7 @@ impl Metrics {
         )
     }
 
+    /// 平均絶対位相誤差 [rad]
     pub fn phase_err_abs_mean_rad(&self) -> Option<f32> {
         if self.total_phase_err_abs_count == 0 {
             None
@@ -713,6 +790,7 @@ impl Metrics {
         }
     }
 
+    /// 0.5 rad 以上の位相誤差が発生した割合
     pub fn phase_err_abs_ge_0p5_ratio(&self) -> f32 {
         ratio(
             self.total_phase_err_abs_ge_0p5_symbols,
@@ -720,6 +798,7 @@ impl Metrics {
         )
     }
 
+    /// 1.0 rad 以上の位相誤差が発生した割合
     pub fn phase_err_abs_ge_1p0_ratio(&self) -> f32 {
         ratio(
             self.total_phase_err_abs_ge_1p0_symbols,

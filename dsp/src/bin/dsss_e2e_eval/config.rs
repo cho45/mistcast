@@ -176,7 +176,7 @@ pub struct Cli {
     pub phy: Phy,
     #[arg(long, value_enum, default_value_t = EvalMode::Point)]
     pub mode: EvalMode,
-    #[arg(long = "total-sim-sec", value_parser = parse_positive_f32, default_value_t = 10.0)]
+    #[arg(long = "total-sim-sec", value_parser = parse_positive_f32, default_value_t = 60.0)]
     pub total_sim_sec: f32,
     #[arg(long = "payload-bytes", value_parser = parse_positive_usize, default_value_t = 64)]
     pub payload_bytes: usize,
@@ -194,8 +194,8 @@ pub struct Cli {
     pub cfo_hz: f32,
     #[arg(long, default_value_t = 0.0)]
     pub ppm: f32,
-    #[arg(long = "burst-loss", value_parser = parse_unit_interval_f32, default_value_t = 0.0)]
-    pub burst_loss: f32,
+    #[arg(long = "frame-loss", value_parser = parse_unit_interval_f32, default_value_t = 0.0)]
+    pub frame_loss: f32,
     #[arg(long = "fading-depth", value_parser = parse_unit_interval_f32, default_value_t = 0.0)]
     pub fading_depth: f32,
     #[arg(long, default_value = "none")]
@@ -226,8 +226,8 @@ pub struct Cli {
     pub sync_word_bits: usize,
     #[arg(long = "preamble-repeat", default_value_t = dsp::params::PREAMBLE_REPEAT)]
     pub preamble_repeat: usize,
-    #[arg(long = "packets-per-burst", default_value_t = dsp::params::PACKETS_PER_SYNC_BURST)]
-    pub packets_per_burst: usize,
+    #[arg(long = "packets-per-frame", default_value_t = dsp::params::PACKETS_PER_SYNC_BURST)]
+    pub packets_per_frame: usize,
     #[arg(long = "preamble-sf", default_value_t = dsp::params::PREAMBLE_SF)]
     pub preamble_sf: usize,
     #[arg(long = "mary-fde", value_enum, default_value_t = MaryFdeMode::On)]
@@ -280,7 +280,7 @@ impl Cli {
             sigma: self.sigma,
             cfo_hz: self.cfo_hz,
             ppm: self.ppm,
-            burst_loss: self.burst_loss,
+            frame_loss: self.frame_loss,
             fading_depth: self.fading_depth,
             multipath: self.multipath.clone(),
         }

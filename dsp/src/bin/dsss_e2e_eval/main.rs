@@ -30,7 +30,7 @@ fn run_point(cli: &Cli) {
     let base = cli.base_impairment();
     let scenario = format!(
         "point(bytes={},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2},fade={:.2})",
-        cli.payload_bytes, base.sigma, base.cfo_hz, base.ppm, base.burst_loss, base.fading_depth
+        cli.payload_bytes, base.sigma, base.cfo_hz, base.ppm, base.frame_loss, base.fading_depth
     );
     evaluate(cli, &base, &scenario);
 }
@@ -68,7 +68,7 @@ fn run_sweep_loss(cli: &Cli) {
     print_header(cli);
     let mut base = cli.base_impairment();
     for &loss in &cli.sweep_loss {
-        base.burst_loss = loss;
+        base.frame_loss = loss;
         let scenario = format!("sweep_loss(loss={loss:.2})");
         evaluate(cli, &base, &scenario);
     }
@@ -154,7 +154,7 @@ mod tests {
             sigma: 0.0,
             cfo_hz: 0.0,
             ppm: 0.0,
-            burst_loss: 0.0,
+            frame_loss: 0.0,
             fading_depth: 0.0,
             multipath: MultipathProfile::none(),
             sweep_awgn: vec![],
@@ -170,7 +170,7 @@ mod tests {
             rrc_alpha: 0.3,
             sync_word_bits: 16,
             preamble_repeat: 2,
-            packets_per_burst: 1,
+            packets_per_frame: 1,
             preamble_sf: 13,
             mary_fde_mode: MaryFdeMode::On,
             mary_fde_snr_db: 15.0,
@@ -205,7 +205,7 @@ mod tests {
             sigma: 0.0,
             cfo_hz: 0.0,
             ppm: 0.0,
-            burst_loss: 0.0,
+            frame_loss: 0.0,
             fading_depth: 0.0,
             multipath: MultipathProfile::none(),
             sweep_awgn: vec![],
@@ -221,7 +221,7 @@ mod tests {
             rrc_alpha: 0.3,
             sync_word_bits: 16,
             preamble_repeat: 2,
-            packets_per_burst: 1,
+            packets_per_frame: 1,
             preamble_sf: 13,
             mary_fde_mode: MaryFdeMode::On,
             mary_fde_snr_db: 15.0,

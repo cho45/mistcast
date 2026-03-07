@@ -5,7 +5,7 @@ use dsp::mary::decoder::Decoder as MaryDecoder;
 use rand::rngs::StdRng;
 
 pub const TX_WARMUP_SAMPLES: usize = 4096;
-pub const TX_TAIL_SAMPLES: usize = 4096;
+pub const TX_TAIL_SAMPLES: usize = 4096*4;
 
 /// プロセスを継続するか、完了したか
 pub enum ControlFlow {

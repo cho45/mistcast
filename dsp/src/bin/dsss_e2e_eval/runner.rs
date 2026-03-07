@@ -44,7 +44,7 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     tx_cfg.rrc_alpha = cli.rrc_alpha;
     tx_cfg.sync_word_bits = cli.sync_word_bits;
     tx_cfg.preamble_repeat = cli.preamble_repeat;
-    tx_cfg.packets_per_burst = cli.packets_per_burst;
+    tx_cfg.packets_per_burst = cli.packets_per_frame;
     tx_cfg.preamble_sf = cli.preamble_sf;
 
     let mut rx_cfg = tx_cfg.clone();
@@ -54,10 +54,10 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     let k = payload.len().div_ceil(PAYLOAD_SIZE).max(1);
     let mut enc_cfg = DsssEncoderConfig::new(tx_cfg.clone());
     enc_cfg.fountain_k = k;
-    enc_cfg.packets_per_sync_burst = cli.packets_per_burst;
+    enc_cfg.packets_per_sync_burst = cli.packets_per_frame;
     let mut encoder = DsssEncoder::new(enc_cfg);
     let mut decoder = DsssDecoder::new(payload.len(), k, rx_cfg);
-    decoder.config.packets_per_burst = cli.packets_per_burst;
+    decoder.config.packets_per_burst = cli.packets_per_frame;
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut state = TrialState {
@@ -101,11 +101,11 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
             state.tx_signal_energy_sum += signal_energy(&frame);
             state.tx_signal_samples += frame.len();
 
-            let drop_burst = sim_cfg.rng.gen::<f32>() < imp.burst_loss;
-            if drop_burst {
+            let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
+            if drop_frame {
                 state.dropped_frames += 1;
             }
-            let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_burst);
+            let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
             state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
             
             process_samples_in_chunks(
@@ -179,7 +179,7 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         Some(completion_secs.iter().sum::<f32>() / completion_secs.len() as f32)
     };
 
-    TrialResultBuilder::new(&state, cli.packets_per_burst)
+    TrialResultBuilder::new(&state, cli.packets_per_frame)
         .bit_errors(total_bit_errors, total_bits_compared)
         .completion_sec(avg_completion)
         .packet_stats(
@@ -198,7 +198,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     tx_cfg.rrc_alpha = cli.rrc_alpha;
     tx_cfg.sync_word_bits = cli.sync_word_bits;
     tx_cfg.preamble_repeat = cli.preamble_repeat;
-    tx_cfg.packets_per_burst = cli.packets_per_burst;
+    tx_cfg.packets_per_burst = cli.packets_per_frame;
     tx_cfg.preamble_sf = cli.preamble_sf;
 
     let mut rx_cfg = tx_cfg.clone();
@@ -211,7 +211,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     encoder.set_data(&payload);
 
     let mut decoder = MaryDecoder::new(payload.len(), k, rx_cfg);
-    decoder.config.packets_per_burst = cli.packets_per_burst;
+    decoder.config.packets_per_burst = cli.packets_per_frame;
     apply_mary_fde_mode(&mut decoder, cli.mary_fde_mode);
     decoder.set_fde_mmse_settings(
         cli.mary_fde_snr_db,
@@ -272,9 +272,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
             break;
         }
 
-        let burst_count = cli.packets_per_burst.max(1);
-        let mut packets = Vec::with_capacity(burst_count);
-        for _ in 0..burst_count {
+        let packet_count_per_frame = cli.packets_per_frame.max(1);
+        let mut packets = Vec::with_capacity(packet_count_per_frame);
+        for _ in 0..packet_count_per_frame {
             let fp = fountain_encoder.next_packet();
             ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
             packets.push(fp);
@@ -285,11 +285,11 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         state.tx_signal_energy_sum += signal_energy(&frame);
         state.tx_signal_samples += frame.len();
 
-        let drop_burst = sim_cfg.rng.gen::<f32>() < imp.burst_loss;
-        if drop_burst {
+        let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
+        if drop_frame {
             state.dropped_frames += 1;
         }
-        let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_burst);
+        let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
         state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
 
         process_samples_in_chunks(
@@ -394,7 +394,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     let post_fec = ber_accum.extract_post_fec();
     let (post_decode_attempts, post_decode_matched) = ber_accum.extract_decode_stats();
 
-    let mut builder = TrialResultBuilder::new(&state, cli.packets_per_burst)
+    let mut builder = TrialResultBuilder::new(&state, cli.packets_per_frame)
         .bit_errors(total_bit_errors, total_bits_compared)
         .completion_sec(avg_completion)
         .packet_stats(
