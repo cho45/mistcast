@@ -12,6 +12,6 @@ export default defineConfig({
     topLevelAwait(),
   ],
   server: {
-    allowedHosts: ['.trycloudflare.com'],
+    allowedHosts: ['.trycloudflare.com', '.stfuawsc.com'],
   },
 })
