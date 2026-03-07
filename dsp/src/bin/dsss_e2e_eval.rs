@@ -512,6 +512,78 @@ struct Metrics {
 const TX_WARMUP_SAMPLES: usize = 4096;
 const TX_TAIL_SAMPLES: usize = 4096;
 
+/// プロセスを継続するか、完了したか
+enum ControlFlow {
+    Continue,
+    Complete,
+}
+
+/// デコーダが持つべきメソッドを示すマーカートレイト
+trait ProcessSamples {
+    type Progress;
+    fn process_samples(&mut self, samples: &[f32]) -> Self::Progress;
+}
+
+// 既存の型にトレイトを実装
+impl ProcessSamples for DsssDecoder {
+    type Progress = dsp::dsss::decoder::DecodeProgress;
+    fn process_samples(&mut self, samples: &[f32]) -> Self::Progress {
+        self.process_samples(samples)
+    }
+}
+
+impl ProcessSamples for MaryDecoder {
+    type Progress = dsp::mary::decoder::DecodeProgress;
+    fn process_samples(&mut self, samples: &[f32]) -> Self::Progress {
+        self.process_samples(samples)
+    }
+}
+
+/// 試行中の状態を追跡
+struct TrialState {
+    elapsed_sec: f32,
+    attempts: usize,
+    dropped_attempts: usize,
+    tx_signal_energy_sum: f64,
+    tx_signal_samples: usize,
+    total_process_ns: u64,
+}
+
+/// チャンク単位でサンプルを処理し、処理時間を計測する
+///
+/// # 戻り値
+/// 完了した場合は true、継続する場合は false
+///
+/// # 引数
+/// * `samples` - 処理するサンプルデータ
+/// * `chunk_size` - チャンクサイズ
+/// * `decoder` - デコーダ（process_samplesを持つ任意の型）
+/// * `state` - 処理時間を累積する状態
+/// * `on_progress` - 各チャンク処理後のコールバック（進捗チェック用）
+fn process_samples_in_chunks<D, F>(
+    samples: &[f32],
+    chunk_size: usize,
+    decoder: &mut D,
+    state: &mut TrialState,
+    mut on_progress: F,
+) -> bool
+where
+    D: ProcessSamples,
+    F: FnMut(&D::Progress, &mut TrialState) -> ControlFlow,
+{
+    for piece in samples.chunks(chunk_size) {
+        let start_time = std::time::Instant::now();
+        let progress = decoder.process_samples(piece);
+        state.total_process_ns += start_time.elapsed().as_nanos() as u64;
+
+        match on_progress(&progress, state) {
+            ControlFlow::Continue => {}
+            ControlFlow::Complete => return true,
+        }
+    }
+    false
+}
+
 impl Metrics {
     fn push(&mut self, t: TrialResult) {
         self.trials += 1;
@@ -1139,68 +1211,138 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     decoder.config.packets_per_burst = cli.packets_per_burst;
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
-    let mut elapsed_sec = 0.0f32;
-    let mut attempts = 0usize;
-    let mut dropped_attempts = 0usize;
-    let mut tx_signal_energy_sum = 0.0f64;
-    let mut tx_signal_samples = 0usize;
-    let mut total_process_ns = 0u64;
+    let mut state = TrialState {
+        elapsed_sec: 0.0f32,
+        attempts: 0,
+        dropped_attempts: 0,
+        tx_signal_energy_sum: 0.0f64,
+        tx_signal_samples: 0,
+        total_process_ns: 0,
+    };
 
     let chunk = cli.chunk_samples.max(1);
     let gap = cli.gap_samples;
     let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
-    tx_signal_energy_sum += signal_energy(&warmup);
-    tx_signal_samples += warmup.len();
+    state.tx_signal_energy_sum += signal_energy(&warmup);
+    state.tx_signal_samples += warmup.len();
     let warmup_rx = apply_channel(&warmup, imp, &mut rng, false);
-    elapsed_sec += warmup_rx.len() as f32 / tx_cfg.sample_rate;
-    for piece in warmup_rx.chunks(chunk) {
-        let start_time = std::time::Instant::now();
-        let _ = decoder.process_samples(piece);
-        total_process_ns += start_time.elapsed().as_nanos() as u64;
-    }
+    state.elapsed_sec += warmup_rx.len() as f32 / tx_cfg.sample_rate;
+    process_samples_in_chunks(&warmup_rx, chunk, &mut decoder, &mut state, |_, _| {
+        ControlFlow::Continue
+    });
     {
         let mut stream = encoder.encode_stream(&payload);
         loop {
-            if elapsed_sec >= cli.max_sec {
+            if state.elapsed_sec >= cli.max_sec {
                 break;
             }
             let Some(frame) = stream.next() else {
                 break;
             };
-            attempts += 1;
-            tx_signal_energy_sum += signal_energy(&frame);
-            tx_signal_samples += frame.len();
+            state.attempts += 1;
+            state.tx_signal_energy_sum += signal_energy(&frame);
+            state.tx_signal_samples += frame.len();
 
             let drop_burst = rng.gen::<f32>() < imp.burst_loss;
             if drop_burst {
-                dropped_attempts += 1;
+                state.dropped_attempts += 1;
             }
             let rx_frame = apply_channel(&frame, imp, &mut rng, drop_burst);
-            elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
-            for piece in rx_frame.chunks(chunk) {
-                let start_time = std::time::Instant::now();
-                let progress = decoder.process_samples(piece);
-                total_process_ns += start_time.elapsed().as_nanos() as u64;
-
+            state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+            let complete = process_samples_in_chunks(&rx_frame, chunk, &mut decoder, &mut state, |progress, _state| {
                 if progress.complete {
+                    ControlFlow::Complete
+                } else {
+                    ControlFlow::Continue
+                }
+            });
+            if complete {
+                let progress = decoder.process_samples(&[]);
+                let recovered = decoder.recovered_data();
+                let errs = count_bit_errors_bytes(&payload, recovered);
+                let bits_compared = payload.len() * 8;
+                return TrialResult {
+                    success: errs == 0,
+                    completion_sec: Some(state.elapsed_sec),
+                    elapsed_sec: state.elapsed_sec,
+                    attempts: state.attempts,
+                    synced_frames: progress.synced_frames,
+                    accepted_frames: progress.received_packets,
+                    crc_error_frames: progress.crc_error_packets,
+                    first_attempt_success: state.attempts == 1 && errs == 0,
+                    bit_errors: errs,
+                    bits_compared,
+                    dropped_attempts: state.dropped_attempts,
+                    tx_signal_energy_sum: state.tx_signal_energy_sum,
+                    tx_signal_samples: state.tx_signal_samples,
+                    process_time_ns: state.total_process_ns,
+                    raw_bit_errors: 0,
+                    raw_bits_compared: 0,
+                    raw_error_runs: 0,
+                    raw_error_run_bits: 0,
+                    raw_error_run_max: 0,
+                    codeword_count: 0,
+                    codeword_error_sum: 0,
+                    codeword_error_max: 0,
+                    codeword_error_weights: Vec::new(),
+                    post_bit_errors: 0,
+                    post_bits_compared: 0,
+                    post_error_runs: 0,
+                    post_error_run_bits: 0,
+                    post_error_run_max: 0,
+                    post_codeword_count: 0,
+                    post_codeword_error_sum: 0,
+                    post_codeword_error_max: 0,
+                    post_codeword_error_weights: Vec::new(),
+                    post_decode_attempts: 0,
+                    post_decode_matched: 0,
+                    last_est_snr_db: f32::NAN,
+                    phase_gate_on_symbols: 0,
+                    phase_gate_off_symbols: 0,
+                    phase_innovation_reject_symbols: 0,
+                    phase_err_abs_sum_rad: 0.0,
+                    phase_err_abs_count: 0,
+                    phase_err_abs_ge_0p5_symbols: 0,
+                    phase_err_abs_ge_1p0_symbols: 0,
+                    llr_second_pass_attempts: 0,
+                    llr_second_pass_rescued: 0,
+                };
+            }
+
+            if gap > 0 {
+                let mut gap_sig = vec![0.0f32; gap];
+                add_awgn_with_rng(&mut gap_sig, imp.sigma, &mut rng);
+                if imp.ppm.abs() >= 1.0 {
+                    gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
+                }
+                state.elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
+                let complete = process_samples_in_chunks(&gap_sig, chunk, &mut decoder, &mut state, |progress, _state| {
+                    if progress.complete {
+                        ControlFlow::Complete
+                    } else {
+                        ControlFlow::Continue
+                    }
+                });
+                if complete {
+                    let progress = decoder.process_samples(&[]);
                     let recovered = decoder.recovered_data();
                     let errs = count_bit_errors_bytes(&payload, recovered);
                     let bits_compared = payload.len() * 8;
                     return TrialResult {
                         success: errs == 0,
-                        completion_sec: Some(elapsed_sec),
-                        elapsed_sec,
-                        attempts,
+                        completion_sec: Some(state.elapsed_sec),
+                        elapsed_sec: state.elapsed_sec,
+                        attempts: state.attempts,
                         synced_frames: progress.synced_frames,
                         accepted_frames: progress.received_packets,
                         crc_error_frames: progress.crc_error_packets,
-                        first_attempt_success: attempts == 1 && errs == 0,
+                        first_attempt_success: state.attempts == 1 && errs == 0,
                         bit_errors: errs,
                         bits_compared,
-                        dropped_attempts,
-                        tx_signal_energy_sum,
-                        tx_signal_samples,
-                        process_time_ns: total_process_ns,
+                        dropped_attempts: state.dropped_attempts,
+                        tx_signal_energy_sum: state.tx_signal_energy_sum,
+                        tx_signal_samples: state.tx_signal_samples,
+                        process_time_ns: state.total_process_ns,
                         raw_bit_errors: 0,
                         raw_bits_compared: 0,
                         raw_error_runs: 0,
@@ -1234,99 +1376,29 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     };
                 }
             }
-
-            if gap > 0 {
-                let mut gap_sig = vec![0.0f32; gap];
-                add_awgn_with_rng(&mut gap_sig, imp.sigma, &mut rng);
-                if imp.ppm.abs() >= 1.0 {
-                    gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
-                }
-                elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
-                for piece in gap_sig.chunks(chunk) {
-                    let start_time = std::time::Instant::now();
-                    let progress = decoder.process_samples(piece);
-                    total_process_ns += start_time.elapsed().as_nanos() as u64;
-
-                    if progress.complete {
-                        let recovered = decoder.recovered_data();
-                        let errs = count_bit_errors_bytes(&payload, recovered);
-                        let bits_compared = payload.len() * 8;
-                        return TrialResult {
-                            success: errs == 0,
-                            completion_sec: Some(elapsed_sec),
-                            elapsed_sec,
-                            attempts,
-                            synced_frames: progress.synced_frames,
-                            accepted_frames: progress.received_packets,
-                            crc_error_frames: progress.crc_error_packets,
-                            first_attempt_success: attempts == 1 && errs == 0,
-                            bit_errors: errs,
-                            bits_compared,
-                            dropped_attempts,
-                            tx_signal_energy_sum,
-                            tx_signal_samples,
-                            process_time_ns: total_process_ns,
-                            raw_bit_errors: 0,
-                            raw_bits_compared: 0,
-                            raw_error_runs: 0,
-                            raw_error_run_bits: 0,
-                            raw_error_run_max: 0,
-                            codeword_count: 0,
-                            codeword_error_sum: 0,
-                            codeword_error_max: 0,
-                            codeword_error_weights: Vec::new(),
-                            post_bit_errors: 0,
-                            post_bits_compared: 0,
-                            post_error_runs: 0,
-                            post_error_run_bits: 0,
-                            post_error_run_max: 0,
-                            post_codeword_count: 0,
-                            post_codeword_error_sum: 0,
-                            post_codeword_error_max: 0,
-                            post_codeword_error_weights: Vec::new(),
-                            post_decode_attempts: 0,
-                            post_decode_matched: 0,
-                            last_est_snr_db: f32::NAN,
-                            phase_gate_on_symbols: 0,
-                            phase_gate_off_symbols: 0,
-                            phase_innovation_reject_symbols: 0,
-                            phase_err_abs_sum_rad: 0.0,
-                            phase_err_abs_count: 0,
-                            phase_err_abs_ge_0p5_symbols: 0,
-                            phase_err_abs_ge_1p0_symbols: 0,
-                            llr_second_pass_attempts: 0,
-                            llr_second_pass_rescued: 0,
-                        };
-                    }
-                }
-            }
         }
     }
 
     let flush = encoder.flush();
     if !flush.is_empty() {
-        tx_signal_energy_sum += signal_energy(&flush);
-        tx_signal_samples += flush.len();
+        state.tx_signal_energy_sum += signal_energy(&flush);
+        state.tx_signal_samples += flush.len();
         let flush_rx = apply_channel(&flush, imp, &mut rng, false);
-        elapsed_sec += flush_rx.len() as f32 / tx_cfg.sample_rate;
-        for piece in flush_rx.chunks(chunk) {
-            let start_time = std::time::Instant::now();
-            let _ = decoder.process_samples(piece);
-            total_process_ns += start_time.elapsed().as_nanos() as u64;
-        }
+        state.elapsed_sec += flush_rx.len() as f32 / tx_cfg.sample_rate;
+        process_samples_in_chunks(&flush_rx, chunk, &mut decoder, &mut state, |_, _| {
+            ControlFlow::Continue
+        });
     }
 
     let tail = encoder.modulate_silence(TX_TAIL_SAMPLES);
     if !tail.is_empty() {
-        tx_signal_energy_sum += signal_energy(&tail);
-        tx_signal_samples += tail.len();
+        state.tx_signal_energy_sum += signal_energy(&tail);
+        state.tx_signal_samples += tail.len();
         let tail_rx = apply_channel(&tail, imp, &mut rng, false);
-        elapsed_sec += tail_rx.len() as f32 / tx_cfg.sample_rate;
-        for piece in tail_rx.chunks(chunk) {
-            let start_time = std::time::Instant::now();
-            let _ = decoder.process_samples(piece);
-            total_process_ns += start_time.elapsed().as_nanos() as u64;
-        }
+        state.elapsed_sec += tail_rx.len() as f32 / tx_cfg.sample_rate;
+        process_samples_in_chunks(&tail_rx, chunk, &mut decoder, &mut state, |_, _| {
+            ControlFlow::Continue
+        });
     }
 
     let bits_compared = payload.len() * 8;
@@ -1335,18 +1407,18 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     TrialResult {
         success: false,
         completion_sec: None,
-        elapsed_sec,
-        attempts,
+        elapsed_sec: state.elapsed_sec,
+        attempts: state.attempts,
         synced_frames: final_progress.synced_frames,
         accepted_frames: final_progress.received_packets,
         crc_error_frames: final_progress.crc_error_packets,
         first_attempt_success: false,
         bit_errors,
         bits_compared,
-        dropped_attempts,
-        tx_signal_energy_sum,
-        tx_signal_samples,
-        process_time_ns: total_process_ns,
+        dropped_attempts: state.dropped_attempts,
+        tx_signal_energy_sum: state.tx_signal_energy_sum,
+        tx_signal_samples: state.tx_signal_samples,
+        process_time_ns: state.total_process_ns,
         raw_bit_errors: 0,
         raw_bits_compared: 0,
         raw_error_runs: 0,
@@ -1418,12 +1490,14 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     );
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
-    let mut elapsed_sec = 0.0f32;
-    let mut attempts = 0usize;
-    let mut dropped_attempts = 0usize;
-    let mut tx_signal_energy_sum = 0.0f64;
-    let mut tx_signal_samples = 0usize;
-    let mut total_process_ns = 0u64;
+    let mut state = TrialState {
+        elapsed_sec: 0.0f32,
+        attempts: 0,
+        dropped_attempts: 0,
+        tx_signal_energy_sum: 0.0f64,
+        tx_signal_samples: 0,
+        total_process_ns: 0,
+    };
 
     let chunk = cli.chunk_samples.max(1);
     let gap = cli.gap_samples;
@@ -1513,18 +1587,16 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     }
 
     let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
-    tx_signal_energy_sum += signal_energy(&warmup);
-    tx_signal_samples += warmup.len();
+    state.tx_signal_energy_sum += signal_energy(&warmup);
+    state.tx_signal_samples += warmup.len();
     let warmup_rx = apply_channel(&warmup, imp, &mut rng, false);
-    elapsed_sec += warmup_rx.len() as f32 / tx_cfg.sample_rate;
-    for piece in warmup_rx.chunks(chunk) {
-        let start_time = std::time::Instant::now();
-        let _ = decoder.process_samples(piece);
-        total_process_ns += start_time.elapsed().as_nanos() as u64;
-    }
+    state.elapsed_sec += warmup_rx.len() as f32 / tx_cfg.sample_rate;
+    process_samples_in_chunks(&warmup_rx, chunk, &mut decoder, &mut state, |_, _| {
+        ControlFlow::Continue
+    });
 
     loop {
-        if elapsed_sec >= cli.max_sec {
+        if state.elapsed_sec >= cli.max_sec {
             break;
         }
 
@@ -1545,22 +1617,118 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         }
         let frame = encoder.encode_burst(&packets);
 
-        attempts += 1;
-        tx_signal_energy_sum += signal_energy(&frame);
-        tx_signal_samples += frame.len();
+        state.attempts += 1;
+        state.tx_signal_energy_sum += signal_energy(&frame);
+        state.tx_signal_samples += frame.len();
 
         let drop_burst = rng.gen::<f32>() < imp.burst_loss;
         if drop_burst {
-            dropped_attempts += 1;
+            state.dropped_attempts += 1;
         }
         let rx_frame = apply_channel(&frame, imp, &mut rng, drop_burst);
-        elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+        state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
 
-        for piece in rx_frame.chunks(chunk) {
-            let start_time = std::time::Instant::now();
-            let progress = decoder.process_samples(piece);
-            total_process_ns += start_time.elapsed().as_nanos() as u64;
+        let complete = process_samples_in_chunks(&rx_frame, chunk, &mut decoder, &mut state, |progress, _state| {
             if progress.complete {
+                ControlFlow::Complete
+            } else {
+                ControlFlow::Continue
+            }
+        });
+        if complete {
+            let progress = decoder.process_samples(&[]);
+            let recovered = decoder.recovered_data();
+            let errs = count_bit_errors_bytes(&payload, recovered);
+            let bits_compared = payload.len() * 8;
+            let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
+            let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
+            let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
+            let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
+            let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
+            let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
+            let codeword_count = codeword_error_weights.len();
+            let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
+            let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
+            let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
+            let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
+            let post_error_runs = *post_error_runs_acc.lock().unwrap();
+            let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
+            let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
+            let post_codeword_error_weights =
+                post_codeword_error_weights_acc.lock().unwrap().clone();
+            let post_codeword_count = post_codeword_error_weights.len();
+            let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
+            let post_codeword_error_max = post_codeword_error_weights
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
+            let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
+            return TrialResult {
+                success: errs == 0,
+                completion_sec: Some(state.elapsed_sec),
+                elapsed_sec: state.elapsed_sec,
+                attempts: state.attempts,
+                synced_frames: progress.fde_selected_frames + progress.raw_selected_frames,
+                accepted_frames: progress.received_packets,
+                crc_error_frames: progress.crc_error_packets,
+                first_attempt_success: state.attempts == 1 && errs == 0,
+                bit_errors: errs,
+                bits_compared,
+                dropped_attempts: state.dropped_attempts,
+                tx_signal_energy_sum: state.tx_signal_energy_sum,
+                tx_signal_samples: state.tx_signal_samples,
+                process_time_ns: state.total_process_ns,
+                raw_bit_errors,
+                raw_bits_compared,
+                raw_error_runs,
+                raw_error_run_bits,
+                raw_error_run_max,
+                codeword_count,
+                codeword_error_sum,
+                codeword_error_max,
+                codeword_error_weights,
+                post_bit_errors,
+                post_bits_compared,
+                post_error_runs,
+                post_error_run_bits,
+                post_error_run_max,
+                post_codeword_count,
+                post_codeword_error_sum,
+                post_codeword_error_max,
+                post_codeword_error_weights,
+                post_decode_attempts,
+                post_decode_matched,
+                last_est_snr_db: progress.last_est_snr_db,
+                phase_gate_on_symbols: progress.phase_gate_on_symbols,
+                phase_gate_off_symbols: progress.phase_gate_off_symbols,
+                phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
+                phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
+                phase_err_abs_count: progress.phase_err_abs_count,
+                phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
+                phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
+                llr_second_pass_attempts: progress.llr_second_pass_attempts,
+                llr_second_pass_rescued: progress.llr_second_pass_rescued,
+            };
+        }
+
+        if gap > 0 {
+            let mut gap_sig = vec![0.0f32; gap];
+            add_awgn_with_rng(&mut gap_sig, imp.sigma, &mut rng);
+            if imp.ppm.abs() >= 1.0 {
+                gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
+            }
+            state.elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
+            let complete = process_samples_in_chunks(&gap_sig, chunk, &mut decoder, &mut state, |progress, _state| {
+                if progress.complete {
+                    ControlFlow::Complete
+                } else {
+                    ControlFlow::Continue
+                }
+            });
+            if complete {
+                let progress = decoder.process_samples(&[]);
                 let recovered = decoder.recovered_data();
                 let errs = count_bit_errors_bytes(&payload, recovered);
                 let bits_compared = payload.len() * 8;
@@ -1572,7 +1740,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
                 let codeword_count = codeword_error_weights.len();
                 let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
-                let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
+                let codeword_error_max =
+                    codeword_error_weights.iter().copied().max().unwrap_or(0);
                 let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
                 let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
                 let post_error_runs = *post_error_runs_acc.lock().unwrap();
@@ -1591,19 +1760,19 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
                 return TrialResult {
                     success: errs == 0,
-                    completion_sec: Some(elapsed_sec),
-                    elapsed_sec,
-                    attempts,
+                    completion_sec: Some(state.elapsed_sec),
+                    elapsed_sec: state.elapsed_sec,
+                    attempts: state.attempts,
                     synced_frames: progress.fde_selected_frames + progress.raw_selected_frames,
                     accepted_frames: progress.received_packets,
                     crc_error_frames: progress.crc_error_packets,
-                    first_attempt_success: attempts == 1 && errs == 0,
+                    first_attempt_success: state.attempts == 1 && errs == 0,
                     bit_errors: errs,
                     bits_compared,
-                    dropped_attempts,
-                    tx_signal_energy_sum,
-                    tx_signal_samples,
-                    process_time_ns: total_process_ns,
+                    dropped_attempts: state.dropped_attempts,
+                    tx_signal_energy_sum: state.tx_signal_energy_sum,
+                    tx_signal_samples: state.tx_signal_samples,
+                    process_time_ns: state.total_process_ns,
                     raw_bit_errors,
                     raw_bits_compared,
                     raw_error_runs,
@@ -1637,124 +1806,28 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 };
             }
         }
-
-        if gap > 0 {
-            let mut gap_sig = vec![0.0f32; gap];
-            add_awgn_with_rng(&mut gap_sig, imp.sigma, &mut rng);
-            if imp.ppm.abs() >= 1.0 {
-                gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
-            }
-            elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
-            for piece in gap_sig.chunks(chunk) {
-                let start_time = std::time::Instant::now();
-                let progress = decoder.process_samples(piece);
-                total_process_ns += start_time.elapsed().as_nanos() as u64;
-
-                if progress.complete {
-                    let recovered = decoder.recovered_data();
-                    let errs = count_bit_errors_bytes(&payload, recovered);
-                    let bits_compared = payload.len() * 8;
-                    let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
-                    let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
-                    let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
-                    let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
-                    let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
-                    let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
-                    let codeword_count = codeword_error_weights.len();
-                    let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
-                    let codeword_error_max =
-                        codeword_error_weights.iter().copied().max().unwrap_or(0);
-                    let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
-                    let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
-                    let post_error_runs = *post_error_runs_acc.lock().unwrap();
-                    let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
-                    let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
-                    let post_codeword_error_weights =
-                        post_codeword_error_weights_acc.lock().unwrap().clone();
-                    let post_codeword_count = post_codeword_error_weights.len();
-                    let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
-                    let post_codeword_error_max = post_codeword_error_weights
-                        .iter()
-                        .copied()
-                        .max()
-                        .unwrap_or(0);
-                    let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
-                    let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
-                    return TrialResult {
-                        success: errs == 0,
-                        completion_sec: Some(elapsed_sec),
-                        elapsed_sec,
-                        attempts,
-                        synced_frames: progress.fde_selected_frames + progress.raw_selected_frames,
-                        accepted_frames: progress.received_packets,
-                        crc_error_frames: progress.crc_error_packets,
-                        first_attempt_success: attempts == 1 && errs == 0,
-                        bit_errors: errs,
-                        bits_compared,
-                        dropped_attempts,
-                        tx_signal_energy_sum,
-                        tx_signal_samples,
-                        process_time_ns: total_process_ns,
-                        raw_bit_errors,
-                        raw_bits_compared,
-                        raw_error_runs,
-                        raw_error_run_bits,
-                        raw_error_run_max,
-                        codeword_count,
-                        codeword_error_sum,
-                        codeword_error_max,
-                        codeword_error_weights,
-                        post_bit_errors,
-                        post_bits_compared,
-                        post_error_runs,
-                        post_error_run_bits,
-                        post_error_run_max,
-                        post_codeword_count,
-                        post_codeword_error_sum,
-                        post_codeword_error_max,
-                        post_codeword_error_weights,
-                        post_decode_attempts,
-                        post_decode_matched,
-                        last_est_snr_db: progress.last_est_snr_db,
-                        phase_gate_on_symbols: progress.phase_gate_on_symbols,
-                        phase_gate_off_symbols: progress.phase_gate_off_symbols,
-                        phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
-                        phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
-                        phase_err_abs_count: progress.phase_err_abs_count,
-                        phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
-                        phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
-                        llr_second_pass_attempts: progress.llr_second_pass_attempts,
-                        llr_second_pass_rescued: progress.llr_second_pass_rescued,
-                    };
-                }
-            }
-        }
     }
 
     let flush = encoder.flush();
     if !flush.is_empty() {
-        tx_signal_energy_sum += signal_energy(&flush);
-        tx_signal_samples += flush.len();
+        state.tx_signal_energy_sum += signal_energy(&flush);
+        state.tx_signal_samples += flush.len();
         let flush_rx = apply_channel(&flush, imp, &mut rng, false);
-        elapsed_sec += flush_rx.len() as f32 / tx_cfg.sample_rate;
-        for piece in flush_rx.chunks(chunk) {
-            let start_time = std::time::Instant::now();
-            let _ = decoder.process_samples(piece);
-            total_process_ns += start_time.elapsed().as_nanos() as u64;
-        }
+        state.elapsed_sec += flush_rx.len() as f32 / tx_cfg.sample_rate;
+        process_samples_in_chunks(&flush_rx, chunk, &mut decoder, &mut state, |_, _| {
+            ControlFlow::Continue
+        });
     }
 
     let tail = encoder.modulate_silence(TX_TAIL_SAMPLES);
     if !tail.is_empty() {
-        tx_signal_energy_sum += signal_energy(&tail);
-        tx_signal_samples += tail.len();
+        state.tx_signal_energy_sum += signal_energy(&tail);
+        state.tx_signal_samples += tail.len();
         let tail_rx = apply_channel(&tail, imp, &mut rng, false);
-        elapsed_sec += tail_rx.len() as f32 / tx_cfg.sample_rate;
-        for piece in tail_rx.chunks(chunk) {
-            let start_time = std::time::Instant::now();
-            let _ = decoder.process_samples(piece);
-            total_process_ns += start_time.elapsed().as_nanos() as u64;
-        }
+        state.elapsed_sec += tail_rx.len() as f32 / tx_cfg.sample_rate;
+        process_samples_in_chunks(&tail_rx, chunk, &mut decoder, &mut state, |_, _| {
+            ControlFlow::Continue
+        });
     }
 
     let bits_compared = payload.len() * 8;
@@ -1787,18 +1860,18 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     TrialResult {
         success: false,
         completion_sec: None,
-        elapsed_sec,
-        attempts,
+        elapsed_sec: state.elapsed_sec,
+        attempts: state.attempts,
         synced_frames: final_progress.synced_frames,
         accepted_frames: final_progress.received_packets,
         crc_error_frames: final_progress.crc_error_packets,
         first_attempt_success: false,
         bit_errors,
         bits_compared,
-        dropped_attempts,
-        tx_signal_energy_sum,
-        tx_signal_samples,
-        process_time_ns: total_process_ns,
+        dropped_attempts: state.dropped_attempts,
+        tx_signal_energy_sum: state.tx_signal_energy_sum,
+        tx_signal_samples: state.tx_signal_samples,
+        process_time_ns: state.total_process_ns,
         raw_bit_errors,
         raw_bits_compared,
         raw_error_runs,
