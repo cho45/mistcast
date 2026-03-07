@@ -549,6 +549,259 @@ struct TrialState {
     total_process_ns: u64,
 }
 
+/// TrialResultを構築するビルダー
+struct TrialResultBuilder {
+    success: bool,
+    completion_sec: Option<f32>,
+    elapsed_sec: f32,
+    attempts: usize,
+    synced_frames: usize,
+    accepted_frames: usize,
+    crc_error_frames: usize,
+    first_attempt_success: bool,
+    bit_errors: usize,
+    bits_compared: usize,
+    dropped_attempts: usize,
+    tx_signal_energy_sum: f64,
+    tx_signal_samples: usize,
+    process_time_ns: u64,
+    // Mary専用フィールド（デフォルト値）
+    raw_bit_errors: usize,
+    raw_bits_compared: usize,
+    raw_error_runs: usize,
+    raw_error_run_bits: usize,
+    raw_error_run_max: usize,
+    codeword_count: usize,
+    codeword_error_sum: usize,
+    codeword_error_max: usize,
+    codeword_error_weights: Vec<usize>,
+    post_bit_errors: usize,
+    post_bits_compared: usize,
+    post_error_runs: usize,
+    post_error_run_bits: usize,
+    post_error_run_max: usize,
+    post_codeword_count: usize,
+    post_codeword_error_sum: usize,
+    post_codeword_error_max: usize,
+    post_codeword_error_weights: Vec<usize>,
+    post_decode_attempts: usize,
+    post_decode_matched: usize,
+    last_est_snr_db: f32,
+    phase_gate_on_symbols: usize,
+    phase_gate_off_symbols: usize,
+    phase_innovation_reject_symbols: usize,
+    phase_err_abs_sum_rad: f64,
+    phase_err_abs_count: usize,
+    phase_err_abs_ge_0p5_symbols: usize,
+    phase_err_abs_ge_1p0_symbols: usize,
+    llr_second_pass_attempts: usize,
+    llr_second_pass_rescued: usize,
+}
+
+impl TrialResultBuilder {
+    fn new(state: &TrialState) -> Self {
+        Self {
+            success: false,
+            completion_sec: None,
+            elapsed_sec: state.elapsed_sec,
+            attempts: state.attempts,
+            synced_frames: 0,
+            accepted_frames: 0,
+            crc_error_frames: 0,
+            first_attempt_success: false,
+            bit_errors: 0,
+            bits_compared: 0,
+            dropped_attempts: state.dropped_attempts,
+            tx_signal_energy_sum: state.tx_signal_energy_sum,
+            tx_signal_samples: state.tx_signal_samples,
+            process_time_ns: state.total_process_ns,
+            // Mary専用フィールドのデフォルト値
+            raw_bit_errors: 0,
+            raw_bits_compared: 0,
+            raw_error_runs: 0,
+            raw_error_run_bits: 0,
+            raw_error_run_max: 0,
+            codeword_count: 0,
+            codeword_error_sum: 0,
+            codeword_error_max: 0,
+            codeword_error_weights: Vec::new(),
+            post_bit_errors: 0,
+            post_bits_compared: 0,
+            post_error_runs: 0,
+            post_error_run_bits: 0,
+            post_error_run_max: 0,
+            post_codeword_count: 0,
+            post_codeword_error_sum: 0,
+            post_codeword_error_max: 0,
+            post_codeword_error_weights: Vec::new(),
+            post_decode_attempts: 0,
+            post_decode_matched: 0,
+            last_est_snr_db: f32::NAN,
+            phase_gate_on_symbols: 0,
+            phase_gate_off_symbols: 0,
+            phase_innovation_reject_symbols: 0,
+            phase_err_abs_sum_rad: 0.0,
+            phase_err_abs_count: 0,
+            phase_err_abs_ge_0p5_symbols: 0,
+            phase_err_abs_ge_1p0_symbols: 0,
+            llr_second_pass_attempts: 0,
+            llr_second_pass_rescued: 0,
+        }
+    }
+
+    fn success(mut self, success: bool, bit_errors: usize, bits_compared: usize) -> Self {
+        self.success = success;
+        self.completion_sec = if success { Some(self.elapsed_sec) } else { None };
+        self.first_attempt_success = success && self.attempts == 1;
+        self.bit_errors = bit_errors;
+        self.bits_compared = bits_compared;
+        self
+    }
+
+    fn frame_stats<SF, AF, EF>(mut self, synced_frames: SF, accepted_frames: AF, crc_error_frames: EF) -> Self
+    where
+        SF: Into<usize>,
+        AF: Into<usize>,
+        EF: Into<usize>,
+    {
+        self.synced_frames = synced_frames.into();
+        self.accepted_frames = accepted_frames.into();
+        self.crc_error_frames = crc_error_frames.into();
+        self
+    }
+
+    fn mary_raw_ber(
+        mut self,
+        raw_bit_errors: usize,
+        raw_bits_compared: usize,
+        raw_error_runs: usize,
+        raw_error_run_bits: usize,
+        raw_error_run_max: usize,
+        codeword_count: usize,
+        codeword_error_sum: usize,
+        codeword_error_max: usize,
+        codeword_error_weights: Vec<usize>,
+    ) -> Self {
+        self.raw_bit_errors = raw_bit_errors;
+        self.raw_bits_compared = raw_bits_compared;
+        self.raw_error_runs = raw_error_runs;
+        self.raw_error_run_bits = raw_error_run_bits;
+        self.raw_error_run_max = raw_error_run_max;
+        self.codeword_count = codeword_count;
+        self.codeword_error_sum = codeword_error_sum;
+        self.codeword_error_max = codeword_error_max;
+        self.codeword_error_weights = codeword_error_weights;
+        self
+    }
+
+    fn mary_post_ber(
+        mut self,
+        post_bit_errors: usize,
+        post_bits_compared: usize,
+        post_error_runs: usize,
+        post_error_run_bits: usize,
+        post_error_run_max: usize,
+        post_codeword_count: usize,
+        post_codeword_error_sum: usize,
+        post_codeword_error_max: usize,
+        post_codeword_error_weights: Vec<usize>,
+    ) -> Self {
+        self.post_bit_errors = post_bit_errors;
+        self.post_bits_compared = post_bits_compared;
+        self.post_error_runs = post_error_runs;
+        self.post_error_run_bits = post_error_run_bits;
+        self.post_error_run_max = post_error_run_max;
+        self.post_codeword_count = post_codeword_count;
+        self.post_codeword_error_sum = post_codeword_error_sum;
+        self.post_codeword_error_max = post_codeword_error_max;
+        self.post_codeword_error_weights = post_codeword_error_weights;
+        self
+    }
+
+    fn mary_phase(
+        mut self,
+        last_est_snr_db: f32,
+        phase_gate_on_symbols: usize,
+        phase_gate_off_symbols: usize,
+        phase_innovation_reject_symbols: usize,
+        phase_err_abs_sum_rad: f64,
+        phase_err_abs_count: usize,
+        phase_err_abs_ge_0p5_symbols: usize,
+        phase_err_abs_ge_1p0_symbols: usize,
+    ) -> Self {
+        self.last_est_snr_db = last_est_snr_db;
+        self.phase_gate_on_symbols = phase_gate_on_symbols;
+        self.phase_gate_off_symbols = phase_gate_off_symbols;
+        self.phase_innovation_reject_symbols = phase_innovation_reject_symbols;
+        self.phase_err_abs_sum_rad = phase_err_abs_sum_rad;
+        self.phase_err_abs_count = phase_err_abs_count;
+        self.phase_err_abs_ge_0p5_symbols = phase_err_abs_ge_0p5_symbols;
+        self.phase_err_abs_ge_1p0_symbols = phase_err_abs_ge_1p0_symbols;
+        self
+    }
+
+    fn mary_llr(mut self, attempts: usize, rescued: usize) -> Self {
+        self.llr_second_pass_attempts = attempts;
+        self.llr_second_pass_rescued = rescued;
+        self
+    }
+
+    fn mary_decode_stats(mut self, post_decode_attempts: usize, post_decode_matched: usize) -> Self {
+        self.post_decode_attempts = post_decode_attempts;
+        self.post_decode_matched = post_decode_matched;
+        self
+    }
+
+    fn build(self) -> TrialResult {
+        TrialResult {
+            success: self.success,
+            completion_sec: self.completion_sec,
+            elapsed_sec: self.elapsed_sec,
+            attempts: self.attempts,
+            synced_frames: self.synced_frames,
+            accepted_frames: self.accepted_frames,
+            crc_error_frames: self.crc_error_frames,
+            first_attempt_success: self.first_attempt_success,
+            bit_errors: self.bit_errors,
+            bits_compared: self.bits_compared,
+            dropped_attempts: self.dropped_attempts,
+            tx_signal_energy_sum: self.tx_signal_energy_sum,
+            tx_signal_samples: self.tx_signal_samples,
+            process_time_ns: self.process_time_ns,
+            raw_bit_errors: self.raw_bit_errors,
+            raw_bits_compared: self.raw_bits_compared,
+            raw_error_runs: self.raw_error_runs,
+            raw_error_run_bits: self.raw_error_run_bits,
+            raw_error_run_max: self.raw_error_run_max,
+            codeword_count: self.codeword_count,
+            codeword_error_sum: self.codeword_error_sum,
+            codeword_error_max: self.codeword_error_max,
+            codeword_error_weights: self.codeword_error_weights,
+            post_bit_errors: self.post_bit_errors,
+            post_bits_compared: self.post_bits_compared,
+            post_error_runs: self.post_error_runs,
+            post_error_run_bits: self.post_error_run_bits,
+            post_error_run_max: self.post_error_run_max,
+            post_codeword_count: self.post_codeword_count,
+            post_codeword_error_sum: self.post_codeword_error_sum,
+            post_codeword_error_max: self.post_codeword_error_max,
+            post_codeword_error_weights: self.post_codeword_error_weights,
+            post_decode_attempts: self.post_decode_attempts,
+            post_decode_matched: self.post_decode_matched,
+            last_est_snr_db: self.last_est_snr_db,
+            phase_gate_on_symbols: self.phase_gate_on_symbols,
+            phase_gate_off_symbols: self.phase_gate_off_symbols,
+            phase_innovation_reject_symbols: self.phase_innovation_reject_symbols,
+            phase_err_abs_sum_rad: self.phase_err_abs_sum_rad,
+            phase_err_abs_count: self.phase_err_abs_count,
+            phase_err_abs_ge_0p5_symbols: self.phase_err_abs_ge_0p5_symbols,
+            phase_err_abs_ge_1p0_symbols: self.phase_err_abs_ge_1p0_symbols,
+            llr_second_pass_attempts: self.llr_second_pass_attempts,
+            llr_second_pass_rescued: self.llr_second_pass_rescued,
+        }
+    }
+}
+
 /// チャンク単位でサンプルを処理し、処理時間を計測する
 ///
 /// # 戻り値
@@ -1261,52 +1514,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let recovered = decoder.recovered_data();
                 let errs = count_bit_errors_bytes(&payload, recovered);
                 let bits_compared = payload.len() * 8;
-                return TrialResult {
-                    success: errs == 0,
-                    completion_sec: Some(state.elapsed_sec),
-                    elapsed_sec: state.elapsed_sec,
-                    attempts: state.attempts,
-                    synced_frames: progress.synced_frames,
-                    accepted_frames: progress.received_packets,
-                    crc_error_frames: progress.crc_error_packets,
-                    first_attempt_success: state.attempts == 1 && errs == 0,
-                    bit_errors: errs,
-                    bits_compared,
-                    dropped_attempts: state.dropped_attempts,
-                    tx_signal_energy_sum: state.tx_signal_energy_sum,
-                    tx_signal_samples: state.tx_signal_samples,
-                    process_time_ns: state.total_process_ns,
-                    raw_bit_errors: 0,
-                    raw_bits_compared: 0,
-                    raw_error_runs: 0,
-                    raw_error_run_bits: 0,
-                    raw_error_run_max: 0,
-                    codeword_count: 0,
-                    codeword_error_sum: 0,
-                    codeword_error_max: 0,
-                    codeword_error_weights: Vec::new(),
-                    post_bit_errors: 0,
-                    post_bits_compared: 0,
-                    post_error_runs: 0,
-                    post_error_run_bits: 0,
-                    post_error_run_max: 0,
-                    post_codeword_count: 0,
-                    post_codeword_error_sum: 0,
-                    post_codeword_error_max: 0,
-                    post_codeword_error_weights: Vec::new(),
-                    post_decode_attempts: 0,
-                    post_decode_matched: 0,
-                    last_est_snr_db: f32::NAN,
-                    phase_gate_on_symbols: 0,
-                    phase_gate_off_symbols: 0,
-                    phase_innovation_reject_symbols: 0,
-                    phase_err_abs_sum_rad: 0.0,
-                    phase_err_abs_count: 0,
-                    phase_err_abs_ge_0p5_symbols: 0,
-                    phase_err_abs_ge_1p0_symbols: 0,
-                    llr_second_pass_attempts: 0,
-                    llr_second_pass_rescued: 0,
-                };
+                return TrialResultBuilder::new(&state)
+                    .success(errs == 0, errs, bits_compared)
+                    .frame_stats(progress.synced_frames, progress.received_packets, progress.crc_error_packets)
+                    .build();
             }
 
             if gap > 0 {
@@ -1328,52 +1539,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     let recovered = decoder.recovered_data();
                     let errs = count_bit_errors_bytes(&payload, recovered);
                     let bits_compared = payload.len() * 8;
-                    return TrialResult {
-                        success: errs == 0,
-                        completion_sec: Some(state.elapsed_sec),
-                        elapsed_sec: state.elapsed_sec,
-                        attempts: state.attempts,
-                        synced_frames: progress.synced_frames,
-                        accepted_frames: progress.received_packets,
-                        crc_error_frames: progress.crc_error_packets,
-                        first_attempt_success: state.attempts == 1 && errs == 0,
-                        bit_errors: errs,
-                        bits_compared,
-                        dropped_attempts: state.dropped_attempts,
-                        tx_signal_energy_sum: state.tx_signal_energy_sum,
-                        tx_signal_samples: state.tx_signal_samples,
-                        process_time_ns: state.total_process_ns,
-                        raw_bit_errors: 0,
-                        raw_bits_compared: 0,
-                        raw_error_runs: 0,
-                        raw_error_run_bits: 0,
-                        raw_error_run_max: 0,
-                        codeword_count: 0,
-                        codeword_error_sum: 0,
-                        codeword_error_max: 0,
-                        codeword_error_weights: Vec::new(),
-                        post_bit_errors: 0,
-                        post_bits_compared: 0,
-                        post_error_runs: 0,
-                        post_error_run_bits: 0,
-                        post_error_run_max: 0,
-                        post_codeword_count: 0,
-                        post_codeword_error_sum: 0,
-                        post_codeword_error_max: 0,
-                        post_codeword_error_weights: Vec::new(),
-                        post_decode_attempts: 0,
-                        post_decode_matched: 0,
-                        last_est_snr_db: f32::NAN,
-                        phase_gate_on_symbols: 0,
-                        phase_gate_off_symbols: 0,
-                        phase_innovation_reject_symbols: 0,
-                        phase_err_abs_sum_rad: 0.0,
-                        phase_err_abs_count: 0,
-                        phase_err_abs_ge_0p5_symbols: 0,
-                        phase_err_abs_ge_1p0_symbols: 0,
-                        llr_second_pass_attempts: 0,
-                        llr_second_pass_rescued: 0,
-                    };
+                    return TrialResultBuilder::new(&state)
+                        .success(errs == 0, errs, bits_compared)
+                        .frame_stats(progress.synced_frames, progress.received_packets, progress.crc_error_packets)
+                        .build();
                 }
             }
         }
@@ -1404,52 +1573,10 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let bits_compared = payload.len() * 8;
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
     let final_progress = decoder.process_samples(&[]);
-    TrialResult {
-        success: false,
-        completion_sec: None,
-        elapsed_sec: state.elapsed_sec,
-        attempts: state.attempts,
-        synced_frames: final_progress.synced_frames,
-        accepted_frames: final_progress.received_packets,
-        crc_error_frames: final_progress.crc_error_packets,
-        first_attempt_success: false,
-        bit_errors,
-        bits_compared,
-        dropped_attempts: state.dropped_attempts,
-        tx_signal_energy_sum: state.tx_signal_energy_sum,
-        tx_signal_samples: state.tx_signal_samples,
-        process_time_ns: state.total_process_ns,
-        raw_bit_errors: 0,
-        raw_bits_compared: 0,
-        raw_error_runs: 0,
-        raw_error_run_bits: 0,
-        raw_error_run_max: 0,
-        codeword_count: 0,
-        codeword_error_sum: 0,
-        codeword_error_max: 0,
-        codeword_error_weights: Vec::new(),
-        post_bit_errors: 0,
-        post_bits_compared: 0,
-        post_error_runs: 0,
-        post_error_run_bits: 0,
-        post_error_run_max: 0,
-        post_codeword_count: 0,
-        post_codeword_error_sum: 0,
-        post_codeword_error_max: 0,
-        post_codeword_error_weights: Vec::new(),
-        post_decode_attempts: 0,
-        post_decode_matched: 0,
-        last_est_snr_db: f32::NAN,
-        phase_gate_on_symbols: 0,
-        phase_gate_off_symbols: 0,
-        phase_innovation_reject_symbols: 0,
-        phase_err_abs_sum_rad: 0.0,
-        phase_err_abs_count: 0,
-        phase_err_abs_ge_0p5_symbols: 0,
-        phase_err_abs_ge_1p0_symbols: 0,
-        llr_second_pass_attempts: 0,
-        llr_second_pass_rescued: 0,
-    }
+    TrialResultBuilder::new(&state)
+        .success(false, bit_errors, bits_compared)
+        .frame_stats(final_progress.synced_frames, final_progress.received_packets, final_progress.crc_error_packets)
+        .build()
 }
 
 fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
@@ -1665,52 +1792,15 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 .unwrap_or(0);
             let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
             let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
-            return TrialResult {
-                success: errs == 0,
-                completion_sec: Some(state.elapsed_sec),
-                elapsed_sec: state.elapsed_sec,
-                attempts: state.attempts,
-                synced_frames: progress.fde_selected_frames + progress.raw_selected_frames,
-                accepted_frames: progress.received_packets,
-                crc_error_frames: progress.crc_error_packets,
-                first_attempt_success: state.attempts == 1 && errs == 0,
-                bit_errors: errs,
-                bits_compared,
-                dropped_attempts: state.dropped_attempts,
-                tx_signal_energy_sum: state.tx_signal_energy_sum,
-                tx_signal_samples: state.tx_signal_samples,
-                process_time_ns: state.total_process_ns,
-                raw_bit_errors,
-                raw_bits_compared,
-                raw_error_runs,
-                raw_error_run_bits,
-                raw_error_run_max,
-                codeword_count,
-                codeword_error_sum,
-                codeword_error_max,
-                codeword_error_weights,
-                post_bit_errors,
-                post_bits_compared,
-                post_error_runs,
-                post_error_run_bits,
-                post_error_run_max,
-                post_codeword_count,
-                post_codeword_error_sum,
-                post_codeword_error_max,
-                post_codeword_error_weights,
-                post_decode_attempts,
-                post_decode_matched,
-                last_est_snr_db: progress.last_est_snr_db,
-                phase_gate_on_symbols: progress.phase_gate_on_symbols,
-                phase_gate_off_symbols: progress.phase_gate_off_symbols,
-                phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
-                phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
-                phase_err_abs_count: progress.phase_err_abs_count,
-                phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
-                phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
-                llr_second_pass_attempts: progress.llr_second_pass_attempts,
-                llr_second_pass_rescued: progress.llr_second_pass_rescued,
-            };
+            return TrialResultBuilder::new(&state)
+                .success(errs == 0, errs, bits_compared)
+                .frame_stats(progress.fde_selected_frames + progress.raw_selected_frames, progress.received_packets, progress.crc_error_packets)
+                .mary_raw_ber(raw_bit_errors, raw_bits_compared, raw_error_runs, raw_error_run_bits, raw_error_run_max, codeword_count, codeword_error_sum, codeword_error_max, codeword_error_weights)
+                .mary_post_ber(post_bit_errors, post_bits_compared, post_error_runs, post_error_run_bits, post_error_run_max, post_codeword_count, post_codeword_error_sum, post_codeword_error_max, post_codeword_error_weights)
+                .mary_phase(progress.last_est_snr_db, progress.phase_gate_on_symbols, progress.phase_gate_off_symbols, progress.phase_innovation_reject_symbols, progress.phase_err_abs_sum_rad, progress.phase_err_abs_count, progress.phase_err_abs_ge_0p5_symbols, progress.phase_err_abs_ge_1p0_symbols)
+                .mary_llr(progress.llr_second_pass_attempts, progress.llr_second_pass_rescued)
+                .mary_decode_stats(post_decode_attempts, post_decode_matched)
+                .build();
         }
 
         if gap > 0 {
@@ -1758,52 +1848,15 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     .unwrap_or(0);
                 let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
                 let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
-                return TrialResult {
-                    success: errs == 0,
-                    completion_sec: Some(state.elapsed_sec),
-                    elapsed_sec: state.elapsed_sec,
-                    attempts: state.attempts,
-                    synced_frames: progress.fde_selected_frames + progress.raw_selected_frames,
-                    accepted_frames: progress.received_packets,
-                    crc_error_frames: progress.crc_error_packets,
-                    first_attempt_success: state.attempts == 1 && errs == 0,
-                    bit_errors: errs,
-                    bits_compared,
-                    dropped_attempts: state.dropped_attempts,
-                    tx_signal_energy_sum: state.tx_signal_energy_sum,
-                    tx_signal_samples: state.tx_signal_samples,
-                    process_time_ns: state.total_process_ns,
-                    raw_bit_errors,
-                    raw_bits_compared,
-                    raw_error_runs,
-                    raw_error_run_bits,
-                    raw_error_run_max,
-                    codeword_count,
-                    codeword_error_sum,
-                    codeword_error_max,
-                    codeword_error_weights,
-                    post_bit_errors,
-                    post_bits_compared,
-                    post_error_runs,
-                    post_error_run_bits,
-                    post_error_run_max,
-                    post_codeword_count,
-                    post_codeword_error_sum,
-                    post_codeword_error_max,
-                    post_codeword_error_weights,
-                    post_decode_attempts,
-                    post_decode_matched,
-                    last_est_snr_db: progress.last_est_snr_db,
-                    phase_gate_on_symbols: progress.phase_gate_on_symbols,
-                    phase_gate_off_symbols: progress.phase_gate_off_symbols,
-                    phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
-                    phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
-                    phase_err_abs_count: progress.phase_err_abs_count,
-                    phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
-                    phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
-                    llr_second_pass_attempts: progress.llr_second_pass_attempts,
-                    llr_second_pass_rescued: progress.llr_second_pass_rescued,
-                };
+                return TrialResultBuilder::new(&state)
+                    .success(errs == 0, errs, bits_compared)
+                    .frame_stats(progress.fde_selected_frames + progress.raw_selected_frames, progress.received_packets, progress.crc_error_packets)
+                    .mary_raw_ber(raw_bit_errors, raw_bits_compared, raw_error_runs, raw_error_run_bits, raw_error_run_max, codeword_count, codeword_error_sum, codeword_error_max, codeword_error_weights)
+                    .mary_post_ber(post_bit_errors, post_bits_compared, post_error_runs, post_error_run_bits, post_error_run_max, post_codeword_count, post_codeword_error_sum, post_codeword_error_max, post_codeword_error_weights)
+                    .mary_phase(progress.last_est_snr_db, progress.phase_gate_on_symbols, progress.phase_gate_off_symbols, progress.phase_innovation_reject_symbols, progress.phase_err_abs_sum_rad, progress.phase_err_abs_count, progress.phase_err_abs_ge_0p5_symbols, progress.phase_err_abs_ge_1p0_symbols)
+                    .mary_llr(progress.llr_second_pass_attempts, progress.llr_second_pass_rescued)
+                    .mary_decode_stats(post_decode_attempts, post_decode_matched)
+                    .build();
             }
         }
     }
@@ -1857,52 +1910,15 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
     let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
     let final_progress = decoder.process_samples(&[]);
-    TrialResult {
-        success: false,
-        completion_sec: None,
-        elapsed_sec: state.elapsed_sec,
-        attempts: state.attempts,
-        synced_frames: final_progress.synced_frames,
-        accepted_frames: final_progress.received_packets,
-        crc_error_frames: final_progress.crc_error_packets,
-        first_attempt_success: false,
-        bit_errors,
-        bits_compared,
-        dropped_attempts: state.dropped_attempts,
-        tx_signal_energy_sum: state.tx_signal_energy_sum,
-        tx_signal_samples: state.tx_signal_samples,
-        process_time_ns: state.total_process_ns,
-        raw_bit_errors,
-        raw_bits_compared,
-        raw_error_runs,
-        raw_error_run_bits,
-        raw_error_run_max,
-        codeword_count,
-        codeword_error_sum,
-        codeword_error_max,
-        codeword_error_weights,
-        post_bit_errors,
-        post_bits_compared,
-        post_error_runs,
-        post_error_run_bits,
-        post_error_run_max,
-        post_codeword_count,
-        post_codeword_error_sum,
-        post_codeword_error_max,
-        post_codeword_error_weights,
-        post_decode_attempts,
-        post_decode_matched,
-        last_est_snr_db: final_progress.last_est_snr_db,
-        phase_gate_on_symbols: final_progress.phase_gate_on_symbols,
-        phase_gate_off_symbols: final_progress.phase_gate_off_symbols,
-        phase_innovation_reject_symbols: final_progress.phase_innovation_reject_symbols,
-        phase_err_abs_sum_rad: final_progress.phase_err_abs_sum_rad,
-        phase_err_abs_count: final_progress.phase_err_abs_count,
-        phase_err_abs_ge_0p5_symbols: final_progress.phase_err_abs_ge_0p5_symbols,
-        phase_err_abs_ge_1p0_symbols: final_progress.phase_err_abs_ge_1p0_symbols,
-        llr_second_pass_attempts: final_progress.llr_second_pass_attempts,
-        llr_second_pass_rescued: final_progress.llr_second_pass_rescued,
-    }
+    TrialResultBuilder::new(&state)
+        .success(false, bit_errors, bits_compared)
+        .frame_stats(final_progress.synced_frames, final_progress.received_packets, final_progress.crc_error_packets)
+        .mary_raw_ber(raw_bit_errors, raw_bits_compared, raw_error_runs, raw_error_run_bits, raw_error_run_max, codeword_count, codeword_error_sum, codeword_error_max, codeword_error_weights)
+        .mary_post_ber(post_bit_errors, post_bits_compared, post_error_runs, post_error_run_bits, post_error_run_max, post_codeword_count, post_codeword_error_sum, post_codeword_error_max, post_codeword_error_weights)
+        .mary_phase(final_progress.last_est_snr_db, final_progress.phase_gate_on_symbols, final_progress.phase_gate_off_symbols, final_progress.phase_innovation_reject_symbols, final_progress.phase_err_abs_sum_rad, final_progress.phase_err_abs_count, final_progress.phase_err_abs_ge_0p5_symbols, final_progress.phase_err_abs_ge_1p0_symbols)
+        .mary_llr(final_progress.llr_second_pass_attempts, final_progress.llr_second_pass_rescued)
+        .mary_decode_stats(post_decode_attempts, post_decode_matched)
+        .build()
 }
 
 fn print_header(cli: &Cli) {
