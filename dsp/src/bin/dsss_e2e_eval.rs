@@ -188,6 +188,8 @@ const DEFAULT_COLUMNS: &[&str] = &[
     "avg_proc_ns_sample",
     "synced_frame_ratio",
     "crc_pass_ratio",
+    "llr_second_pass_trigger_ratio",
+    "llr_second_pass_rescue_ratio",
     "phase_gate_on_ratio",
     "phase_innovation_reject_ratio",
     "phase_err_abs_mean_rad",
@@ -212,6 +214,8 @@ const ALL_COLUMNS: &[&str] = &[
     "avg_proc_ns_sample",
     "synced_frame_ratio",
     "crc_pass_ratio",
+    "llr_second_pass_trigger_ratio",
+    "llr_second_pass_rescue_ratio",
     "phase_gate_on_ratio",
     "phase_innovation_reject_ratio",
     "phase_err_abs_mean_rad",
@@ -366,6 +370,20 @@ struct Cli {
         default_value_t = 1
     )]
     mary_viterbi_list: usize,
+    #[arg(long = "mary-llr-erasure-second-pass")]
+    mary_llr_erasure_second_pass: bool,
+    #[arg(
+        long = "mary-llr-erasure-q",
+        value_parser = parse_unit_interval_f32,
+        default_value_t = 0.2
+    )]
+    mary_llr_erasure_q: f32,
+    #[arg(
+        long = "mary-llr-erasure-list",
+        value_parser = parse_positive_usize,
+        default_value_t = 8
+    )]
+    mary_llr_erasure_list: usize,
     #[arg(
         long = "columns",
         value_delimiter = ',',
@@ -437,6 +455,8 @@ struct TrialResult {
     phase_err_abs_count: usize,
     phase_err_abs_ge_0p5_symbols: usize,
     phase_err_abs_ge_1p0_symbols: usize,
+    llr_second_pass_attempts: usize,
+    llr_second_pass_rescued: usize,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -485,6 +505,8 @@ struct Metrics {
     total_phase_err_abs_count: usize,
     total_phase_err_abs_ge_0p5_symbols: usize,
     total_phase_err_abs_ge_1p0_symbols: usize,
+    total_llr_second_pass_attempts: usize,
+    total_llr_second_pass_rescued: usize,
 }
 
 impl Metrics {
@@ -533,6 +555,8 @@ impl Metrics {
         self.total_phase_err_abs_count += t.phase_err_abs_count;
         self.total_phase_err_abs_ge_0p5_symbols += t.phase_err_abs_ge_0p5_symbols;
         self.total_phase_err_abs_ge_1p0_symbols += t.phase_err_abs_ge_1p0_symbols;
+        self.total_llr_second_pass_attempts += t.llr_second_pass_attempts;
+        self.total_llr_second_pass_rescued += t.llr_second_pass_rescued;
 
         if t.first_attempt_success {
             self.first_attempt_successes += 1;
@@ -557,6 +581,20 @@ impl Metrics {
         ratio(
             self.total_accepted_frames,
             self.total_accepted_frames + self.total_crc_error_frames,
+        )
+    }
+
+    fn llr_second_pass_trigger_ratio(&self) -> f32 {
+        ratio(
+            self.total_llr_second_pass_attempts,
+            self.total_accepted_frames + self.total_crc_error_frames,
+        )
+    }
+
+    fn llr_second_pass_rescue_ratio(&self) -> f32 {
+        ratio(
+            self.total_llr_second_pass_rescued,
+            self.total_llr_second_pass_attempts,
         )
     }
 
@@ -1177,6 +1215,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     phase_err_abs_count: 0,
                     phase_err_abs_ge_0p5_symbols: 0,
                     phase_err_abs_ge_1p0_symbols: 0,
+                    llr_second_pass_attempts: 0,
+                    llr_second_pass_rescued: 0,
                 };
             }
         }
@@ -1240,6 +1280,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         phase_err_abs_count: 0,
                         phase_err_abs_ge_0p5_symbols: 0,
                         phase_err_abs_ge_1p0_symbols: 0,
+                        llr_second_pass_attempts: 0,
+                        llr_second_pass_rescued: 0,
                     };
                 }
             }
@@ -1292,6 +1334,8 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         phase_err_abs_count: 0,
         phase_err_abs_ge_0p5_symbols: 0,
         phase_err_abs_ge_1p0_symbols: 0,
+        llr_second_pass_attempts: 0,
+        llr_second_pass_rescued: 0,
     }
 }
 
@@ -1326,6 +1370,11 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     );
     decoder.set_cir_postprocess(cli.mary_cir_norm.into(), cli.mary_cir_tap_alpha);
     decoder.set_viterbi_list_size(cli.mary_viterbi_list);
+    decoder.set_llr_erasure_second_pass(
+        cli.mary_llr_erasure_second_pass,
+        cli.mary_llr_erasure_q,
+        cli.mary_llr_erasure_list,
+    );
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;
@@ -1531,6 +1580,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                     phase_err_abs_count: progress.phase_err_abs_count,
                     phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
                     phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
+                    llr_second_pass_attempts: progress.llr_second_pass_attempts,
+                    llr_second_pass_rescued: progress.llr_second_pass_rescued,
                 };
             }
         }
@@ -1620,6 +1671,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                         phase_err_abs_count: progress.phase_err_abs_count,
                         phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
                         phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
+                        llr_second_pass_attempts: progress.llr_second_pass_attempts,
+                        llr_second_pass_rescued: progress.llr_second_pass_rescued,
                     };
                 }
             }
@@ -1696,6 +1749,8 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         phase_err_abs_count: final_progress.phase_err_abs_count,
         phase_err_abs_ge_0p5_symbols: final_progress.phase_err_abs_ge_0p5_symbols,
         phase_err_abs_ge_1p0_symbols: final_progress.phase_err_abs_ge_1p0_symbols,
+        llr_second_pass_attempts: final_progress.llr_second_pass_attempts,
+        llr_second_pass_rescued: final_progress.llr_second_pass_rescued,
     }
 }
 
@@ -1783,6 +1838,8 @@ fn render_column(
         "avg_proc_ns_sample" => format!("{:.2}", m.avg_process_time_per_sample_ns()),
         "synced_frame_ratio" => format!("{:.6}", m.synced_frame_ratio()),
         "crc_pass_ratio" => format!("{:.6}", m.crc_pass_ratio()),
+        "llr_second_pass_trigger_ratio" => format!("{:.6}", m.llr_second_pass_trigger_ratio()),
+        "llr_second_pass_rescue_ratio" => format!("{:.6}", m.llr_second_pass_rescue_ratio()),
         "phase_gate_on_ratio" => format!("{:.6}", m.phase_gate_on_ratio()),
         "phase_innovation_reject_ratio" => format!("{:.6}", m.phase_innovation_reject_ratio()),
         "phase_err_abs_mean_rad" => fmt_opt(m.phase_err_abs_mean_rad()),
@@ -2137,6 +2194,9 @@ mod tests {
             mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
             mary_viterbi_list: 1,
+            mary_llr_erasure_second_pass: false,
+            mary_llr_erasure_q: 0.2,
+            mary_llr_erasure_list: 8,
             columns: None,
             output: OutputFormat::Csv,
         };
@@ -2186,6 +2246,9 @@ mod tests {
             mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
             mary_viterbi_list: 1,
+            mary_llr_erasure_second_pass: false,
+            mary_llr_erasure_q: 0.2,
+            mary_llr_erasure_list: 8,
             columns: None,
             output: OutputFormat::Csv,
         };

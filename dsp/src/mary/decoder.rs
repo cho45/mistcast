@@ -55,6 +55,8 @@ const TRACKING_PHASE_ERR_GATE_RAD: f32 = 1.00;
 const TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH: f32 = 1.60;
 const PHASE_ERR_ABS_THRESH_0P5_RAD: f32 = 0.5;
 const PHASE_ERR_ABS_THRESH_1P0_RAD: f32 = 1.0;
+const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.20;
+const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CirNormalizationMode {
@@ -96,6 +98,8 @@ pub struct DecodeProgress {
     pub phase_err_abs_ge_1p0_symbols: usize,
     pub phase_err_abs_ge_0p5_ratio: f32,
     pub phase_err_abs_ge_1p0_ratio: f32,
+    pub llr_second_pass_attempts: usize,
+    pub llr_second_pass_rescued: usize,
     pub ebn0_approx_db: f32,
     pub basis_matrix: Vec<u8>,
 }
@@ -158,6 +162,9 @@ pub struct Decoder {
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
     viterbi_list_size: usize,
+    llr_erasure_second_pass_enabled: bool,
+    llr_erasure_quantile: f32,
+    llr_erasure_list_size: usize,
 
     // 統計
     pub received_packets: usize,
@@ -175,6 +182,8 @@ pub struct Decoder {
     pub phase_err_abs_count: usize,
     pub phase_err_abs_ge_0p5_symbols: usize,
     pub phase_err_abs_ge_1p0_symbols: usize,
+    pub llr_second_pass_attempts: usize,
+    pub llr_second_pass_rescued: usize,
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
@@ -190,6 +199,7 @@ pub struct Decoder {
     complex_buffer: Vec<Complex32>,
     packet_llrs_buffer: Vec<f32>,
     deinterleave_buffer: Vec<f32>,
+    erasure_llr_buffer: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -281,6 +291,9 @@ impl Decoder {
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
             viterbi_list_size: 1,
+            llr_erasure_second_pass_enabled: false,
+            llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
+            llr_erasure_list_size: LLR_ERASURE_LIST_SIZE_DEFAULT,
             received_packets: 0,
             stalled_packets: 0,
             dependent_packets: 0,
@@ -297,6 +310,8 @@ impl Decoder {
             phase_err_abs_count: 0,
             phase_err_abs_ge_0p5_symbols: 0,
             phase_err_abs_ge_1p0_symbols: 0,
+            llr_second_pass_attempts: 0,
+            llr_second_pass_rescued: 0,
             // ゼロアロケーションバッファ初期化
             mix_buffer_i: Vec::with_capacity(4096),
             mix_buffer_q: Vec::with_capacity(4096),
@@ -308,6 +323,7 @@ impl Decoder {
             complex_buffer: Vec::with_capacity(16_000),
             packet_llrs_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
             deinterleave_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
+            erasure_llr_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
         }
     }
 
@@ -355,6 +371,12 @@ impl Decoder {
 
     pub fn set_viterbi_list_size(&mut self, list_size: usize) {
         self.viterbi_list_size = list_size.max(1);
+    }
+
+    pub fn set_llr_erasure_second_pass(&mut self, enabled: bool, quantile: f32, list_size: usize) {
+        self.llr_erasure_second_pass_enabled = enabled;
+        self.llr_erasure_quantile = quantile.clamp(0.0, 1.0);
+        self.llr_erasure_list_size = list_size.max(1);
     }
 
     pub fn process_samples(&mut self, samples: &[f32]) -> DecodeProgress {
@@ -1095,10 +1117,55 @@ impl Decoder {
             callback(&self.deinterleave_buffer[..interleaved_bits]);
         }
 
-        let decoded_candidates = fec::decode_soft_list(
+        let first_candidates = fec::decode_soft_list(
             &self.deinterleave_buffer[..fec_bits],
             self.viterbi_list_size,
         );
+        let first_attempt = self.try_decode_soft_list_candidates(first_candidates, p_bits_len);
+        if first_attempt.is_ok() {
+            return Ok(());
+        }
+
+        let mut saw_crc = matches!(first_attempt, Err(DecodeAttemptError::Crc));
+        let mut saw_parse = matches!(first_attempt, Err(DecodeAttemptError::Parse));
+
+        if self.llr_erasure_second_pass_enabled && saw_crc {
+            self.llr_second_pass_attempts += 1;
+            self.erasure_llr_buffer.resize(interleaved_bits, 0.0);
+            self.erasure_llr_buffer[..interleaved_bits]
+                .copy_from_slice(&self.deinterleave_buffer[..interleaved_bits]);
+            apply_llr_erasure_quantile(
+                &mut self.erasure_llr_buffer[..fec_bits],
+                self.llr_erasure_quantile,
+            );
+            let second_candidates = fec::decode_soft_list(
+                &self.erasure_llr_buffer[..fec_bits],
+                self.llr_erasure_list_size,
+            );
+            match self.try_decode_soft_list_candidates(second_candidates, p_bits_len) {
+                Ok(()) => {
+                    self.llr_second_pass_rescued += 1;
+                    return Ok(());
+                }
+                Err(DecodeAttemptError::Crc) => saw_crc = true,
+                Err(DecodeAttemptError::Parse) => saw_parse = true,
+            }
+        }
+
+        if saw_crc {
+            Err(DecodeAttemptError::Crc)
+        } else if saw_parse {
+            Err(DecodeAttemptError::Parse)
+        } else {
+            Err(DecodeAttemptError::Parse)
+        }
+    }
+
+    fn try_decode_soft_list_candidates(
+        &mut self,
+        decoded_candidates: Vec<Vec<u8>>,
+        p_bits_len: usize,
+    ) -> Result<(), DecodeAttemptError> {
         let mut saw_crc = false;
         let mut saw_parse = false;
         for decoded_bits in decoded_candidates {
@@ -1107,15 +1174,9 @@ impl Decoder {
                 continue;
             }
             match self.decode_decoded_bits(&decoded_bits[..p_bits_len]) {
-                Ok(()) => {
-                    return Ok(());
-                }
-                Err(DecodeAttemptError::Crc) => {
-                    saw_crc = true;
-                }
-                Err(DecodeAttemptError::Parse) => {
-                    saw_parse = true;
-                }
+                Ok(()) => return Ok(()),
+                Err(DecodeAttemptError::Crc) => saw_crc = true,
+                Err(DecodeAttemptError::Parse) => saw_parse = true,
             }
         }
         if saw_crc {
@@ -1207,6 +1268,8 @@ impl Decoder {
         self.phase_err_abs_count = 0;
         self.phase_err_abs_ge_0p5_symbols = 0;
         self.phase_err_abs_ge_1p0_symbols = 0;
+        self.llr_second_pass_attempts = 0;
+        self.llr_second_pass_rescued = 0;
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -1266,6 +1329,8 @@ impl Decoder {
             phase_err_abs_ge_1p0_symbols: self.phase_err_abs_ge_1p0_symbols,
             phase_err_abs_ge_0p5_ratio,
             phase_err_abs_ge_1p0_ratio,
+            llr_second_pass_attempts: self.llr_second_pass_attempts,
+            llr_second_pass_rescued: self.llr_second_pass_rescued,
             ebn0_approx_db,
             basis_matrix: self.fountain_decoder.get_basis_matrix(),
         }
@@ -1567,6 +1632,9 @@ impl Decoder {
         self.phase_err_abs_count = 0;
         self.phase_err_abs_ge_0p5_symbols = 0;
         self.phase_err_abs_ge_1p0_symbols = 0;
+        self.llr_second_pass_attempts = 0;
+        self.llr_second_pass_rescued = 0;
+        self.erasure_llr_buffer.clear();
     }
 }
 
@@ -1610,6 +1678,32 @@ fn update_phase_rate(phase_rate: f32, phase_err: f32) -> f32 {
 fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
     (phase_rate + TRACKING_PHASE_PROP_GAIN * phase_err)
         .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
+}
+
+#[inline]
+fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
+    if llrs.is_empty() {
+        return;
+    }
+    let q = quantile.clamp(0.0, 1.0);
+    if q <= 0.0 {
+        return;
+    }
+    let erase_count = ((llrs.len() as f32) * q).round() as usize;
+    if erase_count == 0 {
+        return;
+    }
+
+    let mut abs_vals = llrs.iter().map(|v| v.abs()).collect::<Vec<_>>();
+    abs_vals.sort_by(|a, b| a.total_cmp(b));
+    let threshold_idx = erase_count.saturating_sub(1).min(abs_vals.len() - 1);
+    let threshold = abs_vals[threshold_idx];
+
+    for llr in llrs.iter_mut() {
+        if llr.abs() <= threshold {
+            *llr = 0.0;
+        }
+    }
 }
 
 #[inline]
@@ -1740,6 +1834,13 @@ mod tests {
 
         // ON→OFF: OFF閾値で1条件以下なら無効化する
         assert!(!next_phase_gate_enabled(true, 0.10, 0.01, 1.1));
+    }
+
+    #[test]
+    fn test_apply_llr_erasure_quantile_zeroes_small_abs_values() {
+        let mut llrs = [0.10, -0.20, 0.30, -0.90];
+        apply_llr_erasure_quantile(&mut llrs, 0.5);
+        assert_eq!(llrs, [0.0, 0.0, 0.30, -0.90]);
     }
 
     #[test]
