@@ -365,6 +365,7 @@ impl EqualizationController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DspConfig;
 
     #[test]
     fn test_postprocess_cir_empty() {
@@ -401,5 +402,76 @@ mod tests {
         assert!(cir[1].norm() < 1e-6);
         assert!(cir[0].norm() > 0.9);
         assert!(cir[2].norm() > 0.7);
+    }
+
+    #[test]
+    fn test_select_path_prefers_lower_fde_mse_when_auto_enabled() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, true);
+        controller.set_fde_auto_path_select(true);
+
+        controller.select_path(0.20, 0.05, controller.fde_auto_path_select());
+        assert!(controller.current_frame_use_fde());
+
+        controller.select_path(0.05, 0.20, controller.fde_auto_path_select());
+        assert!(!controller.current_frame_use_fde());
+    }
+
+    #[test]
+    fn test_process_equalizer_with_warmup_drain_passthrough_without_fde() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, false);
+        let input = vec![Complex32::new(1.0, 0.0), Complex32::new(0.5, -0.25)];
+
+        let added = controller.process_equalizer_with_warmup_drain(&input, 1);
+
+        assert_eq!(added, input.len());
+        assert_eq!(controller.equalized_buffer(), input.as_slice());
+    }
+
+    #[test]
+    fn test_frame_buffer_accounting_helpers_update_offset_and_prefix() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, false);
+        controller.extend_test_equalized_buffer(&[
+            Complex32::new(1.0, 0.0),
+            Complex32::new(2.0, 0.0),
+            Complex32::new(3.0, 0.0),
+        ]);
+
+        controller.advance_input_offset(10);
+        controller.rewind_input_offset(4);
+        let drained = controller.consume_equalized_prefix(2);
+
+        assert_eq!(controller.input_offset(), 6);
+        assert_eq!(drained, 2);
+        assert_eq!(controller.equalized_len(), 1);
+        assert_eq!(controller.equalized_buffer()[0], Complex32::new(3.0, 0.0));
+    }
+
+    #[test]
+    fn test_reset_frame_buffers_clears_buffer_and_offset() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, false);
+        controller.extend_test_equalized_buffer(&[Complex32::new(1.0, 0.0)]);
+        controller.advance_input_offset(12);
+
+        controller.reset_frame_buffers();
+
+        assert_eq!(controller.equalized_len(), 0);
+        assert_eq!(controller.input_offset(), 0);
+    }
+
+    #[test]
+    fn test_disabling_fde_clears_auto_path_select_and_current_frame_use_fde() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, true);
+        controller.set_fde_auto_path_select(true);
+
+        controller.set_fde_enabled(false, &config);
+
+        assert!(!controller.fde_auto_path_select());
+        assert!(!controller.current_frame_use_fde());
+        assert!(controller.equalizer_ref().is_none());
     }
 }

@@ -465,11 +465,93 @@ pub(crate) fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coding::fec;
+    use crate::frame::packet::{Packet, PACKET_BYTES};
+    use crate::mary::demodulator::Demodulator;
 
     #[test]
     fn test_apply_llr_erasure_quantile_zeroes_small_abs_values() {
         let mut llrs = vec![0.1, -0.2, 0.5, -1.0, 2.0];
         apply_llr_erasure_quantile(&mut llrs, 0.4);
         assert_eq!(llrs, vec![0.0, 0.0, 0.5, -1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_decide_dqpsk_symbol_from_llr_maps_all_quadrants() {
+        assert_eq!(
+            decide_dqpsk_symbol_from_llr([1.0, 1.0]),
+            Complex32::new(1.0, 0.0)
+        );
+        assert_eq!(
+            decide_dqpsk_symbol_from_llr([1.0, -1.0]),
+            Complex32::new(0.0, 1.0)
+        );
+        assert_eq!(
+            decide_dqpsk_symbol_from_llr([-1.0, -1.0]),
+            Complex32::new(-1.0, 0.0)
+        );
+        assert_eq!(
+            decide_dqpsk_symbol_from_llr([-1.0, 1.0]),
+            Complex32::new(0.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn test_process_packet_core_returns_unprocessed_when_despread_fails() {
+        let demodulator = Demodulator::new();
+        let mut prev_phase = Complex32::new(1.0, 0.0);
+        let mut tracking_state = TrackingState::new();
+        let mut stats = DecoderStats::new();
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llr_callback: Option<LlrCallback> = None;
+        let options = PacketDecodeOptions {
+            spc: 2,
+            early_late_delta: 1.0,
+            viterbi_list_size: 1,
+            llr_erasure_second_pass_enabled: false,
+            llr_erasure_quantile: 0.2,
+            llr_erasure_list_size: 1,
+        };
+
+        let result = process_packet_core(
+            PacketDecodeRuntime {
+                demodulator: &demodulator,
+                prev_phase: &mut prev_phase,
+                tracking_state: &mut tracking_state,
+                stats: &mut stats,
+                buffers: &mut buffers,
+                llr_callback: &mut llr_callback,
+            },
+            &options,
+            |_symbol_start, _timing_offset, _sample_shift| None,
+        );
+
+        assert!(!result.processed);
+        assert!(result.packet.is_none());
+        assert!(buffers.packet_llrs_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_try_decode_soft_list_candidates_returns_packet_for_valid_bits() {
+        let packet = Packet::new(7, 3, &[0x5a; crate::params::PAYLOAD_SIZE]);
+        let bits = fec::bytes_to_bits(&packet.serialize());
+
+        let decoded = try_decode_soft_list_candidates(vec![bits], PACKET_BYTES * 8).unwrap();
+
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn test_try_decode_soft_list_candidates_distinguishes_crc_and_parse_errors() {
+        let packet = Packet::new(1, 2, &[0x11; crate::params::PAYLOAD_SIZE]);
+        let mut crc_bits = fec::bytes_to_bits(&packet.serialize());
+        crc_bits[0] ^= 1;
+
+        let crc_err = try_decode_soft_list_candidates(vec![crc_bits], PACKET_BYTES * 8);
+        assert!(matches!(crc_err, Err(PacketDecodeError::Crc)));
+
+        let parse_err =
+            try_decode_soft_list_candidates(vec![vec![0; PACKET_BYTES * 8 - 1]], PACKET_BYTES * 8);
+        assert!(matches!(parse_err, Err(PacketDecodeError::Parse)));
     }
 }
