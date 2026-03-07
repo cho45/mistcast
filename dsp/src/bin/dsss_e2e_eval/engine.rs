@@ -74,7 +74,6 @@ pub fn run_warmup<E, D>(
     state.total_tx_signal_energy += signal_energy(&warmup);
     state.total_tx_signal_samples += warmup.len();
     let warmup_rx = apply_channel(&warmup, cfg.imp, cfg.rng, false);
-    state.total_sim_sec += warmup_rx.len() as f32 / cfg.sample_rate;
     process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
@@ -120,7 +119,6 @@ pub fn run_tail<E, D>(
     state.total_tx_signal_energy += signal_energy(&tail);
     state.total_tx_signal_samples += tail.len();
     let tail_rx = apply_channel(&tail, cfg.imp, cfg.rng, false);
-    state.total_sim_sec += tail_rx.len() as f32 / cfg.sample_rate;
     process_samples_in_chunks(&tail_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
