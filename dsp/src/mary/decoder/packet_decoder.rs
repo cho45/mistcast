@@ -466,8 +466,87 @@ pub(crate) fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
 mod tests {
     use super::*;
     use crate::coding::fec;
+    use crate::coding::interleaver::BlockInterleaver;
+    use crate::coding::scrambler::Scrambler;
     use crate::frame::packet::{Packet, PACKET_BYTES};
     use crate::mary::demodulator::Demodulator;
+    use crate::mary::interleaver_config;
+    use std::sync::{Arc, Mutex};
+
+    fn default_options() -> PacketDecodeOptions {
+        PacketDecodeOptions {
+            spc: 2,
+            early_late_delta: 1.0,
+            viterbi_list_size: 1,
+            llr_erasure_second_pass_enabled: false,
+            llr_erasure_quantile: 0.2,
+            llr_erasure_list_size: 1,
+        }
+    }
+
+    fn decode_layout() -> DecodeLayout {
+        DecodeLayout {
+            rows: interleaver_config::INTERLEAVER_ROWS,
+            cols: interleaver_config::INTERLEAVER_COLS,
+            interleaved_bits: interleaver_config::interleaved_bits(),
+            fec_bits: interleaver_config::fec_bits(),
+            payload_bits_len: PACKET_BYTES * 8,
+        }
+    }
+
+    fn encode_packet_to_interleaved_llrs(packet: &Packet, magnitude: f32) -> Vec<f32> {
+        encode_packet_to_interleaved_bits(packet)
+            .into_iter()
+            .map(|bit| if bit == 0 { magnitude } else { -magnitude })
+            .collect()
+    }
+
+    fn encode_packet_to_descrambled_llrs(packet: &Packet, magnitude: f32) -> Vec<f32> {
+        fec::encode(&fec::bytes_to_bits(&packet.serialize()))
+            .into_iter()
+            .map(|bit| if bit == 0 { magnitude } else { -magnitude })
+            .collect()
+    }
+
+    fn encode_packet_to_interleaved_bits(packet: &Packet) -> Vec<u8> {
+        let bits = fec::bytes_to_bits(&packet.serialize());
+        let mut fec_bits = fec::encode(&bits);
+        let mut scrambler = Scrambler::default();
+        scrambler.process_bits(&mut fec_bits);
+        let interleaver = BlockInterleaver::new(
+            interleaver_config::INTERLEAVER_ROWS,
+            interleaver_config::INTERLEAVER_COLS,
+        );
+        interleaver.interleave(&fec_bits)
+    }
+
+    fn dqpsk_symbol_from_bits(bits: &[u8]) -> Complex32 {
+        match (bits[0], bits[1]) {
+            (0, 0) => Complex32::new(1.0, 0.0),
+            (0, 1) => Complex32::new(0.0, 1.0),
+            (1, 1) => Complex32::new(-1.0, 0.0),
+            (1, 0) => Complex32::new(0.0, -1.0),
+            _ => unreachable!(),
+        }
+    }
+
+    fn build_symbol_correlation_sequence(packet: &Packet, amplitude: f32) -> Vec<[Complex32; 16]> {
+        let bits = encode_packet_to_interleaved_bits(packet);
+        let mut prev = Complex32::new(1.0, 0.0);
+        bits.chunks_exact(6)
+            .map(|chunk| {
+                let walsh_idx = chunk[..4]
+                    .iter()
+                    .fold(0usize, |acc, &bit| (acc << 1) | bit as usize);
+                let diff = dqpsk_symbol_from_bits(&chunk[4..6]);
+                let current = prev * diff;
+                prev = current;
+                let mut corrs = [Complex32::new(0.0, 0.0); 16];
+                corrs[walsh_idx] = current * amplitude;
+                corrs
+            })
+            .collect()
+    }
 
     #[test]
     fn test_apply_llr_erasure_quantile_zeroes_small_abs_values() {
@@ -504,14 +583,7 @@ mod tests {
         let mut stats = DecoderStats::new();
         let mut buffers = PacketDecodeBuffers::new();
         let mut llr_callback: Option<LlrCallback> = None;
-        let options = PacketDecodeOptions {
-            spc: 2,
-            early_late_delta: 1.0,
-            viterbi_list_size: 1,
-            llr_erasure_second_pass_enabled: false,
-            llr_erasure_quantile: 0.2,
-            llr_erasure_list_size: 1,
-        };
+        let options = default_options();
 
         let result = process_packet_core(
             PacketDecodeRuntime {
@@ -553,5 +625,168 @@ mod tests {
         let parse_err =
             try_decode_soft_list_candidates(vec![vec![0; PACKET_BYTES * 8 - 1]], PACKET_BYTES * 8);
         assert!(matches!(parse_err, Err(PacketDecodeError::Parse)));
+    }
+
+    #[test]
+    fn test_decode_packet_distinguishes_crc_and_parse_errors() {
+        let packet = Packet::new(9, 4, &[0x33; crate::params::PAYLOAD_SIZE]);
+        let valid_bits = fec::bytes_to_bits(&packet.serialize());
+        assert_eq!(decode_packet(&valid_bits).unwrap(), packet);
+
+        let mut crc_bits = valid_bits.clone();
+        crc_bits[5] ^= 1;
+        assert!(matches!(decode_packet(&crc_bits), Err(PacketDecodeError::Crc)));
+
+        let mut parse_bits = valid_bits.clone();
+        parse_bits.extend_from_slice(&[0; 8]);
+        assert!(matches!(
+            decode_packet(&parse_bits),
+            Err(PacketDecodeError::Parse)
+        ));
+    }
+
+    #[test]
+    fn test_decode_single_llr_candidate_recovers_packet_and_invokes_callback() {
+        let packet = Packet::new(5, 8, &[0x6c; crate::params::PAYLOAD_SIZE]);
+        let magnitude = 8.0;
+        let llrs = encode_packet_to_interleaved_llrs(&packet, magnitude);
+        let expected_callback_llrs = encode_packet_to_descrambled_llrs(&packet, magnitude);
+        let layout = decode_layout();
+        let mut stats = DecoderStats::new();
+        let mut buffers = PacketDecodeBuffers::new();
+        let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let captured_for_cb = Arc::clone(&captured);
+        let mut llr_callback: Option<LlrCallback> = Some(Box::new(move |values| {
+            let mut slot = captured_for_cb.lock().unwrap();
+            slot.clear();
+            slot.extend_from_slice(values);
+        }));
+        let options = default_options();
+        let mut context = DecodeCandidateContext {
+            stats: &mut stats,
+            buffers: &mut buffers,
+            llr_callback: &mut llr_callback,
+            options: &options,
+        };
+
+        let decoded = decode_single_llr_candidate(&llrs, &layout, &mut context).unwrap();
+
+        assert_eq!(decoded, packet);
+        let observed = captured.lock().unwrap().clone();
+        assert_eq!(observed.len(), interleaver_config::fec_bits());
+        assert_eq!(observed, expected_callback_llrs);
+        assert_eq!(stats.llr_second_pass_attempts, 0);
+        assert_eq!(stats.llr_second_pass_rescued, 0);
+    }
+
+    #[test]
+    fn test_decode_single_llr_candidate_reports_crc_for_corrupted_llrs_without_second_pass() {
+        let packet = Packet::new(4, 9, &[0x3c; crate::params::PAYLOAD_SIZE]);
+        let llrs = encode_packet_to_interleaved_llrs(&packet, 8.0)
+            .into_iter()
+            .map(|llr| -llr)
+            .collect::<Vec<_>>();
+        let layout = decode_layout();
+        let options = default_options();
+        let mut stats = DecoderStats::new();
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llr_callback: Option<LlrCallback> = None;
+        let mut context = DecodeCandidateContext {
+            stats: &mut stats,
+            buffers: &mut buffers,
+            llr_callback: &mut llr_callback,
+            options: &options,
+        };
+        let result = decode_single_llr_candidate(&llrs, &layout, &mut context);
+
+        assert!(matches!(result, Err(PacketDecodeError::Crc)));
+        assert_eq!(stats.llr_second_pass_attempts, 0);
+        assert_eq!(stats.llr_second_pass_rescued, 0);
+    }
+
+    #[test]
+    fn test_decode_llrs_skips_first_invalid_chunk_and_decodes_later_valid_chunk() {
+        let packet = Packet::new(3, 7, &[0x44; crate::params::PAYLOAD_SIZE]);
+        let valid_llrs = encode_packet_to_interleaved_llrs(&packet, 8.0);
+        let mut combined = valid_llrs.iter().map(|llr| -*llr).collect::<Vec<_>>();
+        combined.extend_from_slice(&valid_llrs);
+        let mut stats = DecoderStats::new();
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llr_callback: Option<LlrCallback> = None;
+        let options = default_options();
+
+        let decoded = decode_llrs(
+            &combined,
+            &mut stats,
+            &mut buffers,
+            &mut llr_callback,
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(decoded, packet);
+        assert_eq!(stats.crc_error_packets, 1);
+        assert_eq!(stats.parse_error_packets, 0);
+    }
+
+    #[test]
+    fn test_process_packet_core_recovers_packet_and_updates_packet_stats() {
+        let packet = Packet::new(13, 6, &[0x55; crate::params::PAYLOAD_SIZE]);
+        let symbol_corrs = build_symbol_correlation_sequence(&packet, 10.0);
+        let demodulator = Demodulator::new();
+        let mut prev_phase = Complex32::new(1.0, 0.0);
+        let mut tracking_state = TrackingState::new();
+        let mut stats = DecoderStats::new();
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llr_callback: Option<LlrCallback> = None;
+        let options = default_options();
+
+        let result = process_packet_core(
+            PacketDecodeRuntime {
+                demodulator: &demodulator,
+                prev_phase: &mut prev_phase,
+                tracking_state: &mut tracking_state,
+                stats: &mut stats,
+                buffers: &mut buffers,
+                llr_callback: &mut llr_callback,
+            },
+            &options,
+            |symbol_start, _timing_offset, _sample_shift| {
+                let sym_idx =
+                    (symbol_start - options.spc) / (PAYLOAD_SPREAD_FACTOR * options.spc);
+                symbol_corrs.get(sym_idx).copied()
+            },
+        );
+
+        assert!(result.processed);
+        assert_eq!(result.packet, Some(packet));
+        assert_eq!(
+            stats.phase_gate_on_symbols + stats.phase_gate_off_symbols,
+            interleaver_config::mary_symbols()
+        );
+        assert_eq!(stats.phase_err_abs_count, interleaver_config::mary_symbols());
+    }
+
+    #[test]
+    fn test_decode_llrs_stops_on_short_trailing_chunk() {
+        let packet = Packet::new(11, 1, &[0x22; crate::params::PAYLOAD_SIZE]);
+        let mut llrs = encode_packet_to_interleaved_llrs(&packet, 8.0);
+        llrs.truncate(interleaver_config::interleaved_bits() - 1);
+        let mut stats = DecoderStats::new();
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llr_callback: Option<LlrCallback> = None;
+        let options = default_options();
+
+        let decoded = decode_llrs(
+            &llrs,
+            &mut stats,
+            &mut buffers,
+            &mut llr_callback,
+            &options,
+        );
+
+        assert!(decoded.is_none());
+        assert_eq!(stats.crc_error_packets, 0);
+        assert_eq!(stats.parse_error_packets, 0);
     }
 }
