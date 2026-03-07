@@ -11,10 +11,10 @@ use crate::coding::fec;
 use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::common::equalization::{FrequencyDomainEqualizer, MmseSettings};
 use crate::frame::packet::Packet;
 use crate::mary::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
+use crate::mary::equalization::{EqualizationController, postprocess_cir};
 use crate::mary::interleaver_config;
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
 use crate::mary::signal_pipeline::SignalPipeline;
@@ -28,15 +28,9 @@ const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
 const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.20;
 const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CirNormalizationMode {
-    None,
-    UnitEnergy,
-    Peak,
-}
-
-// DecodeProgressは decoder_stats モジュールから再エクスポート
+// DecodeProgressとCirNormalizationModeは各モジュールから再エクスポート
 pub use crate::mary::decoder_stats::DecodeProgress;
+pub use crate::mary::equalization::CirNormalizationMode;
 
 /// LLR観測用コールバック型
 pub type LlrCallback = Box<dyn FnMut(&[f32]) + Send>;
@@ -58,9 +52,7 @@ enum DecodeAttemptError {
 pub struct Decoder {
     pub config: DspConfig,
     pipeline: SignalPipeline,
-    equalizer: Option<FrequencyDomainEqualizer>,
-    equalized_buffer: Vec<Complex32>,
-    equalizer_input_offset: usize,
+    equalization: EqualizationController,
     demodulator: Demodulator,
     fountain_decoder: FountainDecoder,
     pub recovered_data: Option<Vec<u8>>,
@@ -76,11 +68,6 @@ pub struct Decoder {
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
-    fde_auto_path_select: bool,
-    current_frame_use_fde: bool,
-    fde_mmse_settings: MmseSettings,
-    cir_normalization_mode: CirNormalizationMode,
-    cir_tap_threshold_alpha: f32,
     viterbi_list_size: usize,
     llr_erasure_second_pass_enabled: bool,
     llr_erasure_quantile: f32,
@@ -101,21 +88,6 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    fn default_fde_fft_size(dsp_config: &DspConfig) -> usize {
-        let spc = dsp_config.proc_samples_per_chip();
-        let cir_samples = dsp_config.preamble_sf * spc;
-        (cir_samples * 2).next_power_of_two().max(1024)
-    }
-
-    fn build_default_equalizer(dsp_config: &DspConfig) -> FrequencyDomainEqualizer {
-        let spc = dsp_config.proc_samples_per_chip();
-        let cir_samples = dsp_config.preamble_sf * spc;
-        let fft_size = Self::default_fde_fft_size(dsp_config);
-        let mut initial_cir = vec![Complex32::new(0.0, 0.0); cir_samples];
-        initial_cir[0] = Complex32::new(1.0, 0.0);
-        FrequencyDomainEqualizer::new(&initial_cir, fft_size, 15.0)
-    }
-
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let tc = MarySyncDetector::THRESHOLD_COARSE_DEFAULT;
@@ -127,14 +99,12 @@ impl Decoder {
 
         Decoder {
             pipeline: SignalPipeline::new(&dsp_config),
+            equalization: EqualizationController::new(&dsp_config, true),
             demodulator: Demodulator::new(),
             fountain_decoder: FountainDecoder::new(FountainParams::new(fountain_k, PAYLOAD_SIZE)),
             recovered_data: None,
             sync_detector: MarySyncDetector::new(dsp_config.clone(), tc, tf),
             config: dsp_config.clone(),
-            equalizer: Some(Self::build_default_equalizer(&dsp_config)),
-            equalized_buffer: Vec::new(),
-            equalizer_input_offset: 0,
             state: DecoderState::Searching,
             last_search_idx: 0,
             current_sync: None,
@@ -144,11 +114,6 @@ impl Decoder {
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: 0,
-            fde_auto_path_select: false,
-            current_frame_use_fde: true,
-            fde_mmse_settings: MmseSettings::default(),
-            cir_normalization_mode: CirNormalizationMode::None,
-            cir_tap_threshold_alpha: 0.0,
             viterbi_list_size: 1,
             llr_erasure_second_pass_enabled: false,
             llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
@@ -164,25 +129,11 @@ impl Decoder {
     }
 
     pub fn set_fde_enabled(&mut self, enabled: bool) {
-        if enabled {
-            if self.equalizer.is_none() {
-                self.equalizer = Some(Self::build_default_equalizer(&self.config));
-            }
-            self.current_frame_use_fde = true;
-        } else {
-            self.equalizer = None;
-            self.current_frame_use_fde = false;
-            self.fde_auto_path_select = false;
-        }
-        self.equalized_buffer.clear();
-        self.equalizer_input_offset = 0;
+        self.equalization.set_fde_enabled(enabled, &self.config);
     }
 
     pub fn set_fde_auto_path_select(&mut self, enabled: bool) {
-        self.fde_auto_path_select = enabled;
-        if !enabled {
-            self.current_frame_use_fde = self.equalizer.is_some();
-        }
+        self.equalization.set_fde_auto_path_select(enabled);
     }
 
     pub fn set_fde_mmse_settings(
@@ -192,8 +143,7 @@ impl Decoder {
         lambda_floor: f32,
         max_inv_gain: Option<f32>,
     ) {
-        self.fde_mmse_settings =
-            MmseSettings::new(snr_db, lambda_scale, lambda_floor, max_inv_gain);
+        self.equalization.set_fde_mmse_settings(snr_db, lambda_scale, lambda_floor, max_inv_gain);
     }
 
     pub fn set_cir_postprocess(
@@ -201,8 +151,7 @@ impl Decoder {
         normalization_mode: CirNormalizationMode,
         tap_threshold_alpha: f32,
     ) {
-        self.cir_normalization_mode = normalization_mode;
-        self.cir_tap_threshold_alpha = tap_threshold_alpha.max(0.0);
+        self.equalization.set_cir_postprocess(normalization_mode, tap_threshold_alpha);
     }
 
     pub fn set_viterbi_list_size(&mut self, list_size: usize) {
@@ -298,24 +247,27 @@ impl Decoder {
                     cir_slice,
                     &mut chq,
                 );
-                Self::postprocess_cir(
+                postprocess_cir(
                     cir_slice,
-                    self.cir_normalization_mode,
-                    self.cir_tap_threshold_alpha,
+                    self.equalization.cir_normalization_mode(),
+                    self.equalization.cir_tap_threshold_alpha(),
                 );
             }
-            let mut mmse = self.fde_mmse_settings;
+            let mut mmse = self.equalization.fde_mmse_settings();
             if let Some(snr_db) = chq.snr_db {
                 mmse.snr_db = snr_db.clamp(-20.0, 40.0);
             }
 
-            let mut use_fde_this_frame = self.equalizer.is_some();
             let mut pred_mse_fde = f32::NAN;
             let mut pred_mse_raw = f32::NAN;
-            if self.equalizer.is_some() {
+            if self.equalization.equalizer_ref().is_some() {
                 let known_end_idx =
                     preamble_start_idx + self.sync_detector.known_interval_len_samples();
-                let (mse_raw, mse_fde) = self.known_interval_path_mse(
+                let (mse_raw, mse_fde) = self.equalization.known_interval_path_mse(
+                    &self.sync_detector,
+                    &self.cir_buffer,
+                    &self.pipeline.sample_buffer_i,
+                    &self.pipeline.sample_buffer_q,
                     preamble_start_idx,
                     known_end_idx,
                     cir_len,
@@ -324,11 +276,9 @@ impl Decoder {
                 );
                 pred_mse_fde = mse_fde;
                 pred_mse_raw = mse_raw;
-                if self.fde_auto_path_select && mse_fde.is_finite() && mse_raw.is_finite() {
-                    use_fde_this_frame = mse_fde < mse_raw;
-                }
+                self.equalization.select_path(mse_raw, mse_fde, self.equalization.fde_auto_path_select());
             }
-            self.current_frame_use_fde = use_fde_this_frame;
+            let use_fde_this_frame = self.equalization.current_frame_use_fde();
             self.stats.last_pred_mse_fde = pred_mse_fde;
             self.stats.last_pred_mse_raw = pred_mse_raw;
             self.stats.last_est_snr_db = chq.snr_db.unwrap_or(f32::NAN);
@@ -341,7 +291,7 @@ impl Decoder {
             }
 
             let overlap = if use_fde_this_frame {
-                self.equalizer.as_ref().map_or(0, |eq| eq.overlap_len())
+                self.equalization.equalizer_ref().map_or(0, |eq| eq.overlap_len())
             } else {
                 0
             };
@@ -355,16 +305,13 @@ impl Decoder {
             }
 
             // --- 新しいフレームの準備 ---
-            self.equalized_buffer.clear();
+            self.equalization.clear_equalized_buffer();
             self.last_search_idx = 0;
-            self.equalizer_input_offset = 0;
+            self.equalization.set_equalizer_input_offset(0);
 
             // EQ リセット
             if use_fde_this_frame {
-                if let Some(ref mut eq) = self.equalizer {
-                    eq.set_cir_with_mmse(&self.cir_buffer[..cir_len], mmse);
-                    eq.reset();
-                }
+                self.equalization.setup_equalizer(&self.cir_buffer[..cir_len], mmse);
             }
 
             // 2. ワームアップ投入
@@ -421,7 +368,8 @@ impl Decoder {
                 self.pipeline.sample_buffer_i.drain(0..drain_len);
                 self.pipeline.sample_buffer_q.drain(0..drain_len);
                 self.last_search_idx = self.last_search_idx.saturating_sub(drain_len);
-                self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(drain_len);
+                let new_offset = self.equalization.equalizer_input_offset().saturating_sub(drain_len);
+                self.equalization.set_equalizer_input_offset(new_offset);
             }
             false
         }
@@ -439,7 +387,7 @@ impl Decoder {
             .pipeline
             .sample_buffer_i
             .len()
-            .saturating_sub(self.equalizer_input_offset);
+            .saturating_sub(self.equalization.equalizer_input_offset());
         if to_process > 0 {
             // ゼロアロケーション: 事前確保バッファ使用
             self.complex_buffer.clear();
@@ -450,7 +398,7 @@ impl Decoder {
                 self.complex_buffer.set_len(to_process);
             }
             for (idx, i) in
-                (self.equalizer_input_offset..self.equalizer_input_offset + to_process).enumerate()
+                (self.equalization.equalizer_input_offset()..self.equalization.equalizer_input_offset() + to_process).enumerate()
             {
                 self.complex_buffer[idx] =
                     Complex32::new(self.pipeline.sample_buffer_i[i], self.pipeline.sample_buffer_q[i]);
@@ -462,7 +410,7 @@ impl Decoder {
         if self.packets_processed_in_burst == 0 {
             let required_sync_samples = sync_word_bits * sf_sync * spc;
 
-            if self.equalized_buffer.len() < required_sync_samples {
+            if self.equalization.equalized_buffer_mut().len() < required_sync_samples {
                 return false;
             }
 
@@ -494,7 +442,7 @@ impl Decoder {
                 }
             }
             if best_timing_offset > 0 {
-                self.equalized_buffer.drain(0..best_timing_offset);
+                self.equalization.drain_equalized_buffer(best_timing_offset);
             }
 
             let mut st = self.tracking_state.expect("st must exist");
@@ -618,7 +566,7 @@ impl Decoder {
             self.tracking_state = Some(st);
             self.packets_processed_in_burst = 1;
             let drain_len = required_sync_samples.saturating_sub(spc);
-            self.equalized_buffer.drain(0..drain_len);
+            self.equalization.drain_equalized_buffer(drain_len);
         }
 
         // 3. パケット復調
@@ -630,8 +578,8 @@ impl Decoder {
         if packets_decoded >= max_packets {
             if self.pending_warmup_input_samples == 0 && self.remaining_samples_in_frame <= 0 {
                 self.last_search_idx = 0;
-                self.equalizer_input_offset = 0;
-                self.equalized_buffer.clear();
+                self.equalization.set_equalizer_input_offset(0);
+                self.equalization.clear_equalized_buffer();
                 self.state = DecoderState::Searching;
                 self.current_sync = None;
                 self.pending_warmup_samples = 0;
@@ -641,7 +589,7 @@ impl Decoder {
             return to_process > 0;
         }
 
-        if self.equalized_buffer.len() < packet_samples + spc {
+        if self.equalization.equalized_buffer_mut().len() < packet_samples + spc {
             return false;
         }
 
@@ -650,8 +598,8 @@ impl Decoder {
             // パケット復調中に despread が範囲外になった場合は、
             // 現在フレームを破棄して再同期へ戻す。
             self.last_search_idx = 0;
-            self.equalizer_input_offset = 0;
-            self.equalized_buffer.clear();
+            self.equalization.set_equalizer_input_offset(0);
+            self.equalization.clear_equalized_buffer();
             self.state = DecoderState::Searching;
             self.current_sync = None;
             self.tracking_state = None;
@@ -667,8 +615,9 @@ impl Decoder {
         st.timing_offset -= offset_int as f32;
         self.tracking_state = Some(st);
 
-        self.equalized_buffer
-            .drain(0..actual_drain_len.min(self.equalized_buffer.len()));
+        let buffer_len = self.equalization.equalized_buffer().len();
+        self.equalization.equalized_buffer_mut()
+            .drain(0..actual_drain_len.min(buffer_len));
 
         if success {
             self.consecutive_crc_errors = 0;
@@ -684,8 +633,8 @@ impl Decoder {
             && packets_decoded >= max_packets
         {
             self.last_search_idx = 0;
-            self.equalizer_input_offset = 0;
-            self.equalized_buffer.clear();
+            self.equalization.set_equalizer_input_offset(0);
+            self.equalization.clear_equalized_buffer();
             self.state = DecoderState::Searching;
             self.current_sync = None;
             self.pending_warmup_samples = 0;
@@ -921,7 +870,6 @@ impl Decoder {
         }
 
         let mut saw_crc = matches!(first_attempt, Err(DecodeAttemptError::Crc));
-        let mut saw_parse = matches!(first_attempt, Err(DecodeAttemptError::Parse));
 
         if self.llr_erasure_second_pass_enabled && saw_crc {
             self.stats.llr_second_pass_attempts += 1;
@@ -942,14 +890,12 @@ impl Decoder {
                     return Ok(());
                 }
                 Err(DecodeAttemptError::Crc) => saw_crc = true,
-                Err(DecodeAttemptError::Parse) => saw_parse = true,
+                Err(DecodeAttemptError::Parse) => {}
             }
         }
 
         if saw_crc {
             Err(DecodeAttemptError::Crc)
-        } else if saw_parse {
-            Err(DecodeAttemptError::Parse)
         } else {
             Err(DecodeAttemptError::Parse)
         }
@@ -961,22 +907,18 @@ impl Decoder {
         p_bits_len: usize,
     ) -> Result<(), DecodeAttemptError> {
         let mut saw_crc = false;
-        let mut saw_parse = false;
         for decoded_bits in decoded_candidates {
             if decoded_bits.len() < p_bits_len {
-                saw_parse = true;
                 continue;
             }
             match self.decode_decoded_bits(&decoded_bits[..p_bits_len]) {
                 Ok(()) => return Ok(()),
                 Err(DecodeAttemptError::Crc) => saw_crc = true,
-                Err(DecodeAttemptError::Parse) => saw_parse = true,
+                Err(DecodeAttemptError::Parse) => {}
             }
         }
         if saw_crc {
             Err(DecodeAttemptError::Crc)
-        } else if saw_parse {
-            Err(DecodeAttemptError::Parse)
         } else {
             Err(DecodeAttemptError::Parse)
         }
@@ -1047,105 +989,6 @@ impl Decoder {
         self.stats.to_progress(&self.fountain_decoder, &self.config, self.recovered_data.is_some())
     }
 
-    fn postprocess_cir(
-        cir: &mut [Complex32],
-        cir_normalization_mode: CirNormalizationMode,
-        cir_tap_threshold_alpha: f32,
-    ) {
-        if cir.is_empty() {
-            return;
-        }
-
-        let max_mag = cir.iter().map(|c| c.norm()).fold(0.0f32, |a, b| a.max(b));
-
-        if max_mag > 0.0 && cir_tap_threshold_alpha > 0.0 {
-            let threshold = cir_tap_threshold_alpha * max_mag;
-            for tap in cir.iter_mut() {
-                if tap.norm() < threshold {
-                    *tap = Complex32::new(0.0, 0.0);
-                }
-            }
-        }
-
-        match cir_normalization_mode {
-            CirNormalizationMode::None => {}
-            CirNormalizationMode::UnitEnergy => {
-                let energy = cir.iter().map(|c| c.norm_sqr()).sum::<f32>();
-                let scale = (energy + 1e-12).sqrt();
-                for tap in cir.iter_mut() {
-                    *tap /= scale;
-                }
-            }
-            CirNormalizationMode::Peak => {
-                let peak = cir
-                    .iter()
-                    .map(|c| c.norm())
-                    .fold(0.0f32, |a, b| a.max(b))
-                    .max(1e-12);
-                for tap in cir.iter_mut() {
-                    *tap /= peak;
-                }
-            }
-        }
-    }
-
-    fn known_interval_path_mse(
-        &mut self,
-        preamble_start_idx: usize,
-        known_end_idx: usize,
-        cir_len: usize,
-        mmse: MmseSettings,
-        cfo_rad_per_sample: f32,
-    ) -> (f32, f32) {
-        if known_end_idx > self.pipeline.sample_buffer_i.len() || known_end_idx > self.pipeline.sample_buffer_q.len()
-        {
-            return (f32::NAN, f32::NAN);
-        }
-
-        let mse_raw = self
-            .sync_detector
-            .known_sequence_mse_iq(
-                &self.pipeline.sample_buffer_i,
-                &self.pipeline.sample_buffer_q,
-                preamble_start_idx,
-                cfo_rad_per_sample,
-            )
-            .unwrap_or(f32::NAN);
-
-        let Some(eq) = self.equalizer.as_mut() else {
-            return (mse_raw, f32::NAN);
-        };
-
-        let overlap = eq.overlap_len();
-        let analysis_start = preamble_start_idx.saturating_sub(overlap);
-        let input_len = known_end_idx.saturating_sub(analysis_start);
-        if input_len == 0 {
-            return (mse_raw, f32::NAN);
-        }
-
-        let mut eval_input = Vec::with_capacity(input_len);
-        for idx in analysis_start..known_end_idx {
-            eval_input.push(Complex32::new(
-                self.pipeline.sample_buffer_i[idx],
-                self.pipeline.sample_buffer_q[idx],
-            ));
-        }
-
-        let mut eval_output = Vec::with_capacity(input_len);
-        eq.set_cir_with_mmse(&self.cir_buffer[..cir_len], mmse);
-        eq.reset();
-        eq.process(&eval_input, &mut eval_output);
-        eq.flush(&mut eval_output);
-
-        let known_start_in_eval = preamble_start_idx.saturating_sub(analysis_start);
-        let mse_fde = self
-            .sync_detector
-            .known_sequence_mse_complex(&eval_output, known_start_in_eval, cfo_rad_per_sample)
-            .unwrap_or(f32::NAN);
-
-        (mse_raw, mse_fde)
-    }
-
     fn equalize_from_complex_buffer(&mut self, valid_len: usize, raw_consumed: usize) {
         if valid_len == 0 {
             return;
@@ -1162,7 +1005,8 @@ impl Decoder {
         }
 
         // A. 等化器へ投入済みオフセットを先に進める（drainで前方を削った分は後で戻す）
-        self.equalizer_input_offset = self.equalizer_input_offset.saturating_add(raw_consumed);
+        let new_offset = self.equalization.equalizer_input_offset().saturating_add(raw_consumed);
+        self.equalization.set_equalizer_input_offset(new_offset);
 
         // B. 生バッファの物理削除 (投入時に実行)
         // フレーム境界を壊さないよう、ウォームアップ + remaining を上限にする。
@@ -1172,7 +1016,8 @@ impl Decoder {
         if to_drain_raw > 0 {
             self.pipeline.sample_buffer_i.drain(0..to_drain_raw);
             self.pipeline.sample_buffer_q.drain(0..to_drain_raw);
-            self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(to_drain_raw);
+            let new_offset = self.equalization.equalizer_input_offset().saturating_sub(to_drain_raw);
+            self.equalization.set_equalizer_input_offset(new_offset);
 
             let warmup_drain = to_drain_raw.min(self.pending_warmup_input_samples);
             self.pending_warmup_input_samples -= warmup_drain;
@@ -1180,30 +1025,19 @@ impl Decoder {
             self.remaining_samples_in_frame -= payload_drain as isize;
         }
 
-        if self.current_frame_use_fde {
-            if let Some(ref mut eq) = self.equalizer {
-                // C. 等化実行
-                let added = eq.process(input, &mut self.equalized_buffer);
-                if added == 0 {
-                    return;
-                }
+        // C. 等化実行
+        let added = self.equalization.process_equalizer_with_warmup_drain(
+            input,
+            self.pending_warmup_samples,
+        );
+        if added == 0 {
+            return;
+        }
 
-                // D. 等化後バッファのアライメント (ゴミ捨て)
-                // ウォームアップ由来の中間状態を先頭から捨てる。
-                let warmup_to_drain = added.min(self.pending_warmup_samples);
-                if warmup_to_drain > 0 {
-                    self.equalized_buffer.drain(0..warmup_to_drain);
-                    self.pending_warmup_samples -= warmup_to_drain;
-                }
-            }
-        } else {
-            // FDE無効時はパススルーで同じ管理ルールを適用する
-            self.equalized_buffer.extend_from_slice(input);
-            let warmup_to_drain = input.len().min(self.pending_warmup_samples);
-            if warmup_to_drain > 0 {
-                self.equalized_buffer.drain(0..warmup_to_drain);
-                self.pending_warmup_samples -= warmup_to_drain;
-            }
+        // D. ウォームアップ由来の中間状態を先頭から捨てる
+        let warmup_to_drain = added.min(self.pending_warmup_samples);
+        if warmup_to_drain > 0 {
+            self.pending_warmup_samples -= warmup_to_drain;
         }
     }
 
@@ -1229,7 +1063,7 @@ impl Decoder {
             + ((spc as f32 - 1.0) / 2.0);
         let min_idx = min_p.round() as isize;
         let max_idx = max_p.round() as isize;
-        let len = self.equalized_buffer.len() as isize;
+        let len = self.equalization.equalized_buffer().len() as isize;
         if min_idx < 0 || max_idx >= len {
             return None;
         }
@@ -1244,7 +1078,7 @@ impl Decoder {
             if i_idx < 0 || i_idx >= len {
                 return None;
             }
-            let sample = self.equalized_buffer[i_idx as usize];
+            let sample = self.equalization.equalized_buffer()[i_idx as usize];
             let walsh_val = self.demodulator.correlators()[walsh_idx].sequence()[chip_idx] as f32;
             results[0] += sample * walsh_val;
         }
@@ -1271,7 +1105,7 @@ impl Decoder {
             + ((spc as f32 - 1.0) / 2.0);
         let min_idx = min_p.round() as isize;
         let max_idx = max_p.round() as isize;
-        let len = self.equalized_buffer.len() as isize;
+        let len = self.equalization.equalized_buffer().len() as isize;
         if min_idx < 0 || max_idx >= len {
             return None;
         }
@@ -1287,7 +1121,7 @@ impl Decoder {
             if i_idx < 0 || i_idx >= len {
                 return None;
             }
-            let sample = self.equalized_buffer[i_idx as usize];
+            let sample = self.equalization.equalized_buffer()[i_idx as usize];
 
             for (idx, correlator) in self.demodulator.correlators().iter().enumerate() {
                 let walsh_val = correlator.sequence()[chip_idx] as f32;
@@ -1301,6 +1135,7 @@ impl Decoder {
     pub fn reset(&mut self) {
         let params = self.fountain_decoder.params().clone();
         self.pipeline.reset();
+        self.equalization.reset(&self.config);
         self.demodulator.reset();
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
@@ -1313,9 +1148,6 @@ impl Decoder {
         self.pending_warmup_samples = 0;
         self.pending_warmup_input_samples = 0;
         self.remaining_samples_in_frame = 0;
-        self.current_frame_use_fde = self.equalizer.is_some();
-        self.equalized_buffer.clear();
-        self.equalizer_input_offset = 0;
         self.stats.reset();
         self.erasure_llr_buffer.clear();
     }
@@ -2125,7 +1957,7 @@ mod tests {
         let spc = decoder.config.proc_samples_per_chip().max(1);
 
         // 上側境界には十分余裕を持たせる
-        decoder.equalized_buffer = vec![Complex32::new(0.0, 0.0); 256];
+        decoder.equalization.equalized_buffer_mut().extend_from_slice(&vec![Complex32::new(0.0, 0.0); 256]);
 
         // 先頭付近のシンボルで、trackingの下限方向へ寄せる
         let symbol_start = spc;
@@ -2165,7 +1997,8 @@ mod tests {
             timing_rate: 0.0,
             phase_gate_enabled: false,
         });
-        decoder.equalized_buffer = vec![Complex32::new(0.0, 0.0); packet_samples + spc + 8];
+        decoder.equalization.clear_equalized_buffer();
+        decoder.equalization.equalized_buffer_mut().extend_from_slice(&vec![Complex32::new(0.0, 0.0); packet_samples + spc + 8]);
 
         let advanced = decoder.handle_decoding();
         assert!(!advanced, "underflow path should stop current decode step");
@@ -2367,7 +2200,7 @@ mod tests {
         decoder.process_samples(&signal);
 
         assert!(
-            decoder.current_frame_use_fde,
+            decoder.equalization.current_frame_use_fde(),
             "AUTO無効時は常にFDE経路を使うべき"
         );
     }
@@ -2391,7 +2224,7 @@ mod tests {
         decoder.process_samples(&signal);
 
         assert!(
-            !decoder.current_frame_use_fde,
+            !decoder.equalization.current_frame_use_fde(),
             "平坦チャネルかつ強正則化ではAUTOはRAWを選ぶべき"
         );
     }

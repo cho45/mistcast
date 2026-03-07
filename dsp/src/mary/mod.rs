@@ -7,6 +7,7 @@ pub mod decoder;
 pub mod decoder_stats;
 pub mod demodulator;
 pub mod encoder;
+pub mod equalization;
 pub mod modulator;
 pub mod params;
 pub mod signal_pipeline;
