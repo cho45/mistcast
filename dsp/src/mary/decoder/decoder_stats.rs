@@ -230,4 +230,37 @@ mod tests {
         stats.reset();
         assert_eq!(stats.received_packets, 0);
     }
+
+    #[test]
+    fn test_estimate_ebn0_approx_db_returns_nan_for_non_finite_input() {
+        let config = DspConfig::default_48k();
+
+        assert!(estimate_ebn0_approx_db(&config, f32::NAN).is_nan());
+        assert!(estimate_ebn0_approx_db(&config, f32::INFINITY).is_nan());
+        assert!(estimate_ebn0_approx_db(&config, f32::NEG_INFINITY).is_nan());
+    }
+
+    #[test]
+    fn test_estimate_ebn0_approx_db_adds_expected_rate_offset() {
+        let config = DspConfig::default_48k();
+        let est_snr_db_internal = 0.0;
+        let code_rate = (crate::frame::packet::PACKET_BYTES as f32 * 8.0)
+            / interleaver_config::interleaved_bits() as f32;
+        let expected_offset_db =
+            10.0 * (crate::mary::params::PAYLOAD_SPREAD_FACTOR as f32 / (6.0 * code_rate)).log10();
+
+        let ebn0 = estimate_ebn0_approx_db(&config, est_snr_db_internal);
+
+        assert!((ebn0 - expected_offset_db).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_estimate_ebn0_approx_db_preserves_input_delta() {
+        let config = DspConfig::default_48k();
+
+        let low = estimate_ebn0_approx_db(&config, -3.5);
+        let high = estimate_ebn0_approx_db(&config, 8.25);
+
+        assert!(((high - low) - (8.25 - -3.5)).abs() < 1e-6);
+    }
 }
