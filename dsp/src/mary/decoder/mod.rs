@@ -711,6 +711,7 @@ impl Decoder {
         );
 
         if let Some(s) = sync_opt {
+            self.stats.synced_frames += 1;
             let plan = self.build_frame_start_plan(&s);
             self.begin_frame_from_sync(plan);
             true

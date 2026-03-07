@@ -1789,7 +1789,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         completion_sec: None,
         elapsed_sec,
         attempts,
-        synced_frames: final_progress.fde_selected_frames + final_progress.raw_selected_frames,
+        synced_frames: final_progress.synced_frames,
         accepted_frames: final_progress.received_packets,
         crc_error_frames: final_progress.crc_error_packets,
         first_attempt_success: false,

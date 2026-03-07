@@ -9,6 +9,7 @@ use crate::DspConfig;
 /// デコード進捗
 #[derive(Debug, Clone)]
 pub struct DecodeProgress {
+    pub synced_frames: usize,
     pub received_packets: usize,
     pub needed_packets: usize,
     pub rank_packets: usize,
@@ -47,6 +48,9 @@ pub struct DecodeProgress {
 
 /// デコーダ統計管理
 pub struct DecoderStats {
+    // 同期統計
+    pub(crate) synced_frames: usize,
+
     // パケット受信統計
     pub(crate) received_packets: usize,
     pub(crate) stalled_packets: usize,
@@ -86,6 +90,7 @@ pub struct DecoderStats {
 impl DecoderStats {
     pub fn new() -> Self {
         Self {
+            synced_frames: 0,
             received_packets: 0,
             stalled_packets: 0,
             dependent_packets: 0,
@@ -119,6 +124,7 @@ impl DecoderStats {
     }
 
     pub fn reset_fountain_session(&mut self) {
+        // synced_frames is not reset as it's a global counter for the decoder instance
         self.received_packets = 0;
         self.stalled_packets = 0;
         self.dependent_packets = 0;
@@ -163,6 +169,7 @@ impl DecoderStats {
         };
 
         DecodeProgress {
+            synced_frames: self.synced_frames,
             received_packets: self.received_packets,
             needed_packets: needed,
             rank_packets: fountain_decoder.rank(),
