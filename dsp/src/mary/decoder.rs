@@ -7,19 +7,20 @@
 //! 4. Max-Log-MAP LLR計算
 //! 5. Fountainデコーディング
 
-use crate::coding::fec;
 use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
-use crate::coding::interleaver::BlockInterleaver;
-use crate::coding::scrambler::Scrambler;
+use crate::common::walsh::WalshCorrelator;
 use crate::frame::packet::Packet;
 use crate::mary::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::equalization::{EqualizationController, postprocess_cir};
 use crate::mary::interleaver_config;
+use crate::mary::packet_decoder::{
+    self, LlrCallback, PacketDecodeBuffers, PacketDecodeOptions,
+};
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
 use crate::mary::signal_pipeline::SignalPipeline;
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
-use crate::mary::tracking::{self, TrackingState, PHASE_ERR_ABS_THRESH_0P5_RAD, PHASE_ERR_ABS_THRESH_1P0_RAD, TRACKING_PHASE_ERR_GATE_RAD, TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH, TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_PROP_GAIN_OFF, TRACKING_PHASE_STEP_CLAMP};
+use crate::mary::tracking::{self, TrackingState};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 use num_complex::Complex32;
@@ -32,20 +33,11 @@ const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 pub use crate::mary::decoder_stats::DecodeProgress;
 pub use crate::mary::equalization::CirNormalizationMode;
 
-/// LLR観測用コールバック型
-pub type LlrCallback = Box<dyn FnMut(&[f32]) + Send>;
-
 /// デコーダの状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecoderState {
     Searching,
     EqualizedDecoding,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum DecodeAttemptError {
-    Crc,
-    Parse,
 }
 
 /// MaryDQPSKデコーダ
@@ -82,9 +74,7 @@ pub struct Decoder {
     // ゼロアロケーション用バッファプール
     cir_buffer: Vec<Complex32>,
     complex_buffer: Vec<Complex32>,
-    packet_llrs_buffer: Vec<f32>,
-    deinterleave_buffer: Vec<f32>,
-    erasure_llr_buffer: Vec<f32>,
+    packet_decode_buffers: PacketDecodeBuffers,
 }
 
 impl Decoder {
@@ -122,9 +112,7 @@ impl Decoder {
             llr_callback: None,
             cir_buffer: vec![Complex32::new(0.0, 0.0); cir_buffer_size],
             complex_buffer: Vec::with_capacity(16_000),
-            packet_llrs_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
-            deinterleave_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
-            erasure_llr_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
+            packet_decode_buffers: PacketDecodeBuffers::new(),
         }
     }
 
@@ -593,8 +581,8 @@ impl Decoder {
             return false;
         }
 
-        let (_avg_energy, success, processed) = self.process_packet_core();
-        if !processed {
+        let result = self.process_packet_core();
+        if !result.processed {
             // パケット復調中に despread が範囲外になった場合は、
             // 現在フレームを破棄して再同期へ戻す。
             self.last_search_idx = 0;
@@ -619,7 +607,11 @@ impl Decoder {
         self.equalization.equalized_buffer_mut()
             .drain(0..actual_drain_len.min(buffer_len));
 
-        if success {
+        if let Some(packet) = result.packet {
+            self.receive_decoded_packet(packet);
+        }
+
+        if result.success {
             self.consecutive_crc_errors = 0;
         } else {
             self.consecutive_crc_errors += 1;
@@ -644,298 +636,48 @@ impl Decoder {
         true
     }
 
-    fn process_packet_core(&mut self) -> (f32, bool, bool) {
+    fn process_packet_core(&mut self) -> packet_decoder::PacketProcessResult {
         let spc = self.config.proc_samples_per_chip().max(1);
-        let sf_payload = PAYLOAD_SPREAD_FACTOR;
-        let interleaved_bits = interleaver_config::interleaved_bits();
-        let expected_symbols = interleaver_config::mary_symbols();
-
-        let mut st = self
+        let mut tracking_state = self
             .tracking_state
             .expect("Tracking state must be initialized");
-        let timing_limit = spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
-        let timing_rate_limit = spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
-        let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-
-        // ゼロアロケーション: 事前確保バッファ使用
-        self.packet_llrs_buffer.clear();
-        let mut total_packet_energy = 0.0f32;
-
-        for sym_idx in 0..expected_symbols {
-            let symbol_start = spc + sym_idx * sf_payload * spc;
-
-            let on_corrs = if let Some(c) =
-                self.despread_symbol_with_timing(symbol_start, st.timing_offset, 0.0)
-            {
-                c
-            } else {
-                return (0.0, false, false);
-            };
-            let early_corrs = if let Some(c) =
-                self.despread_symbol_with_timing(symbol_start, st.timing_offset, -early_late_delta)
-            {
-                c
-            } else {
-                return (0.0, false, false);
-            };
-            let late_corrs = if let Some(c) =
-                self.despread_symbol_with_timing(symbol_start, st.timing_offset, early_late_delta)
-            {
-                c
-            } else {
-                return (0.0, false, false);
-            };
-
-            let mut max_energy = 0.0f32;
-            let mut second_energy = 0.0f32;
-            let mut best_idx = 0usize;
-            for (idx, corr) in on_corrs.iter().enumerate() {
-                let energy = corr.norm_sqr();
-                if energy > max_energy {
-                    second_energy = max_energy;
-                    max_energy = energy;
-                    best_idx = idx;
-                } else if energy > second_energy {
-                    second_energy = energy;
-                }
-            }
-            total_packet_energy += max_energy;
-
-            let best_corr = on_corrs[best_idx];
-            let on_rot = best_corr * st.phase_ref.conj();
-            let diff = on_rot * self.demodulator.prev_phase().conj();
-
-            let energies: [f32; 16] = on_corrs.map(|c| (c * st.phase_ref.conj()).norm_sqr());
-            let walsh_llr = self.demodulator.walsh_llr(&energies, max_energy);
-            // Decoder経路では prev_phase を単位振幅に正規化して保持しているため、
-            // diff = on_rot * prev* の振幅次元は |on_rot| (≒ sqrt(max_energy)) になる。
-            // よって DQPSK LLR の正規化はエネルギーではなく振幅で行う。
-            let dqpsk_norm = on_rot.norm().max(1e-6);
-            let dqpsk_llr = self.demodulator.dqpsk_llr(diff, dqpsk_norm);
-
-            self.packet_llrs_buffer.extend_from_slice(&walsh_llr);
-            self.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
-
-            let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
-            let energy_sum = energies.iter().sum::<f32>();
-            let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
-            let snr_proxy = max_energy / (noise_floor + 1e-6);
-            let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
-            st.phase_gate_enabled =
-                tracking::next_phase_gate_enabled(st.phase_gate_enabled, dqpsk_conf, walsh_conf, snr_proxy);
-            if st.phase_gate_enabled {
-                self.stats.phase_gate_on_symbols += 1;
-            } else {
-                self.stats.phase_gate_off_symbols += 1;
-            }
-
-            let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
-            let phase_err = tracking::phase_error_from_diff(diff, decided);
-            let phase_err_abs = phase_err.abs();
-            self.stats.phase_err_abs_sum_rad += phase_err_abs as f64;
-            self.stats.phase_err_abs_count += 1;
-            if phase_err_abs >= PHASE_ERR_ABS_THRESH_0P5_RAD {
-                self.stats.phase_err_abs_ge_0p5_symbols += 1;
-            }
-            if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
-                self.stats.phase_err_abs_ge_1p0_symbols += 1;
-            }
-            let innovation_rejected = st.phase_gate_enabled
-                && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
-                && dqpsk_conf < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
-            if innovation_rejected {
-                self.stats.phase_innovation_reject_symbols += 1;
-            }
-            let phase_step = if st.phase_gate_enabled {
-                st.phase_rate = tracking::update_phase_rate(st.phase_rate, phase_err);
-                tracking::phase_step_from_phase_error(phase_err, st.phase_rate)
-            } else {
-                let damped_err =
-                    phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
-                st.phase_rate = (st.phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY
-                    + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
-                    .clamp(
-                        -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
-                        tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
-                    );
-                (st.phase_rate + TRACKING_PHASE_PROP_GAIN_OFF * damped_err)
-                    .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
-            };
-            let (sin_dphi, cos_dphi) = phase_step.sin_cos();
-            st.phase_ref *= Complex32::new(cos_dphi, sin_dphi);
-            st.phase_ref /= st.phase_ref.norm().max(1e-6);
-
-            let timing_err = tracking::timing_error_from_early_late(
-                early_corrs[best_idx].norm(),
-                late_corrs[best_idx].norm(),
-            );
-            st.timing_rate = tracking::update_timing_rate(st.timing_rate, timing_err, timing_rate_limit);
-            st.timing_offset =
-                tracking::update_timing_offset(st.timing_offset, st.timing_rate, timing_err, timing_limit);
-
-            // 差分検波の参照は毎シンボル更新する。
-            // ここを凍結すると次シンボルの diff が2シンボル差分になり誤り伝搬が増える。
-            let on_norm = on_rot.norm().max(1e-6);
-            self.demodulator.set_prev_phase(on_rot / on_norm);
-        }
-
-        self.tracking_state = Some(st);
-
-        let avg_energy = total_packet_energy / expected_symbols as f32;
-        // バッファの所有権を一時的に移して借用衝突を回避する（追加アロケーションなし）
-        let mut llr_buf = std::mem::take(&mut self.packet_llrs_buffer);
-        let packet_llrs_len = llr_buf.len().min(interleaved_bits);
-        let success = if packet_llrs_len >= interleaved_bits {
-            self.decode_llrs(&llr_buf[..packet_llrs_len]) > 0
-        } else {
-            false
+        let mut prev_phase = self.demodulator.prev_phase();
+        let equalized_buffer = self.equalization.equalized_buffer();
+        let correlators = self.demodulator.correlators();
+        let options = PacketDecodeOptions {
+            spc,
+            early_late_delta: (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0),
+            viterbi_list_size: self.viterbi_list_size,
+            llr_erasure_second_pass_enabled: self.llr_erasure_second_pass_enabled,
+            llr_erasure_quantile: self.llr_erasure_quantile,
+            llr_erasure_list_size: self.llr_erasure_list_size,
         };
-        llr_buf.clear();
-        self.packet_llrs_buffer = llr_buf;
 
-        (avg_energy, success, true)
-    }
-
-    fn decode_llrs(&mut self, llrs: &[f32]) -> usize {
-        let p_bits_len = crate::frame::packet::PACKET_BYTES * 8;
-        let fec_bits = interleaver_config::fec_bits();
-        let rows = interleaver_config::INTERLEAVER_ROWS; // 29
-        let cols = interleaver_config::INTERLEAVER_COLS; // 12
-        let interleaved_bits = interleaver_config::interleaved_bits(); // 348
-
-        let packet_chunk_bits = interleaver_config::mary_aligned_bits(); // 348（パディングなし）
-        let mut success_count = 0;
-
-        for packet_llrs in llrs.chunks(packet_chunk_bits) {
-            if packet_llrs.len() < interleaved_bits {
-                break;
-            }
-
-            let valid_llrs = &packet_llrs[..interleaved_bits];
-            match self.decode_single_llr_candidate(
-                valid_llrs,
-                rows,
-                cols,
-                interleaved_bits,
-                fec_bits,
-                p_bits_len,
-            ) {
-                Ok(()) => {
-                    success_count += 1;
-                }
-                Err(DecodeAttemptError::Crc) => {
-                    self.stats.crc_error_packets += 1;
-                }
-                Err(DecodeAttemptError::Parse) => {
-                    self.stats.parse_error_packets += 1;
-                }
-            }
-        }
-        success_count
-    }
-
-    fn decode_single_llr_candidate(
-        &mut self,
-        llrs: &[f32],
-        rows: usize,
-        cols: usize,
-        interleaved_bits: usize,
-        fec_bits: usize,
-        p_bits_len: usize,
-    ) -> Result<(), DecodeAttemptError> {
-        let interleaver = BlockInterleaver::new(rows, cols);
-        // インプレースAPI使用
-        self.deinterleave_buffer.resize(interleaved_bits, 0.0);
-        interleaver
-            .deinterleave_f32_in_place(llrs, &mut self.deinterleave_buffer[..interleaved_bits]);
-
-        let mut scrambler = Scrambler::default();
-        for llr in self.deinterleave_buffer[..interleaved_bits].iter_mut() {
-            if scrambler.next_bit() == 1 {
-                *llr = -*llr;
-            }
-        }
-
-        if let Some(ref mut callback) = self.llr_callback {
-            callback(&self.deinterleave_buffer[..interleaved_bits]);
-        }
-
-        let first_candidates = fec::decode_soft_list(
-            &self.deinterleave_buffer[..fec_bits],
-            self.viterbi_list_size,
+        let result = packet_decoder::process_packet_core(
+            &self.demodulator,
+            &mut prev_phase,
+            &mut tracking_state,
+            &mut self.stats,
+            &mut self.packet_decode_buffers,
+            &mut self.llr_callback,
+            &options,
+            |symbol_start, timing_offset, sample_shift| {
+                despread_symbol_with_timing_from(
+                    equalized_buffer,
+                    correlators,
+                    spc,
+                    symbol_start,
+                    timing_offset,
+                    sample_shift,
+                )
+            },
         );
-        let first_attempt = self.try_decode_soft_list_candidates(first_candidates, p_bits_len);
-        if first_attempt.is_ok() {
-            return Ok(());
-        }
-
-        let mut saw_crc = matches!(first_attempt, Err(DecodeAttemptError::Crc));
-
-        if self.llr_erasure_second_pass_enabled && saw_crc {
-            self.stats.llr_second_pass_attempts += 1;
-            self.erasure_llr_buffer.resize(interleaved_bits, 0.0);
-            self.erasure_llr_buffer[..interleaved_bits]
-                .copy_from_slice(&self.deinterleave_buffer[..interleaved_bits]);
-            apply_llr_erasure_quantile(
-                &mut self.erasure_llr_buffer[..fec_bits],
-                self.llr_erasure_quantile,
-            );
-            let second_candidates = fec::decode_soft_list(
-                &self.erasure_llr_buffer[..fec_bits],
-                self.llr_erasure_list_size,
-            );
-            match self.try_decode_soft_list_candidates(second_candidates, p_bits_len) {
-                Ok(()) => {
-                    self.stats.llr_second_pass_rescued += 1;
-                    return Ok(());
-                }
-                Err(DecodeAttemptError::Crc) => saw_crc = true,
-                Err(DecodeAttemptError::Parse) => {}
-            }
-        }
-
-        if saw_crc {
-            Err(DecodeAttemptError::Crc)
-        } else {
-            Err(DecodeAttemptError::Parse)
-        }
+        self.tracking_state = Some(tracking_state);
+        self.demodulator.set_prev_phase(prev_phase);
+        result
     }
 
-    fn try_decode_soft_list_candidates(
-        &mut self,
-        decoded_candidates: Vec<Vec<u8>>,
-        p_bits_len: usize,
-    ) -> Result<(), DecodeAttemptError> {
-        let mut saw_crc = false;
-        for decoded_bits in decoded_candidates {
-            if decoded_bits.len() < p_bits_len {
-                continue;
-            }
-            match self.decode_decoded_bits(&decoded_bits[..p_bits_len]) {
-                Ok(()) => return Ok(()),
-                Err(DecodeAttemptError::Crc) => saw_crc = true,
-                Err(DecodeAttemptError::Parse) => {}
-            }
-        }
-        if saw_crc {
-            Err(DecodeAttemptError::Crc)
-        } else {
-            Err(DecodeAttemptError::Parse)
-        }
-    }
-
-    fn decode_decoded_bits(&mut self, packet_bits: &[u8]) -> Result<(), DecodeAttemptError> {
-        let decoded_bytes = fec::bits_to_bytes(packet_bits);
-        let packet = match Packet::deserialize(&decoded_bytes) {
-            Ok(packet) => packet,
-            Err(crate::frame::packet::PacketParseError::CrcMismatch { .. }) => {
-                return Err(DecodeAttemptError::Crc);
-            }
-            Err(_) => {
-                return Err(DecodeAttemptError::Parse);
-            }
-        };
-
+    fn receive_decoded_packet(&mut self, packet: Packet) {
         let pkt_k = packet.lt_k as usize;
         if pkt_k != self.fountain_decoder.params().k {
             self.rebuild_fountain_decoder(pkt_k);
@@ -975,7 +717,6 @@ impl Decoder {
         if let Some(data) = self.fountain_decoder.decode() {
             self.recovered_data = Some(data);
         }
-        Ok(())
     }
 
     fn rebuild_fountain_decoder(&mut self, fountain_k: usize) {
@@ -1092,44 +833,14 @@ impl Decoder {
         timing_offset: f32,
         sample_shift: f32,
     ) -> Option<[Complex32; 16]> {
-        let spc = self.config.proc_samples_per_chip().max(1);
-        let sf = PAYLOAD_SPREAD_FACTOR;
-
-        // round() 後の添字がバッファ内に収まるかを事前確認する。
-        // 負値を usize へキャストした際の 0 への飽和を防ぐ。
-        let min_p = symbol_start as f32 + timing_offset + sample_shift + ((spc as f32 - 1.0) / 2.0);
-        let max_p = symbol_start as f32
-            + ((sf - 1) * spc) as f32
-            + timing_offset
-            + sample_shift
-            + ((spc as f32 - 1.0) / 2.0);
-        let min_idx = min_p.round() as isize;
-        let max_idx = max_p.round() as isize;
-        let len = self.equalization.equalized_buffer().len() as isize;
-        if min_idx < 0 || max_idx >= len {
-            return None;
-        }
-
-        let mut results = [Complex32::new(0.0, 0.0); 16];
-        for chip_idx in 0..sf {
-            let p = symbol_start as f32
-                + (chip_idx * spc) as f32
-                + timing_offset
-                + sample_shift
-                + ((spc as f32 - 1.0) / 2.0);
-            let i_idx = p.round() as isize;
-            if i_idx < 0 || i_idx >= len {
-                return None;
-            }
-            let sample = self.equalization.equalized_buffer()[i_idx as usize];
-
-            for (idx, correlator) in self.demodulator.correlators().iter().enumerate() {
-                let walsh_val = correlator.sequence()[chip_idx] as f32;
-                results[idx] += sample * walsh_val;
-            }
-        }
-
-        Some(results)
+        despread_symbol_with_timing_from(
+            self.equalization.equalized_buffer(),
+            self.demodulator.correlators(),
+            self.config.proc_samples_per_chip().max(1),
+            symbol_start,
+            timing_offset,
+            sample_shift,
+        )
     }
 
     pub fn reset(&mut self) {
@@ -1149,47 +860,58 @@ impl Decoder {
         self.pending_warmup_input_samples = 0;
         self.remaining_samples_in_frame = 0;
         self.stats.reset();
-        self.erasure_llr_buffer.clear();
+        self.packet_decode_buffers.clear();
     }
+}
+
+fn despread_symbol_with_timing_from(
+    equalized_buffer: &[Complex32],
+    correlators: &[WalshCorrelator],
+    spc: usize,
+    symbol_start: usize,
+    timing_offset: f32,
+    sample_shift: f32,
+) -> Option<[Complex32; 16]> {
+    let sf = PAYLOAD_SPREAD_FACTOR;
+
+    let min_p = symbol_start as f32 + timing_offset + sample_shift + ((spc as f32 - 1.0) / 2.0);
+    let max_p = symbol_start as f32
+        + ((sf - 1) * spc) as f32
+        + timing_offset
+        + sample_shift
+        + ((spc as f32 - 1.0) / 2.0);
+    let min_idx = min_p.round() as isize;
+    let max_idx = max_p.round() as isize;
+    let len = equalized_buffer.len() as isize;
+    if min_idx < 0 || max_idx >= len {
+        return None;
+    }
+
+    let mut results = [Complex32::new(0.0, 0.0); 16];
+    for chip_idx in 0..sf {
+        let p = symbol_start as f32
+            + (chip_idx * spc) as f32
+            + timing_offset
+            + sample_shift
+            + ((spc as f32 - 1.0) / 2.0);
+        let i_idx = p.round() as isize;
+        if i_idx < 0 || i_idx >= len {
+            return None;
+        }
+        let sample = equalized_buffer[i_idx as usize];
+
+        for (idx, correlator) in correlators.iter().enumerate() {
+            let walsh_val = correlator.sequence()[chip_idx] as f32;
+            results[idx] += sample * walsh_val;
+        }
+    }
+
+    Some(results)
 }
 
 #[inline]
 fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
-    if llrs.is_empty() {
-        return;
-    }
-    let q = quantile.clamp(0.0, 1.0);
-    if q <= 0.0 {
-        return;
-    }
-    let erase_count = ((llrs.len() as f32) * q).round() as usize;
-    if erase_count == 0 {
-        return;
-    }
-
-    let mut abs_vals = llrs.iter().map(|v| v.abs()).collect::<Vec<_>>();
-    abs_vals.sort_by(|a, b| a.total_cmp(b));
-    let threshold_idx = erase_count.saturating_sub(1).min(abs_vals.len() - 1);
-    let threshold = abs_vals[threshold_idx];
-
-    for llr in llrs.iter_mut() {
-        if llr.abs() <= threshold {
-            *llr = 0.0;
-        }
-    }
-}
-
-#[inline]
-fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
-    if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
-        Complex32::new(1.0, 0.0)
-    } else if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] < 0.0 {
-        Complex32::new(0.0, 1.0)
-    } else if dqpsk_llr[0] < 0.0 && dqpsk_llr[1] < 0.0 {
-        Complex32::new(-1.0, 0.0)
-    } else {
-        Complex32::new(0.0, -1.0)
-    }
+    packet_decoder::apply_llr_erasure_quantile(llrs, quantile);
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ pub mod demodulator;
 pub mod encoder;
 pub mod equalization;
 pub mod modulator;
+pub mod packet_decoder;
 pub mod params;
 pub mod signal_pipeline;
 pub mod sync;
