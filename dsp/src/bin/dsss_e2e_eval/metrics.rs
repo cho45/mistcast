@@ -183,7 +183,7 @@ impl Metrics {
     }
 
     pub fn add_frame_event(&mut self, synced: usize, accepted_packets: usize, crc_error_packets: usize) {
-        println!("Frame event: synced={}+{}, accepted_packets={}+{}, crc_error_packets={}+{}", self.total_synced_frames, synced, self.total_accepted_packets, accepted_packets, self.total_crc_error_packets, crc_error_packets);
+        // println!("Frame event: synced={}+{}, accepted_packets={}+{}, crc_error_packets={}+{}", self.total_synced_frames, synced, self.total_accepted_packets, accepted_packets, self.total_crc_error_packets, crc_error_packets);
         self.total_synced_frames += synced;
         self.total_accepted_packets += accepted_packets;
         self.total_crc_error_packets += crc_error_packets;
@@ -196,7 +196,7 @@ impl Metrics {
         bit_errors: usize,
         bits_compared: usize,
     ) {
-        println!("Recovery event: completion_sec={:.3} bit_errors={} bits_compared={}", completion_sec, bit_errors, bits_compared); 
+        // println!("Recovery event: completion_sec={:.3} bit_errors={} bits_compared={}", completion_sec, bit_errors, bits_compared); 
         self.completion_secs.push(completion_sec);
         self.total_successes += 1;
         self.total_bit_errors += bit_errors;

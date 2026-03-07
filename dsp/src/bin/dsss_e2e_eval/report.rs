@@ -1,50 +1,108 @@
 use crate::channel::ChannelImpairment;
 use crate::config::{selected_columns, Cli, OutputFormat};
 use crate::metrics::Metrics;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::json;
+
+mod nan_serde {
+    use super::*;
+    pub fn serialize_f32<S>(v: &f32, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if v.is_nan() {
+            s.serialize_str("NaN")
+        } else {
+            s.serialize_f32(*v)
+        }
+    }
+
+    pub fn serialize_opt_f32<S>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match v {
+            Some(v) if v.is_nan() => s.serialize_str("NaN"),
+            Some(v) => s.serialize_f32(*v),
+            None => s.serialize_none(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ReportRow<'a> {
     scenario: &'a str,
     phy: String,
     mary_fde_mode: String,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     total_sim_sec: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     awgn_snr_db: f32,
 
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     p_complete: f32, // パケット到達率 (PDR)
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     ber: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     raw_ber: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     goodput_effective_bps: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     goodput_success_mean_bps: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     p95_complete_s: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     mean_complete_s: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     avg_proc_ns_sample: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     synced_frame_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     crc_pass_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     llr_second_pass_trigger_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     llr_second_pass_rescue_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     phase_gate_on_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     phase_innovation_reject_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     phase_err_abs_mean_rad: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     phase_err_abs_ge_0p5_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     phase_err_abs_ge_1p0_ratio: f32,
+    #[serde(serialize_with = "nan_serde::serialize_f32")]
     avg_last_est_snr_db: f32,
     multipath: String,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     raw_err_run_mean: Option<f32>,
     raw_err_run_max: Option<usize>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     err_w_cw_mean: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     err_w_cw_p50: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     err_w_cw_p90: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     err_w_cw_p99: Option<f32>,
     err_w_cw_max: Option<usize>,
     err_w_cw_hist: Option<String>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_ber: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_decode_match_ratio: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_err_run_mean: Option<f32>,
     post_err_run_max: Option<usize>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_err_w_cw_mean: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_err_w_cw_p50: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_err_w_cw_p90: Option<f32>,
+    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
     post_err_w_cw_p99: Option<f32>,
     post_err_w_cw_max: Option<usize>,
     post_err_w_cw_hist: Option<String>,
