@@ -3,11 +3,11 @@
 //! 復元済み Packet を FountainDecoder へ渡し、
 //! 受理結果に応じた統計更新と復号完了判定を担当する。
 
+use super::decoder_stats::DecoderStats;
 use crate::coding::fountain::{
     reconstruct_packet_coefficients, FountainDecoder, FountainPacket, ReceiveOutcome,
 };
 use crate::frame::packet::Packet;
-use super::decoder_stats::DecoderStats;
 
 pub(crate) struct PacketReceiveResult {
     pub recovered_data: Option<Vec<u8>>,

@@ -119,7 +119,12 @@ impl DecoderStats {
     }
 
     /// DecodeProgress構造体を生成
-    pub fn to_progress(&self, fountain_decoder: &FountainDecoder, config: &DspConfig, complete: bool) -> DecodeProgress {
+    pub fn to_progress(
+        &self,
+        fountain_decoder: &FountainDecoder,
+        config: &DspConfig,
+        complete: bool,
+    ) -> DecodeProgress {
         let needed = fountain_decoder.params().k;
         let progress = fountain_decoder.progress();
         let ebn0_approx_db = estimate_ebn0_approx_db(config, self.last_est_snr_db);

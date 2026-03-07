@@ -121,10 +121,8 @@ impl SignalPipeline {
             .process_block_in_place(&mut self.rrc_filtered_q);
 
         // 4. 出力バッファに追加
-        self.sample_buffer_i
-            .extend_from_slice(&self.rrc_filtered_i);
-        self.sample_buffer_q
-            .extend_from_slice(&self.rrc_filtered_q);
+        self.sample_buffer_i.extend_from_slice(&self.rrc_filtered_i);
+        self.sample_buffer_q.extend_from_slice(&self.rrc_filtered_q);
 
         self.sample_buffer_i.len()
     }
