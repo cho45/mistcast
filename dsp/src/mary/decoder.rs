@@ -120,6 +120,11 @@ struct FrameStartPlan {
     frame_samples: usize,
 }
 
+struct SyncHandoffResult {
+    tracking_state: TrackingState,
+    prev_phase: Complex32,
+}
+
 /// MaryDQPSKデコーダ
 pub struct Decoder {
     pub config: DspConfig,
@@ -384,14 +389,10 @@ impl Decoder {
         to_process
     }
 
-    fn perform_sync_handoff_if_needed(&mut self, spc: usize, sync_word_bits: usize) -> bool {
-        if self.frame_session().sync_handoff_completed() {
-            return true;
-        }
-
+    fn compute_sync_handoff(&mut self, spc: usize, sync_word_bits: usize) -> Option<SyncHandoffResult> {
         let required_sync_samples = sync_word_bits * SYNC_SPREAD_FACTOR * spc;
         if self.equalization.equalized_buffer().len() < required_sync_samples {
-            return false;
+            return None;
         }
 
         let repeat = self.config.preamble_repeat;
@@ -404,13 +405,13 @@ impl Decoder {
             let mut used = 0usize;
             for i in 0..sync_word_bits {
                 let symbol_start = t_offset + i * SYNC_SPREAD_FACTOR * spc;
-                let corr = if let Some(c) =
-                    self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
-                {
-                    c
-                } else {
-                    break;
-                };
+                let corr =
+                    if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
+                    {
+                        c
+                    } else {
+                        break;
+                    };
                 total_energy += corr[0].norm_sqr();
                 used += 1;
             }
@@ -426,7 +427,7 @@ impl Decoder {
             self.equalization.drain_equalized_buffer(best_timing_offset);
         }
 
-        let mut st = self.frame_session().tracking_state;
+        let mut tracking_state = self.frame_session().tracking_state;
 
         self.complex_buffer.clear();
         if self.complex_buffer.capacity() < sync_word_bits {
@@ -441,8 +442,7 @@ impl Decoder {
         let mut sxy = 0.0f32;
         for i in 0..sync_word_bits {
             let symbol_start = i * SYNC_SPREAD_FACTOR * spc;
-            let on = if let Some(c) =
-                self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
+            let on = if let Some(c) = self.despread_symbol_inner(symbol_start, 0.0, SYNC_SPREAD_FACTOR, 0)
             {
                 c[0]
             } else {
@@ -474,7 +474,7 @@ impl Decoder {
         }
 
         if self.complex_buffer.is_empty() {
-            return false;
+            return None;
         }
 
         let omega_sync = if sum_diff.norm_sqr() > 1e-12 {
@@ -496,27 +496,26 @@ impl Decoder {
         };
 
         let sync_to_payload_scale = PAYLOAD_SPREAD_FACTOR as f32 / SYNC_SPREAD_FACTOR as f32;
-        st.phase_rate = (omega_sync * sync_to_payload_scale).clamp(
+        tracking_state.phase_rate = (omega_sync * sync_to_payload_scale).clamp(
             -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
             tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
         );
 
         let last_sync_idx = (self.complex_buffer.len() - 1) as f32;
         let phi_last = phi0 + omega_sync * last_sync_idx;
-        let phi_payload0 = phi_last + st.phase_rate;
+        let phi_payload0 = phi_last + tracking_state.phase_rate;
         let (s_ref, c_ref) = phi_payload0.sin_cos();
-        st.phase_ref = Complex32::new(c_ref, s_ref);
+        tracking_state.phase_ref = Complex32::new(c_ref, s_ref);
 
-        if let Some(&last_y) = self.complex_buffer.last() {
+        let prev_phase = if let Some(&last_y) = self.complex_buffer.last() {
             let last_sign = self.sync_detector.sync_symbols()[repeat + self.complex_buffer.len() - 1];
             let last_corr = last_y * Complex32::new(last_sign, 0.0);
             let (s_last, c_last) = (-phi_last).sin_cos();
             let prev = last_corr * Complex32::new(c_last, s_last);
-            let norm = prev.norm().max(1e-6);
-            self.demodulator.set_prev_phase(prev / norm);
+            prev / prev.norm().max(1e-6)
         } else {
-            self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
-        }
+            Complex32::new(1.0, 0.0)
+        };
 
         let timing_limit = spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
         let timing_rate_limit = spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
@@ -525,22 +524,68 @@ impl Decoder {
             if denom.abs() > 1e-9 {
                 let slope = (sw * sxy - sx * sy) / denom;
                 let intercept = (sy - slope * sx) / sw;
-                st.timing_offset = (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
-                st.timing_rate = (slope * early_late_delta * sync_to_payload_scale)
+                tracking_state.timing_offset =
+                    (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
+                tracking_state.timing_rate = (slope * early_late_delta * sync_to_payload_scale)
                     .clamp(-timing_rate_limit, timing_rate_limit);
             } else {
                 let intercept = sy / sw;
-                st.timing_offset = (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
-                st.timing_rate = 0.0;
+                tracking_state.timing_offset =
+                    (intercept * early_late_delta).clamp(-timing_limit, timing_limit);
+                tracking_state.timing_rate = 0.0;
             }
         } else {
-            st.timing_offset = 0.0;
-            st.timing_rate = 0.0;
+            tracking_state.timing_offset = 0.0;
+            tracking_state.timing_rate = 0.0;
         }
 
-        self.frame_session_mut().complete_sync_handoff(st);
+        Some(SyncHandoffResult {
+            tracking_state,
+            prev_phase,
+        })
+    }
+
+    fn perform_sync_handoff_if_needed(&mut self, spc: usize, sync_word_bits: usize) -> bool {
+        if self.frame_session().sync_handoff_completed() {
+            return true;
+        }
+
+        let required_sync_samples = sync_word_bits * SYNC_SPREAD_FACTOR * spc;
+        let Some(handoff) = self.compute_sync_handoff(spc, sync_word_bits) else {
+            return false;
+        };
+
+        self.demodulator.set_prev_phase(handoff.prev_phase);
+        self.frame_session_mut()
+            .complete_sync_handoff(handoff.tracking_state);
         self.equalization
             .drain_equalized_buffer(required_sync_samples.saturating_sub(spc));
+        true
+    }
+
+    fn apply_packet_step(&mut self, packet_samples: usize) -> bool {
+        let result = self.process_packet_core();
+        if !result.processed {
+            self.abort_current_frame();
+            return false;
+        }
+
+        let mut tracking_state = self.frame_session().tracking_state;
+        let offset_int = tracking_state.timing_offset.round().clamp(-1.0, 1.0) as i32;
+        let actual_drain_len = (packet_samples as i32 + offset_int).max(0) as usize;
+        tracking_state.timing_offset -= offset_int as f32;
+        self.frame_session_mut().tracking_state = tracking_state;
+
+        let buffer_len = self.equalization.equalized_buffer().len();
+        self.equalization
+            .equalized_buffer_mut()
+            .drain(0..actual_drain_len.min(buffer_len));
+
+        if let Some(packet) = result.packet {
+            self.receive_decoded_packet(packet);
+        }
+
+        self.frame_session_mut().record_packet_result(result.success);
         true
     }
 
@@ -689,26 +734,9 @@ impl Decoder {
             return false;
         }
 
-        let result = self.process_packet_core();
-        if !result.processed {
-            self.abort_current_frame();
+        if !self.apply_packet_step(packet_samples) {
             return false;
         }
-        let mut st = self.frame_session().tracking_state;
-        let offset_int = st.timing_offset.round().clamp(-1.0, 1.0) as i32;
-        let actual_drain_len = (packet_samples as i32 + offset_int).max(0) as usize;
-        st.timing_offset -= offset_int as f32;
-        self.frame_session_mut().tracking_state = st;
-
-        let buffer_len = self.equalization.equalized_buffer().len();
-        self.equalization.equalized_buffer_mut()
-            .drain(0..actual_drain_len.min(buffer_len));
-
-        if let Some(packet) = result.packet {
-            self.receive_decoded_packet(packet);
-        }
-
-        self.frame_session_mut().record_packet_result(result.success);
 
         if self.frame_is_complete(max_packets) {
             self.transition_to_searching_after_frame_end();
