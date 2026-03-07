@@ -2,10 +2,14 @@
 //!
 //! Real→IQ変換、リサンプリング、RRCフィルタリングなどの信号処理フロントエンドを管理する。
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::DspConfig;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use std::arch::wasm32::{f32x4, v128, v128_store};
 
 /// 信号処理パイプライン
 pub struct SignalPipeline {
@@ -86,6 +90,51 @@ impl SignalPipeline {
             self.mix_buffer_q.reserve(samples.len());
         }
 
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            let mut idx = 0usize;
+            let mut interleaved = [0.0f32; 16];
+            while idx + 8 <= samples.len() {
+                let s0 = samples[idx] * 2.0;
+                let s1 = samples[idx + 1] * 2.0;
+                let s2 = samples[idx + 2] * 2.0;
+                let s3 = samples[idx + 3] * 2.0;
+                let s4 = samples[idx + 4] * 2.0;
+                let s5 = samples[idx + 5] * 2.0;
+                let s6 = samples[idx + 6] * 2.0;
+                let s7 = samples[idx + 7] * 2.0;
+
+                let x0 = f32x4(s0, 0.0, s1, 0.0);
+                let x1 = f32x4(s2, 0.0, s3, 0.0);
+                let x2 = f32x4(s4, 0.0, s5, 0.0);
+                let x3 = f32x4(s6, 0.0, s7, 0.0);
+                let (n0, n1, n2, n3) = self.lo_nco.step8_interleaved();
+                let y0 = complex_mul_interleaved2_simd(x0, n0);
+                let y1 = complex_mul_interleaved2_simd(x1, n1);
+                let y2 = complex_mul_interleaved2_simd(x2, n2);
+                let y3 = complex_mul_interleaved2_simd(x3, n3);
+
+                unsafe {
+                    v128_store(interleaved.as_mut_ptr() as *mut v128, y0);
+                    v128_store(interleaved.as_mut_ptr().add(4) as *mut v128, y1);
+                    v128_store(interleaved.as_mut_ptr().add(8) as *mut v128, y2);
+                    v128_store(interleaved.as_mut_ptr().add(12) as *mut v128, y3);
+                }
+                for pair in interleaved.chunks_exact(2) {
+                    self.mix_buffer_i.push(pair[0]);
+                    self.mix_buffer_q.push(pair[1]);
+                }
+                idx += 8;
+            }
+
+            for &s in &samples[idx..] {
+                let lo = self.lo_nco.step();
+                self.mix_buffer_i.push(s * lo.re * 2.0);
+                self.mix_buffer_q.push(s * lo.im * 2.0);
+            }
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
         // 安全なパターン: pushを使用（unsafe set_lenの回避）
         for &s in samples {
             let lo = self.lo_nco.step();
