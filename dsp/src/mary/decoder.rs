@@ -16,6 +16,7 @@ use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::frame::packet::Packet;
+use crate::mary::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
@@ -65,44 +66,8 @@ pub enum CirNormalizationMode {
     Peak,
 }
 
-/// デコード進捗
-#[derive(Debug, Clone)]
-pub struct DecodeProgress {
-    pub received_packets: usize,
-    pub needed_packets: usize,
-    pub rank_packets: usize,
-    pub stalled_packets: usize,
-    pub dependent_packets: usize,
-    pub duplicate_packets: usize,
-    pub crc_error_packets: usize,
-    pub parse_error_packets: usize,
-    pub invalid_neighbor_packets: usize,
-    pub last_packet_seq: i32,
-    pub last_rank_up_seq: i32,
-    pub progress: f32,
-    pub complete: bool,
-    pub fde_selected_frames: usize,
-    pub raw_selected_frames: usize,
-    pub last_path_used: i32,
-    pub last_pred_mse_fde: f32,
-    pub last_pred_mse_raw: f32,
-    pub last_est_snr_db: f32,
-    pub phase_gate_on_symbols: usize,
-    pub phase_gate_off_symbols: usize,
-    pub phase_gate_on_ratio: f32,
-    pub phase_innovation_reject_symbols: usize,
-    pub phase_err_abs_sum_rad: f64,
-    pub phase_err_abs_count: usize,
-    pub phase_err_abs_mean_rad: f32,
-    pub phase_err_abs_ge_0p5_symbols: usize,
-    pub phase_err_abs_ge_1p0_symbols: usize,
-    pub phase_err_abs_ge_0p5_ratio: f32,
-    pub phase_err_abs_ge_1p0_ratio: f32,
-    pub llr_second_pass_attempts: usize,
-    pub llr_second_pass_rescued: usize,
-    pub ebn0_approx_db: f32,
-    pub basis_matrix: Vec<u8>,
-}
+// DecodeProgressは decoder_stats モジュールから再エクスポート
+pub use crate::mary::decoder_stats::DecodeProgress;
 
 /// LLR観測用コールバック型
 pub type LlrCallback = Box<dyn FnMut(&[f32]) + Send>;
@@ -145,19 +110,11 @@ pub struct Decoder {
     tracking_state: Option<TrackingState>,
     packets_processed_in_burst: usize,
     consecutive_crc_errors: usize,
-    last_packet_seq: Option<u32>,
-    last_rank_up_seq: Option<u32>,
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
     fde_auto_path_select: bool,
     current_frame_use_fde: bool,
-    fde_selected_frames: usize,
-    raw_selected_frames: usize,
-    last_path_used: i32,
-    last_pred_mse_fde: f32,
-    last_pred_mse_raw: f32,
-    last_est_snr_db: f32,
     fde_mmse_settings: MmseSettings,
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
@@ -167,23 +124,7 @@ pub struct Decoder {
     llr_erasure_list_size: usize,
 
     // 統計
-    pub received_packets: usize,
-    pub stalled_packets: usize,
-    pub dependent_packets: usize,
-    pub duplicate_packets: usize,
-    pub crc_error_packets: usize,
-    pub parse_error_packets: usize,
-    pub invalid_neighbor_packets: usize,
-    pub stats_total_samples: usize,
-    pub phase_gate_on_symbols: usize,
-    pub phase_gate_off_symbols: usize,
-    pub phase_innovation_reject_symbols: usize,
-    pub phase_err_abs_sum_rad: f64,
-    pub phase_err_abs_count: usize,
-    pub phase_err_abs_ge_0p5_symbols: usize,
-    pub phase_err_abs_ge_1p0_symbols: usize,
-    pub llr_second_pass_attempts: usize,
-    pub llr_second_pass_rescued: usize,
+    stats: DecoderStats,
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
@@ -274,19 +215,11 @@ impl Decoder {
             tracking_state: None,
             packets_processed_in_burst: 0,
             consecutive_crc_errors: 0,
-            last_packet_seq: None,
-            last_rank_up_seq: None,
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: 0,
             fde_auto_path_select: false,
             current_frame_use_fde: true,
-            fde_selected_frames: 0,
-            raw_selected_frames: 0,
-            last_path_used: -1,
-            last_pred_mse_fde: f32::NAN,
-            last_pred_mse_raw: f32::NAN,
-            last_est_snr_db: f32::NAN,
             fde_mmse_settings: MmseSettings::default(),
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
@@ -294,24 +227,8 @@ impl Decoder {
             llr_erasure_second_pass_enabled: false,
             llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
             llr_erasure_list_size: LLR_ERASURE_LIST_SIZE_DEFAULT,
-            received_packets: 0,
-            stalled_packets: 0,
-            dependent_packets: 0,
-            duplicate_packets: 0,
-            crc_error_packets: 0,
-            parse_error_packets: 0,
-            invalid_neighbor_packets: 0,
+            stats: DecoderStats::new(),
             llr_callback: None,
-            stats_total_samples: 0,
-            phase_gate_on_symbols: 0,
-            phase_gate_off_symbols: 0,
-            phase_innovation_reject_symbols: 0,
-            phase_err_abs_sum_rad: 0.0,
-            phase_err_abs_count: 0,
-            phase_err_abs_ge_0p5_symbols: 0,
-            phase_err_abs_ge_1p0_symbols: 0,
-            llr_second_pass_attempts: 0,
-            llr_second_pass_rescued: 0,
             // ゼロアロケーションバッファ初期化
             mix_buffer_i: Vec::with_capacity(4096),
             mix_buffer_q: Vec::with_capacity(4096),
@@ -383,7 +300,7 @@ impl Decoder {
         if self.recovered_data.is_some() {
             return self.progress();
         }
-        self.stats_total_samples += samples.len();
+        self.stats.stats_total_samples += samples.len();
 
         // 1. Real → IQ 変換（事前確保バッファ使用）
         self.mix_real_to_iq_zero_alloc(samples);
@@ -536,15 +453,15 @@ impl Decoder {
                 }
             }
             self.current_frame_use_fde = use_fde_this_frame;
-            self.last_pred_mse_fde = pred_mse_fde;
-            self.last_pred_mse_raw = pred_mse_raw;
-            self.last_est_snr_db = chq.snr_db.unwrap_or(f32::NAN);
+            self.stats.last_pred_mse_fde = pred_mse_fde;
+            self.stats.last_pred_mse_raw = pred_mse_raw;
+            self.stats.last_est_snr_db = chq.snr_db.unwrap_or(f32::NAN);
             if use_fde_this_frame {
-                self.fde_selected_frames += 1;
-                self.last_path_used = 1;
+                self.stats.fde_selected_frames += 1;
+                self.stats.last_path_used = 1;
             } else {
-                self.raw_selected_frames += 1;
-                self.last_path_used = 0;
+                self.stats.raw_selected_frames += 1;
+                self.stats.last_path_used = 0;
             }
 
             let overlap = if use_fde_this_frame {
@@ -981,27 +898,27 @@ impl Decoder {
             st.phase_gate_enabled =
                 next_phase_gate_enabled(st.phase_gate_enabled, dqpsk_conf, walsh_conf, snr_proxy);
             if st.phase_gate_enabled {
-                self.phase_gate_on_symbols += 1;
+                self.stats.phase_gate_on_symbols += 1;
             } else {
-                self.phase_gate_off_symbols += 1;
+                self.stats.phase_gate_off_symbols += 1;
             }
 
             let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
             let phase_err = phase_error_from_diff(diff, decided);
             let phase_err_abs = phase_err.abs();
-            self.phase_err_abs_sum_rad += phase_err_abs as f64;
-            self.phase_err_abs_count += 1;
+            self.stats.phase_err_abs_sum_rad += phase_err_abs as f64;
+            self.stats.phase_err_abs_count += 1;
             if phase_err_abs >= PHASE_ERR_ABS_THRESH_0P5_RAD {
-                self.phase_err_abs_ge_0p5_symbols += 1;
+                self.stats.phase_err_abs_ge_0p5_symbols += 1;
             }
             if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
-                self.phase_err_abs_ge_1p0_symbols += 1;
+                self.stats.phase_err_abs_ge_1p0_symbols += 1;
             }
             let innovation_rejected = st.phase_gate_enabled
                 && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
                 && dqpsk_conf < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
             if innovation_rejected {
-                self.phase_innovation_reject_symbols += 1;
+                self.stats.phase_innovation_reject_symbols += 1;
             }
             let phase_step = if st.phase_gate_enabled {
                 st.phase_rate = update_phase_rate(st.phase_rate, phase_err);
@@ -1081,10 +998,10 @@ impl Decoder {
                     success_count += 1;
                 }
                 Err(DecodeAttemptError::Crc) => {
-                    self.crc_error_packets += 1;
+                    self.stats.crc_error_packets += 1;
                 }
                 Err(DecodeAttemptError::Parse) => {
-                    self.parse_error_packets += 1;
+                    self.stats.parse_error_packets += 1;
                 }
             }
         }
@@ -1130,7 +1047,7 @@ impl Decoder {
         let mut saw_parse = matches!(first_attempt, Err(DecodeAttemptError::Parse));
 
         if self.llr_erasure_second_pass_enabled && saw_crc {
-            self.llr_second_pass_attempts += 1;
+            self.stats.llr_second_pass_attempts += 1;
             self.erasure_llr_buffer.resize(interleaved_bits, 0.0);
             self.erasure_llr_buffer[..interleaved_bits]
                 .copy_from_slice(&self.deinterleave_buffer[..interleaved_bits]);
@@ -1144,7 +1061,7 @@ impl Decoder {
             );
             match self.try_decode_soft_list_candidates(second_candidates, p_bits_len) {
                 Ok(()) => {
-                    self.llr_second_pass_rescued += 1;
+                    self.stats.llr_second_pass_rescued += 1;
                     return Ok(());
                 }
                 Err(DecodeAttemptError::Crc) => saw_crc = true,
@@ -1205,7 +1122,7 @@ impl Decoder {
             self.rebuild_fountain_decoder(pkt_k);
         }
 
-        self.last_packet_seq = Some(packet.lt_seq as u32);
+        self.stats.last_packet_seq = Some(packet.lt_seq as u32);
 
         let fountain_packet = FountainPacket {
             seq: packet.lt_seq as u32,
@@ -1220,19 +1137,19 @@ impl Decoder {
         let outcome = self.fountain_decoder.receive_with_outcome(fountain_packet);
         match outcome {
             ReceiveOutcome::AcceptedRankUp => {
-                self.received_packets += 1;
-                self.last_rank_up_seq = Some(packet.lt_seq as u32);
+                self.stats.received_packets += 1;
+                self.stats.last_rank_up_seq = Some(packet.lt_seq as u32);
             }
             ReceiveOutcome::AcceptedNoRankUp => {
-                self.received_packets += 1;
-                self.stalled_packets += 1;
-                self.dependent_packets += 1;
+                self.stats.received_packets += 1;
+                self.stats.stalled_packets += 1;
+                self.stats.dependent_packets += 1;
             }
             ReceiveOutcome::DuplicateSeq => {
-                self.duplicate_packets += 1;
+                self.stats.duplicate_packets += 1;
             }
             ReceiveOutcome::InvalidPacket => {
-                self.parse_error_packets += 1;
+                self.stats.parse_error_packets += 1;
             }
         }
 
@@ -1246,94 +1163,11 @@ impl Decoder {
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
-        self.last_packet_seq = None;
-        self.last_rank_up_seq = None;
-        self.received_packets = 0;
-        self.stalled_packets = 0;
-        self.dependent_packets = 0;
-        self.duplicate_packets = 0;
-        self.crc_error_packets = 0;
-        self.parse_error_packets = 0;
-        self.invalid_neighbor_packets = 0;
-        self.fde_selected_frames = 0;
-        self.raw_selected_frames = 0;
-        self.last_path_used = -1;
-        self.last_pred_mse_fde = f32::NAN;
-        self.last_pred_mse_raw = f32::NAN;
-        self.last_est_snr_db = f32::NAN;
-        self.phase_gate_on_symbols = 0;
-        self.phase_gate_off_symbols = 0;
-        self.phase_innovation_reject_symbols = 0;
-        self.phase_err_abs_sum_rad = 0.0;
-        self.phase_err_abs_count = 0;
-        self.phase_err_abs_ge_0p5_symbols = 0;
-        self.phase_err_abs_ge_1p0_symbols = 0;
-        self.llr_second_pass_attempts = 0;
-        self.llr_second_pass_rescued = 0;
+        self.stats.reset();
     }
 
     fn progress(&self) -> DecodeProgress {
-        let needed = self.fountain_decoder.params().k;
-        let progress = self.fountain_decoder.progress();
-        let ebn0_approx_db = estimate_ebn0_approx_db(&self.config, self.last_est_snr_db);
-        let phase_gate_total = self.phase_gate_on_symbols + self.phase_gate_off_symbols;
-        let phase_gate_on_ratio = if phase_gate_total == 0 {
-            0.0
-        } else {
-            self.phase_gate_on_symbols as f32 / phase_gate_total as f32
-        };
-        let phase_err_abs_mean_rad = if self.phase_err_abs_count == 0 {
-            0.0
-        } else {
-            (self.phase_err_abs_sum_rad / self.phase_err_abs_count as f64) as f32
-        };
-        let phase_err_abs_ge_0p5_ratio = if self.phase_err_abs_count == 0 {
-            0.0
-        } else {
-            self.phase_err_abs_ge_0p5_symbols as f32 / self.phase_err_abs_count as f32
-        };
-        let phase_err_abs_ge_1p0_ratio = if self.phase_err_abs_count == 0 {
-            0.0
-        } else {
-            self.phase_err_abs_ge_1p0_symbols as f32 / self.phase_err_abs_count as f32
-        };
-
-        DecodeProgress {
-            received_packets: self.received_packets,
-            needed_packets: needed,
-            rank_packets: self.fountain_decoder.rank(),
-            stalled_packets: self.stalled_packets,
-            dependent_packets: self.dependent_packets,
-            duplicate_packets: self.duplicate_packets,
-            crc_error_packets: self.crc_error_packets,
-            parse_error_packets: self.parse_error_packets,
-            invalid_neighbor_packets: self.invalid_neighbor_packets,
-            last_packet_seq: self.last_packet_seq.map(|s| s as i32).unwrap_or(-1),
-            last_rank_up_seq: self.last_rank_up_seq.map(|s| s as i32).unwrap_or(-1),
-            progress,
-            complete: self.recovered_data.is_some(),
-            fde_selected_frames: self.fde_selected_frames,
-            raw_selected_frames: self.raw_selected_frames,
-            last_path_used: self.last_path_used,
-            last_pred_mse_fde: self.last_pred_mse_fde,
-            last_pred_mse_raw: self.last_pred_mse_raw,
-            last_est_snr_db: self.last_est_snr_db,
-            phase_gate_on_symbols: self.phase_gate_on_symbols,
-            phase_gate_off_symbols: self.phase_gate_off_symbols,
-            phase_gate_on_ratio,
-            phase_innovation_reject_symbols: self.phase_innovation_reject_symbols,
-            phase_err_abs_sum_rad: self.phase_err_abs_sum_rad,
-            phase_err_abs_count: self.phase_err_abs_count,
-            phase_err_abs_mean_rad,
-            phase_err_abs_ge_0p5_symbols: self.phase_err_abs_ge_0p5_symbols,
-            phase_err_abs_ge_1p0_symbols: self.phase_err_abs_ge_1p0_symbols,
-            phase_err_abs_ge_0p5_ratio,
-            phase_err_abs_ge_1p0_ratio,
-            llr_second_pass_attempts: self.llr_second_pass_attempts,
-            llr_second_pass_rescued: self.llr_second_pass_rescued,
-            ebn0_approx_db,
-            basis_matrix: self.fountain_decoder.get_basis_matrix(),
-        }
+        self.stats.to_progress(&self.fountain_decoder, &self.config, self.recovered_data.is_some())
     }
 
     fn postprocess_cir(
@@ -1601,39 +1435,15 @@ impl Decoder {
         self.tracking_state = None;
         self.packets_processed_in_burst = 0;
         self.consecutive_crc_errors = 0;
-        self.last_packet_seq = None;
-        self.last_rank_up_seq = None;
         self.pending_warmup_samples = 0;
         self.pending_warmup_input_samples = 0;
         self.remaining_samples_in_frame = 0;
         self.current_frame_use_fde = self.equalizer.is_some();
-        self.fde_selected_frames = 0;
-        self.raw_selected_frames = 0;
-        self.last_path_used = -1;
-        self.last_pred_mse_fde = f32::NAN;
-        self.last_pred_mse_raw = f32::NAN;
-        self.last_est_snr_db = f32::NAN;
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
         self.equalized_buffer.clear();
         self.equalizer_input_offset = 0;
-        self.received_packets = 0;
-        self.stalled_packets = 0;
-        self.dependent_packets = 0;
-        self.duplicate_packets = 0;
-        self.crc_error_packets = 0;
-        self.parse_error_packets = 0;
-        self.invalid_neighbor_packets = 0;
-        self.stats_total_samples = 0;
-        self.phase_gate_on_symbols = 0;
-        self.phase_gate_off_symbols = 0;
-        self.phase_innovation_reject_symbols = 0;
-        self.phase_err_abs_sum_rad = 0.0;
-        self.phase_err_abs_count = 0;
-        self.phase_err_abs_ge_0p5_symbols = 0;
-        self.phase_err_abs_ge_1p0_symbols = 0;
-        self.llr_second_pass_attempts = 0;
-        self.llr_second_pass_rescued = 0;
+        self.stats.reset();
         self.erasure_llr_buffer.clear();
     }
 }
@@ -1763,22 +1573,6 @@ fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
     }
 }
 
-#[inline]
-fn estimate_ebn0_approx_db(config: &DspConfig, est_snr_db_internal: f32) -> f32 {
-    if !est_snr_db_internal.is_finite() {
-        return f32::NAN;
-    }
-
-    let chip_rate = config.chip_rate.max(1e-6);
-    let symbol_rate = chip_rate / PAYLOAD_SPREAD_FACTOR as f32;
-    let coded_bit_rate = symbol_rate * 6.0;
-    let code_rate = (crate::frame::packet::PACKET_BYTES as f32 * 8.0)
-        / interleaver_config::interleaved_bits() as f32;
-    let rb_info = (coded_bit_rate * code_rate).max(1e-6);
-    let beq = chip_rate; // 近似: 等価雑音帯域幅 B ≈ Rc
-    est_snr_db_internal + 10.0 * (beq / rb_info).log10()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1816,9 +1610,9 @@ mod tests {
         let mut decoder = make_decoder();
         let silence = vec![0.0f32; 1000];
         decoder.process_samples(&silence);
-        assert!(decoder.stats_total_samples > 0);
+        assert!(decoder.stats.stats_total_samples > 0);
         decoder.reset();
-        assert_eq!(decoder.stats_total_samples, 0);
+        assert_eq!(decoder.stats.stats_total_samples, 0);
         assert!(decoder.recovered_data.is_none());
         assert!(decoder.sample_buffer_i.is_empty());
         assert!(decoder.sample_buffer_q.is_empty());
@@ -2171,7 +1965,7 @@ mod tests {
         encoder.set_data(&data);
         let frame = encoder.encode_frame().unwrap();
         decoder.process_samples(&frame);
-        assert!(decoder.stats_total_samples >= frame.len());
+        assert!(decoder.stats.stats_total_samples >= frame.len());
     }
 
     #[test]
@@ -2196,7 +1990,7 @@ mod tests {
         encoder.set_data(&data);
         let frame = encoder.encode_frame().unwrap();
         decoder.process_samples(&frame);
-        assert!(decoder.stats_total_samples >= frame.len());
+        assert!(decoder.stats.stats_total_samples >= frame.len());
     }
 
     #[test]

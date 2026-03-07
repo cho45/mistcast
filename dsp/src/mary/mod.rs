@@ -4,6 +4,7 @@
 //! 一切依存関係がない。
 
 pub mod decoder;
+pub mod decoder_stats;
 pub mod demodulator;
 pub mod encoder;
 pub mod modulator;
