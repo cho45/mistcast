@@ -1,0 +1,292 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use dsp::coding::fec;
+use dsp::frame::packet::{Packet, PACKET_BYTES};
+
+pub fn count_bit_errors_bytes(tx: &[u8], rx: Option<&[u8]>) -> usize {
+    let Some(rx) = rx else {
+        return tx.len() * 8;
+    };
+    let mut errs = 0usize;
+    for (idx, &b) in tx.iter().enumerate() {
+        let rb = *rx.get(idx).unwrap_or(&0u8);
+        errs += (b ^ rb).count_ones() as usize;
+    }
+    errs
+}
+
+pub fn bit_errors_and_runs_from_llr(
+    expected: &[u8],
+    llrs: &[f32],
+) -> (usize, usize, usize, usize, usize) {
+    let compare_len = expected.len().min(llrs.len());
+    let mut errors = 0usize;
+    let mut runs = 0usize;
+    let mut run_bits = 0usize;
+    let mut run_max = 0usize;
+    let mut cur_run = 0usize;
+    for j in 0..compare_len {
+        let bit = expected[j];
+        let llr = llrs[j];
+        let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
+        if is_err {
+            errors += 1;
+            cur_run += 1;
+        } else if cur_run > 0 {
+            runs += 1;
+            run_bits += cur_run;
+            run_max = run_max.max(cur_run);
+            cur_run = 0;
+        }
+    }
+    if cur_run > 0 {
+        runs += 1;
+        run_bits += cur_run;
+        run_max = run_max.max(cur_run);
+    }
+    (errors, compare_len, runs, run_bits, run_max)
+}
+
+pub fn bit_errors_and_runs_from_bits(
+    expected: &[u8],
+    observed: &[u8],
+) -> (usize, usize, usize, usize, usize) {
+    let compare_len = expected.len().min(observed.len());
+    let mut errors = 0usize;
+    let mut runs = 0usize;
+    let mut run_bits = 0usize;
+    let mut run_max = 0usize;
+    let mut cur_run = 0usize;
+    for j in 0..compare_len {
+        let is_err = expected[j] != observed[j];
+        if is_err {
+            errors += 1;
+            cur_run += 1;
+        } else if cur_run > 0 {
+            runs += 1;
+            run_bits += cur_run;
+            run_max = run_max.max(cur_run);
+            cur_run = 0;
+        }
+    }
+    if cur_run > 0 {
+        runs += 1;
+        run_bits += cur_run;
+        run_max = run_max.max(cur_run);
+    }
+    (errors, compare_len, runs, run_bits, run_max)
+}
+
+pub struct PreFecStats {
+    pub bit_errors: usize,
+    pub bits_compared: usize,
+    pub error_runs: usize,
+    pub error_run_bits: usize,
+    pub error_run_max: usize,
+    pub codeword_count: usize,
+    pub codeword_error_sum: usize,
+    pub codeword_error_max: usize,
+    pub codeword_error_weights: Vec<usize>,
+}
+
+pub struct PostFecStats {
+    pub bit_errors: usize,
+    pub bits_compared: usize,
+    pub error_runs: usize,
+    pub error_run_bits: usize,
+    pub error_run_max: usize,
+    pub codeword_count: usize,
+    pub codeword_error_sum: usize,
+    pub codeword_error_max: usize,
+    pub codeword_error_weights: Vec<usize>,
+}
+
+pub type LlrCallback = Box<dyn Fn(&[f32]) + Send + Sync>;
+
+/// Mary BER集計用
+pub struct BerAccumulator {
+    expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+    expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+    raw_bit_errors: Arc<Mutex<usize>>,
+    raw_bits_compared: Arc<Mutex<usize>>,
+    raw_error_runs: Arc<Mutex<usize>>,
+    raw_error_run_bits: Arc<Mutex<usize>>,
+    raw_error_run_max: Arc<Mutex<usize>>,
+    codeword_error_weights: Arc<Mutex<Vec<usize>>>,
+    post_bit_errors: Arc<Mutex<usize>>,
+    post_bits_compared: Arc<Mutex<usize>>,
+    post_error_runs: Arc<Mutex<usize>>,
+    post_error_run_bits: Arc<Mutex<usize>>,
+    post_error_run_max: Arc<Mutex<usize>>,
+    post_codeword_error_weights: Arc<Mutex<Vec<usize>>>,
+    post_decode_attempts: Arc<Mutex<usize>>,
+    post_decode_matched: Arc<Mutex<usize>>,
+}
+
+impl Default for BerAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BerAccumulator {
+    pub fn new() -> Self {
+        Self {
+            expected_fec_bits: Arc::new(Mutex::new(HashMap::new())),
+            expected_packet_bits: Arc::new(Mutex::new(HashMap::new())),
+            raw_bit_errors: Arc::new(Mutex::new(0)),
+            raw_bits_compared: Arc::new(Mutex::new(0)),
+            raw_error_runs: Arc::new(Mutex::new(0)),
+            raw_error_run_bits: Arc::new(Mutex::new(0)),
+            raw_error_run_max: Arc::new(Mutex::new(0)),
+            codeword_error_weights: Arc::new(Mutex::new(Vec::new())),
+            post_bit_errors: Arc::new(Mutex::new(0)),
+            post_bits_compared: Arc::new(Mutex::new(0)),
+            post_error_runs: Arc::new(Mutex::new(0)),
+            post_error_run_bits: Arc::new(Mutex::new(0)),
+            post_error_run_max: Arc::new(Mutex::new(0)),
+            post_codeword_error_weights: Arc::new(Mutex::new(Vec::new())),
+            post_decode_attempts: Arc::new(Mutex::new(0)),
+            post_decode_matched: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    /// パケットを登録（FEC符号化後のビット列を記録）
+    pub fn register_packet(
+        &self,
+        seq: u16,
+        packet: &dsp::coding::fountain::FountainPacket,
+        k: usize,
+    ) {
+        let pkt = Packet::new(seq, k, &packet.data);
+        let bits = fec::bytes_to_bits(&pkt.serialize());
+        let fec_encoded = fec::encode(&bits);
+        self.expected_packet_bits.lock().unwrap().insert(seq, bits);
+        self.expected_fec_bits
+            .lock()
+            .unwrap()
+            .insert(seq, fec_encoded);
+    }
+
+    /// LLRコールバックを生成
+    pub fn llr_callback(&self) -> LlrCallback {
+        let efb = Arc::clone(&self.expected_fec_bits);
+        let epb = Arc::clone(&self.expected_packet_bits);
+        let rbe = Arc::clone(&self.raw_bit_errors);
+        let rbc = Arc::clone(&self.raw_bits_compared);
+        let rer = Arc::clone(&self.raw_error_runs);
+        let rrb = Arc::clone(&self.raw_error_run_bits);
+        let rrm = Arc::clone(&self.raw_error_run_max);
+        let cew = Arc::clone(&self.codeword_error_weights);
+        let pbe = Arc::clone(&self.post_bit_errors);
+        let pbc = Arc::clone(&self.post_bits_compared);
+        let per = Arc::clone(&self.post_error_runs);
+        let prb = Arc::clone(&self.post_error_run_bits);
+        let prm = Arc::clone(&self.post_error_run_max);
+        let pcew = Arc::clone(&self.post_codeword_error_weights);
+        let pda = Arc::clone(&self.post_decode_attempts);
+        let pdm = Arc::clone(&self.post_decode_matched);
+
+        Box::new(move |llrs: &[f32]| {
+            let decoded_bits = fec::decode_soft(llrs);
+            let p_bits_len = PACKET_BYTES * 8;
+            if decoded_bits.len() < p_bits_len {
+                return;
+            }
+            let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
+            if decoded_bytes.len() < 3 {
+                return;
+            }
+            *pda.lock().unwrap() += 1;
+            let seq = u16::from_be_bytes([decoded_bytes[1], decoded_bytes[2]]);
+            let expected_raw = match efb.lock().unwrap().get(&seq) {
+                Some(bits) => bits.clone(),
+                None => return,
+            };
+            let (errors, compare_len, runs, run_bits, run_max) =
+                bit_errors_and_runs_from_llr(&expected_raw, llrs);
+            *rbe.lock().unwrap() += errors;
+            *rbc.lock().unwrap() += compare_len;
+            *rer.lock().unwrap() += runs;
+            *rrb.lock().unwrap() += run_bits;
+            let mut max_guard = rrm.lock().unwrap();
+            *max_guard = (*max_guard).max(run_max);
+            cew.lock().unwrap().push(errors);
+
+            let expected_post = match epb.lock().unwrap().get(&seq) {
+                Some(bits) => bits.clone(),
+                None => return,
+            };
+            *pdm.lock().unwrap() += 1;
+            let (post_errors, post_compare_len, post_runs, post_run_bits, post_run_max) =
+                bit_errors_and_runs_from_bits(&expected_post, &decoded_bits[..p_bits_len]);
+            *pbe.lock().unwrap() += post_errors;
+            *pbc.lock().unwrap() += post_compare_len;
+            *per.lock().unwrap() += post_runs;
+            *prb.lock().unwrap() += post_run_bits;
+            let mut post_max_guard = prm.lock().unwrap();
+            *post_max_guard = (*post_max_guard).max(post_run_max);
+            pcew.lock().unwrap().push(post_errors);
+        })
+    }
+
+    /// Pre-FEC解析結果を取得
+    pub fn extract_pre_fec(&self) -> PreFecStats {
+        let raw_bit_errors = *self.raw_bit_errors.lock().unwrap();
+        let raw_bits_compared = *self.raw_bits_compared.lock().unwrap();
+        let raw_error_runs = *self.raw_error_runs.lock().unwrap();
+        let raw_error_run_bits = *self.raw_error_run_bits.lock().unwrap();
+        let raw_error_run_max = *self.raw_error_run_max.lock().unwrap();
+        let codeword_error_weights = self.codeword_error_weights.lock().unwrap().clone();
+        let codeword_count = codeword_error_weights.len();
+        let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
+        let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
+        PreFecStats {
+            bit_errors: raw_bit_errors,
+            bits_compared: raw_bits_compared,
+            error_runs: raw_error_runs,
+            error_run_bits: raw_error_run_bits,
+            error_run_max: raw_error_run_max,
+            codeword_count,
+            codeword_error_sum,
+            codeword_error_max,
+            codeword_error_weights,
+        }
+    }
+
+    /// Post-FEC解析結果を取得
+    pub fn extract_post_fec(&self) -> PostFecStats {
+        let post_bit_errors = *self.post_bit_errors.lock().unwrap();
+        let post_bits_compared = *self.post_bits_compared.lock().unwrap();
+        let post_error_runs = *self.post_error_runs.lock().unwrap();
+        let post_error_run_bits = *self.post_error_run_bits.lock().unwrap();
+        let post_error_run_max = *self.post_error_run_max.lock().unwrap();
+        let post_codeword_error_weights =
+            self.post_codeword_error_weights.lock().unwrap().clone();
+        let post_codeword_count = post_codeword_error_weights.len();
+        let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
+        let post_codeword_error_max = post_codeword_error_weights
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        PostFecStats {
+            bit_errors: post_bit_errors,
+            bits_compared: post_bits_compared,
+            error_runs: post_error_runs,
+            error_run_bits: post_error_run_bits,
+            error_run_max: post_error_run_max,
+            codeword_count: post_codeword_count,
+            codeword_error_sum: post_codeword_error_sum,
+            codeword_error_max: post_codeword_error_max,
+            codeword_error_weights: post_codeword_error_weights,
+        }
+    }
+
+    /// デコード統計を取得
+    pub fn extract_decode_stats(&self) -> (usize, usize) {
+        let post_decode_attempts = *self.post_decode_attempts.lock().unwrap();
+        let post_decode_matched = *self.post_decode_matched.lock().unwrap();
+        (post_decode_attempts, post_decode_matched)
+    }
+}
