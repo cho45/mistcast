@@ -12,14 +12,12 @@ use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
 use crate::common::equalization::{FrequencyDomainEqualizer, MmseSettings};
-use crate::common::nco::Nco;
-use crate::common::resample::Resampler;
-use crate::common::rrc_filter::RrcFilter;
 use crate::frame::packet::Packet;
 use crate::mary::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
+use crate::mary::signal_pipeline::SignalPipeline;
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
 use crate::mary::tracking::{self, TrackingState, PHASE_ERR_ABS_THRESH_0P5_RAD, PHASE_ERR_ABS_THRESH_1P0_RAD, TRACKING_PHASE_ERR_GATE_RAD, TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH, TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_PROP_GAIN_OFF, TRACKING_PHASE_STEP_CLAMP};
 use crate::params::PAYLOAD_SIZE;
@@ -59,19 +57,13 @@ enum DecodeAttemptError {
 /// MaryDQPSKデコーダ
 pub struct Decoder {
     pub config: DspConfig,
-    resampler_i: Resampler,
-    resampler_q: Resampler,
-    rrc_filter_i: RrcFilter,
-    rrc_filter_q: RrcFilter,
-    sample_buffer_i: Vec<f32>,
-    sample_buffer_q: Vec<f32>,
+    pipeline: SignalPipeline,
     equalizer: Option<FrequencyDomainEqualizer>,
     equalized_buffer: Vec<Complex32>,
     equalizer_input_offset: usize,
     demodulator: Demodulator,
     fountain_decoder: FountainDecoder,
     pub recovered_data: Option<Vec<u8>>,
-    lo_nco: Nco,
     sync_detector: MarySyncDetector,
 
     // 同期・追従状態
@@ -101,12 +93,6 @@ pub struct Decoder {
     pub llr_callback: Option<LlrCallback>,
 
     // ゼロアロケーション用バッファプール
-    pub(crate) mix_buffer_i: Vec<f32>,
-    pub(crate) mix_buffer_q: Vec<f32>,
-    resample_buffer_i: Vec<f32>,
-    resample_buffer_q: Vec<f32>,
-    rrc_filtered_i: Vec<f32>,
-    rrc_filtered_q: Vec<f32>,
     cir_buffer: Vec<Complex32>,
     complex_buffer: Vec<Complex32>,
     packet_llrs_buffer: Vec<f32>,
@@ -132,12 +118,6 @@ impl Decoder {
 
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
-        let proc_sample_rate = dsp_config.proc_sample_rate();
-        let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
-
-        let rrc_bw = dsp_config.chip_rate * (1.0 + dsp_config.rrc_alpha) * 0.5;
-        let cutoff = Some(rrc_bw);
-
         let tc = MarySyncDetector::THRESHOLD_COARSE_DEFAULT;
         let tf = MarySyncDetector::THRESHOLD_FINE_DEFAULT;
 
@@ -146,28 +126,12 @@ impl Decoder {
         let cir_buffer_size = dsp_config.preamble_sf * spc;
 
         Decoder {
-            resampler_i: Resampler::new_with_cutoff(
-                dsp_config.sample_rate as u32,
-                proc_sample_rate as u32,
-                cutoff,
-                Some(dsp_config.rx_resampler_taps),
-            ),
-            resampler_q: Resampler::new_with_cutoff(
-                dsp_config.sample_rate as u32,
-                proc_sample_rate as u32,
-                cutoff,
-                Some(dsp_config.rx_resampler_taps),
-            ),
-            rrc_filter_i: RrcFilter::from_config(&dsp_config),
-            rrc_filter_q: RrcFilter::from_config(&dsp_config),
-            sample_buffer_i: Vec::new(),
-            sample_buffer_q: Vec::new(),
+            pipeline: SignalPipeline::new(&dsp_config),
             demodulator: Demodulator::new(),
             fountain_decoder: FountainDecoder::new(FountainParams::new(fountain_k, PAYLOAD_SIZE)),
             recovered_data: None,
             sync_detector: MarySyncDetector::new(dsp_config.clone(), tc, tf),
             config: dsp_config.clone(),
-            lo_nco,
             equalizer: Some(Self::build_default_equalizer(&dsp_config)),
             equalized_buffer: Vec::new(),
             equalizer_input_offset: 0,
@@ -191,13 +155,6 @@ impl Decoder {
             llr_erasure_list_size: LLR_ERASURE_LIST_SIZE_DEFAULT,
             stats: DecoderStats::new(),
             llr_callback: None,
-            // ゼロアロケーションバッファ初期化
-            mix_buffer_i: Vec::with_capacity(4096),
-            mix_buffer_q: Vec::with_capacity(4096),
-            resample_buffer_i: Vec::with_capacity(6144),
-            resample_buffer_q: Vec::with_capacity(6144),
-            rrc_filtered_i: Vec::with_capacity(6144),
-            rrc_filtered_q: Vec::with_capacity(6144),
             cir_buffer: vec![Complex32::new(0.0, 0.0); cir_buffer_size],
             complex_buffer: Vec::with_capacity(16_000),
             packet_llrs_buffer: Vec::with_capacity(interleaver_config::interleaved_bits()),
@@ -264,53 +221,10 @@ impl Decoder {
         }
         self.stats.stats_total_samples += samples.len();
 
-        // 1. Real → IQ 変換（事前確保バッファ使用）
-        self.mix_real_to_iq_zero_alloc(samples);
-
-        // 2. リサンプリング（事前確保バッファ使用）
-        self.resample_buffer_i.clear();
-        self.resample_buffer_q.clear();
-        self.resampler_i
-            .process(&self.mix_buffer_i, &mut self.resample_buffer_i);
-        self.resampler_q
-            .process(&self.mix_buffer_q, &mut self.resample_buffer_q);
-
-        // 3. RRCフィルタ（インプレースAPI使用）
-        self.rrc_filtered_i.clear();
-        self.rrc_filtered_q.clear();
-        self.rrc_filtered_i
-            .resize(self.resample_buffer_i.len(), 0.0);
-        self.rrc_filtered_q
-            .resize(self.resample_buffer_q.len(), 0.0);
-        self.rrc_filtered_i.copy_from_slice(&self.resample_buffer_i);
-        self.rrc_filtered_q.copy_from_slice(&self.resample_buffer_q);
-        self.rrc_filter_i
-            .process_block_in_place(&mut self.rrc_filtered_i);
-        self.rrc_filter_q
-            .process_block_in_place(&mut self.rrc_filtered_q);
-
-        self.sample_buffer_i.extend_from_slice(&self.rrc_filtered_i);
-        self.sample_buffer_q.extend_from_slice(&self.rrc_filtered_q);
+        // 信号処理パイプラインで処理
+        self.pipeline.process_samples(samples);
 
         self.detect_and_process_frames()
-    }
-
-    fn mix_real_to_iq_zero_alloc(&mut self, samples: &[f32]) {
-        self.mix_buffer_i.clear();
-        self.mix_buffer_q.clear();
-
-        // キャパシティ確認（必要なら拡張）
-        if self.mix_buffer_i.capacity() < samples.len() {
-            self.mix_buffer_i.reserve(samples.len());
-            self.mix_buffer_q.reserve(samples.len());
-        }
-
-        // 安全なパターン: pushを使用（unsafe set_lenの回避）
-        for &s in samples {
-            let lo = self.lo_nco.step();
-            self.mix_buffer_i.push(s * lo.re * 2.0);
-            self.mix_buffer_q.push(s * lo.im * 2.0);
-        }
     }
 
     fn detect_and_process_frames(&mut self) -> DecodeProgress {
@@ -343,13 +257,13 @@ impl Decoder {
         let sync_word_bits = self.config.sync_word_bits;
 
         let required_len = (sf_preamble * repeat + sf_sync * sync_word_bits) * spc;
-        if self.sample_buffer_i.len() < self.last_search_idx + required_len {
+        if self.pipeline.sample_buffer_i.len() < self.last_search_idx + required_len {
             return false;
         }
 
         let (sync_opt, next_search_idx) = self.sync_detector.detect(
-            &self.sample_buffer_i,
-            &self.sample_buffer_q,
+            &self.pipeline.sample_buffer_i,
+            &self.pipeline.sample_buffer_q,
             self.last_search_idx,
         );
 
@@ -378,8 +292,8 @@ impl Decoder {
             {
                 let cir_slice = &mut self.cir_buffer[..cir_len];
                 self.sync_detector.estimate_channel_quality(
-                    &self.sample_buffer_i,
-                    &self.sample_buffer_q,
+                    &self.pipeline.sample_buffer_i,
+                    &self.pipeline.sample_buffer_q,
                     preamble_start_idx,
                     cir_slice,
                     &mut chq,
@@ -436,8 +350,8 @@ impl Decoder {
             // プリアンブル以前の不要なデータを即座に物理削除
             let initial_drain_len = sync_start.saturating_sub(overlap);
             if initial_drain_len > 0 {
-                self.sample_buffer_i.drain(0..initial_drain_len);
-                self.sample_buffer_q.drain(0..initial_drain_len);
+                self.pipeline.sample_buffer_i.drain(0..initial_drain_len);
+                self.pipeline.sample_buffer_q.drain(0..initial_drain_len);
             }
 
             // --- 新しいフレームの準備 ---
@@ -458,7 +372,7 @@ impl Decoder {
             // 履歴を二重に積んで時間軸を押し出してしまう。実サンプルのみ投入する。
             let warmup_real_len = sync_start
                 .saturating_sub(initial_drain_len)
-                .min(self.sample_buffer_i.len());
+                .min(self.pipeline.sample_buffer_i.len());
 
             // ゼロアロケーション: 事前確保バッファ使用
             self.complex_buffer.clear();
@@ -470,7 +384,7 @@ impl Decoder {
             }
             for i in 0..warmup_real_len {
                 self.complex_buffer[i] =
-                    Complex32::new(self.sample_buffer_i[i], self.sample_buffer_q[i]);
+                    Complex32::new(self.pipeline.sample_buffer_i[i], self.pipeline.sample_buffer_q[i]);
             }
             // 3. カウンタ初期化
             self.pending_warmup_samples = warmup_real_len;
@@ -502,10 +416,10 @@ impl Decoder {
 
             let max_buffer_len = 100_000;
             let keep_len = 50_000;
-            if self.sample_buffer_i.len() > max_buffer_len {
-                let drain_len = self.sample_buffer_i.len() - keep_len;
-                self.sample_buffer_i.drain(0..drain_len);
-                self.sample_buffer_q.drain(0..drain_len);
+            if self.pipeline.sample_buffer_i.len() > max_buffer_len {
+                let drain_len = self.pipeline.sample_buffer_i.len() - keep_len;
+                self.pipeline.sample_buffer_i.drain(0..drain_len);
+                self.pipeline.sample_buffer_q.drain(0..drain_len);
                 self.last_search_idx = self.last_search_idx.saturating_sub(drain_len);
                 self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(drain_len);
             }
@@ -522,6 +436,7 @@ impl Decoder {
         // 1. 等化器への投入 (統合口 equalize を使用)
         // 未投入領域のみを投入する。物理削除と remaining_samples_in_frame の減算は equalize 内で行う。
         let to_process = self
+            .pipeline
             .sample_buffer_i
             .len()
             .saturating_sub(self.equalizer_input_offset);
@@ -538,7 +453,7 @@ impl Decoder {
                 (self.equalizer_input_offset..self.equalizer_input_offset + to_process).enumerate()
             {
                 self.complex_buffer[idx] =
-                    Complex32::new(self.sample_buffer_i[i], self.sample_buffer_q[i]);
+                    Complex32::new(self.pipeline.sample_buffer_i[i], self.pipeline.sample_buffer_q[i]);
             }
             self.equalize_from_complex_buffer(to_process, to_process);
         }
@@ -1182,7 +1097,7 @@ impl Decoder {
         mmse: MmseSettings,
         cfo_rad_per_sample: f32,
     ) -> (f32, f32) {
-        if known_end_idx > self.sample_buffer_i.len() || known_end_idx > self.sample_buffer_q.len()
+        if known_end_idx > self.pipeline.sample_buffer_i.len() || known_end_idx > self.pipeline.sample_buffer_q.len()
         {
             return (f32::NAN, f32::NAN);
         }
@@ -1190,8 +1105,8 @@ impl Decoder {
         let mse_raw = self
             .sync_detector
             .known_sequence_mse_iq(
-                &self.sample_buffer_i,
-                &self.sample_buffer_q,
+                &self.pipeline.sample_buffer_i,
+                &self.pipeline.sample_buffer_q,
                 preamble_start_idx,
                 cfo_rad_per_sample,
             )
@@ -1211,8 +1126,8 @@ impl Decoder {
         let mut eval_input = Vec::with_capacity(input_len);
         for idx in analysis_start..known_end_idx {
             eval_input.push(Complex32::new(
-                self.sample_buffer_i[idx],
-                self.sample_buffer_q[idx],
+                self.pipeline.sample_buffer_i[idx],
+                self.pipeline.sample_buffer_q[idx],
             ));
         }
 
@@ -1253,10 +1168,10 @@ impl Decoder {
         // フレーム境界を壊さないよう、ウォームアップ + remaining を上限にする。
         let limit =
             self.pending_warmup_input_samples + self.remaining_samples_in_frame.max(0) as usize;
-        let to_drain_raw = raw_consumed.min(limit).min(self.sample_buffer_i.len());
+        let to_drain_raw = raw_consumed.min(limit).min(self.pipeline.sample_buffer_i.len());
         if to_drain_raw > 0 {
-            self.sample_buffer_i.drain(0..to_drain_raw);
-            self.sample_buffer_q.drain(0..to_drain_raw);
+            self.pipeline.sample_buffer_i.drain(0..to_drain_raw);
+            self.pipeline.sample_buffer_q.drain(0..to_drain_raw);
             self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(to_drain_raw);
 
             let warmup_drain = to_drain_raw.min(self.pending_warmup_input_samples);
@@ -1385,12 +1300,10 @@ impl Decoder {
 
     pub fn reset(&mut self) {
         let params = self.fountain_decoder.params().clone();
-        self.rrc_filter_i.reset();
-        self.rrc_filter_q.reset();
+        self.pipeline.reset();
         self.demodulator.reset();
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
-        self.lo_nco.reset();
         self.state = DecoderState::Searching;
         self.last_search_idx = 0;
         self.current_sync = None;
@@ -1401,8 +1314,6 @@ impl Decoder {
         self.pending_warmup_input_samples = 0;
         self.remaining_samples_in_frame = 0;
         self.current_frame_use_fde = self.equalizer.is_some();
-        self.sample_buffer_i.clear();
-        self.sample_buffer_q.clear();
         self.equalized_buffer.clear();
         self.equalizer_input_offset = 0;
         self.stats.reset();
@@ -1490,8 +1401,8 @@ mod tests {
         decoder.reset();
         assert_eq!(decoder.stats.stats_total_samples, 0);
         assert!(decoder.recovered_data.is_none());
-        assert!(decoder.sample_buffer_i.is_empty());
-        assert!(decoder.sample_buffer_q.is_empty());
+        assert!(decoder.pipeline.sample_buffer_i.is_empty());
+        assert!(decoder.pipeline.sample_buffer_q.is_empty());
     }
 
     #[test]
@@ -1681,23 +1592,31 @@ mod tests {
         let mut decoder = Decoder::new(160, 10, config.clone());
 
         // 内部バッファを直接操作してテスト用にデータを準備
-        decoder.mix_real_to_iq_zero_alloc(&frame_48k);
+        decoder.pipeline.mix_real_to_iq_zero_alloc(&frame_48k);
 
         // リサンプリング
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
         decoder
+            .pipeline
             .resampler_i
-            .process(&decoder.mix_buffer_i, &mut i_resampled);
+            .process(&decoder.pipeline.mix_buffer_i, &mut i_resampled);
         decoder
+            .pipeline
             .resampler_q
-            .process(&decoder.mix_buffer_q, &mut q_resampled);
+            .process(&decoder.pipeline.mix_buffer_q, &mut q_resampled);
 
         // RRCフィルタ（インプレースAPI使用）
         let mut i_filtered = i_resampled.clone();
         let mut q_filtered = q_resampled.clone();
-        decoder.rrc_filter_i.process_block_in_place(&mut i_filtered);
-        decoder.rrc_filter_q.process_block_in_place(&mut q_filtered);
+        decoder
+            .pipeline
+            .rrc_filter_i
+            .process_block_in_place(&mut i_filtered);
+        decoder
+            .pipeline
+            .rrc_filter_q
+            .process_block_in_place(&mut q_filtered);
 
         // 48k -> 24k (proc_rate) へのリサンプリング後の長さを算出
         let preamble_len_24k = preamble_len_48k / 2;
@@ -1708,7 +1627,8 @@ mod tests {
         if let Some(s) = sync_opt {
             // peak_sample_idx は同期語 0 番目の最初のチップの中央
             // 期待値 = (プリアンブル終了点) + (チップ 0 の半分) + (受信側遅延) + (送信側遅延)
-            let rx_delay = decoder.resampler_i.delay() + decoder.rrc_filter_i.delay();
+            let rx_delay = decoder.pipeline.resampler_i.delay()
+                + decoder.pipeline.rrc_filter_i.delay();
             let detector_delay = decoder.sync_detector.filter_delay();
             // 同期位置は「送信側RRC群遅延」ではなく、TX resampler の遅延寄与で整合する。
             let tx_rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
