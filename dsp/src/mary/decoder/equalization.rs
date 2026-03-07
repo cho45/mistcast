@@ -71,13 +71,13 @@ pub struct EqualizationController {
     cir_tap_threshold_alpha: f32,
 }
 
-pub struct KnownIntervalPathMseInput<'a> {
+pub struct SyncWordPathMseInput<'a> {
     pub sync_detector: &'a MarySyncDetector,
     pub cir: &'a [Complex32],
     pub sample_buffer_i: &'a [f32],
     pub sample_buffer_q: &'a [f32],
-    pub preamble_start_idx: usize,
-    pub known_end_idx: usize,
+    pub sync_start_idx: usize,
+    pub sync_end_idx: usize,
     pub cir_len: usize,
     pub mmse: MmseSettings,
     pub cfo_rad_per_sample: f32,
@@ -172,31 +172,38 @@ impl EqualizationController {
         self.cir_tap_threshold_alpha = tap_threshold_alpha.max(0.0);
     }
 
-    /// live equalizer を一時的に再構成して、既知区間パスMSEを評価する
-    pub fn evaluate_known_interval_path_mse_with_live_equalizer(
+    /// live equalizer を一時的に再構成して、既知区間(sync word)の実測パスMSEを評価する。
+    ///
+    /// ここで返す `Pred MSE` は理論モデル予測ではなく、フレーム開始時に
+    /// 既知区間である sync word を raw/FDE の両経路に replay して得た実測値。
+    ///
+    /// FDE 側は sync word 直前の `overlap_len()` サンプルを warmup として使う。
+    /// 実デコーダはフレーム開始時に zero-initialized な equalizer state から始まるため、
+    /// replay でも履歴不足分は 0 埋めして同じ初期条件を再現する。
+    pub fn evaluate_sync_word_path_mse_with_live_equalizer(
         &mut self,
-        input: KnownIntervalPathMseInput<'_>,
+        input: SyncWordPathMseInput<'_>,
     ) -> (f32, f32) {
-        let KnownIntervalPathMseInput {
+        let SyncWordPathMseInput {
             sync_detector,
             cir,
             sample_buffer_i,
             sample_buffer_q,
-            preamble_start_idx,
-            known_end_idx,
+            sync_start_idx,
+            sync_end_idx,
             cir_len,
             mmse,
             cfo_rad_per_sample,
         } = input;
-        if known_end_idx > sample_buffer_i.len() || known_end_idx > sample_buffer_q.len() {
+        if sync_end_idx > sample_buffer_i.len() || sync_end_idx > sample_buffer_q.len() {
             return (f32::NAN, f32::NAN);
         }
 
         let mse_raw = sync_detector
-            .known_sequence_mse_iq(
+            .sync_word_mse_iq(
                 sample_buffer_i,
                 sample_buffer_q,
-                preamble_start_idx,
+                sync_start_idx,
                 cfo_rad_per_sample,
             )
             .unwrap_or(f32::NAN);
@@ -206,14 +213,17 @@ impl EqualizationController {
         };
 
         let overlap = eq.overlap_len();
-        let analysis_start = preamble_start_idx.saturating_sub(overlap);
-        let input_len = known_end_idx.saturating_sub(analysis_start);
+        let available_history = sync_start_idx.min(overlap);
+        let missing_history = overlap - available_history;
+        let analysis_start = sync_start_idx - available_history;
+        let input_len = sync_end_idx.saturating_sub(analysis_start) + missing_history;
         if input_len == 0 {
             return (mse_raw, f32::NAN);
         }
 
         let mut eval_input = Vec::with_capacity(input_len);
-        for idx in analysis_start..known_end_idx {
+        eval_input.resize(missing_history, Complex32::new(0.0, 0.0));
+        for idx in analysis_start..sync_end_idx {
             eval_input.push(Complex32::new(sample_buffer_i[idx], sample_buffer_q[idx]));
         }
 
@@ -225,7 +235,7 @@ impl EqualizationController {
 
         let skip = overlap;
         let mse_fde = sync_detector
-            .known_sequence_mse_complex(&eval_output, skip, cfo_rad_per_sample)
+            .sync_word_mse_complex(&eval_output, skip, cfo_rad_per_sample)
             .unwrap_or(f32::NAN);
 
         (mse_raw, mse_fde)
@@ -540,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_known_interval_path_mse_returns_nan_when_bounds_invalid() {
+    fn test_evaluate_sync_word_path_mse_returns_nan_when_bounds_invalid() {
         let config = DspConfig::default_48k();
         let detector = MarySyncDetector::new(
             config.clone(),
@@ -554,13 +564,13 @@ mod tests {
         let q = vec![0.0; 8];
 
         let (mse_raw, mse_fde) =
-            controller.evaluate_known_interval_path_mse_with_live_equalizer(KnownIntervalPathMseInput {
+            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
                 sync_detector: &detector,
                 cir: &cir,
                 sample_buffer_i: &i,
                 sample_buffer_q: &q,
-                preamble_start_idx: 0,
-                known_end_idx: 16,
+                sync_start_idx: 0,
+                sync_end_idx: 16,
                 cir_len,
                 mmse: MmseSettings::default(),
                 cfo_rad_per_sample: 0.0,
@@ -571,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_known_interval_path_mse_without_equalizer_returns_raw_and_nan_fde() {
+    fn test_evaluate_sync_word_path_mse_without_equalizer_returns_raw_and_nan_fde() {
         let config = DspConfig::default_48k();
         let detector = MarySyncDetector::new(
             config.clone(),
@@ -582,26 +592,109 @@ mod tests {
         let cir_len = config.preamble_sf * config.proc_samples_per_chip();
         let cir = vec![Complex32::new(1.0, 0.0); cir_len];
         let total = detector.known_interval_len_samples();
+        let sync_start = total - detector.sync_word_len_samples();
         let i = vec![1.0; total];
         let q = vec![0.0; total];
 
         let (mse_raw, mse_fde) =
-            controller.evaluate_known_interval_path_mse_with_live_equalizer(KnownIntervalPathMseInput {
+            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
                 sync_detector: &detector,
                 cir: &cir,
                 sample_buffer_i: &i,
                 sample_buffer_q: &q,
-                preamble_start_idx: 0,
-                known_end_idx: total,
+                sync_start_idx: sync_start,
+                sync_end_idx: total,
                 cir_len,
                 mmse: MmseSettings::default(),
                 cfo_rad_per_sample: 0.0,
             });
 
         let expected_raw = detector
-            .known_sequence_mse_iq(&i, &q, 0, 0.0)
+            .sync_word_mse_iq(&i, &q, sync_start, 0.0)
             .expect("non-zero known interval should produce a raw MSE estimate");
         assert_eq!(mse_raw, expected_raw);
         assert!(mse_fde.is_nan());
+    }
+
+    #[test]
+    fn test_evaluate_sync_word_path_mse_zero_pads_when_sync_warmup_history_insufficient() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 13;
+        config.preamble_repeat = 1;
+        config.sync_word_bits = 8;
+        let detector = MarySyncDetector::new(
+            config.clone(),
+            MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT,
+        );
+        let mut controller = EqualizationController::new(&config, true);
+        let cir_len = config.preamble_sf * config.proc_samples_per_chip();
+        let cir = vec![Complex32::new(1.0, 0.0); cir_len];
+        let total = detector.known_interval_len_samples();
+        let sync_start = total - detector.sync_word_len_samples();
+        let i = vec![1.0; total];
+        let q = vec![0.0; total];
+
+        let overlap = controller
+            .equalizer_ref()
+            .expect("FDE enabled")
+            .overlap_len();
+        assert!(sync_start < overlap);
+
+        let (mse_raw, mse_fde) =
+            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
+                sync_detector: &detector,
+                cir: &cir,
+                sample_buffer_i: &i,
+                sample_buffer_q: &q,
+                sync_start_idx: sync_start,
+                sync_end_idx: total,
+                cir_len,
+                mmse: MmseSettings::default(),
+                cfo_rad_per_sample: 0.0,
+            });
+
+        assert!(mse_raw.is_finite());
+        assert!(mse_fde.is_finite(), "mse_fde={}", mse_fde);
+    }
+
+    #[test]
+    fn test_evaluate_sync_word_path_mse_fde_is_finite_with_sufficient_warmup() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 8;
+        let detector = MarySyncDetector::new(config.clone(), 0.0, 0.0);
+        let mut controller = EqualizationController::new(&config, true);
+        let cir_len = config.preamble_sf * config.proc_samples_per_chip();
+        let mut cir = vec![Complex32::new(0.0, 0.0); cir_len];
+        cir[0] = Complex32::new(1.0, 0.0);
+
+        let total = detector.known_interval_len_samples();
+        let sync_start = total - detector.sync_word_len_samples();
+        let i = vec![1.0; total];
+        let q = vec![0.0; total];
+
+        let overlap = controller
+            .equalizer_ref()
+            .expect("FDE enabled")
+            .overlap_len();
+        assert!(sync_start >= overlap);
+
+        let (mse_raw, mse_fde) =
+            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
+                sync_detector: &detector,
+                cir: &cir,
+                sample_buffer_i: &i,
+                sample_buffer_q: &q,
+                sync_start_idx: sync_start,
+                sync_end_idx: total,
+                cir_len,
+                mmse: MmseSettings::default(),
+                cfo_rad_per_sample: 0.0,
+            });
+
+        assert!(mse_raw.is_finite() || mse_raw.is_nan());
+        assert!(mse_fde.is_finite(), "mse_fde={}", mse_fde);
     }
 }

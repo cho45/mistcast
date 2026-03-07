@@ -515,41 +515,57 @@ impl MarySyncDetector {
             + self.sync_sym_len * self.config.sync_word_bits
     }
 
-    pub fn known_sequence_mse_iq(
+    pub fn sync_word_len_samples(&self) -> usize {
+        self.sync_sym_len * self.config.sync_word_bits
+    }
+
+    fn sequence_len_samples(&self, symbol_start: usize, symbol_count: usize) -> usize {
+        let repeat = self.config.preamble_repeat;
+        let mut total = 0usize;
+        for local_idx in 0..symbol_count {
+            let global_idx = symbol_start + local_idx;
+            total += if global_idx < repeat {
+                self.preamble_sym_len
+            } else {
+                self.sync_sym_len
+            };
+        }
+        total
+    }
+
+    fn sequence_mse_iq_window(
         &self,
         i_ch: &[f32],
         q_ch: &[f32],
         start_idx: usize,
         cfo_rad_per_sample: f32,
+        symbol_start: usize,
+        symbol_count: usize,
     ) -> Option<f32> {
         if i_ch.len() != q_ch.len() {
             return None;
         }
-        let total_len = self.known_interval_len_samples();
+        let total_len = self.sequence_len_samples(symbol_start, symbol_count);
         if start_idx + total_len > i_ch.len() {
             return None;
         }
 
         let repeat = self.config.preamble_repeat;
-        let total_symbols = repeat + self.config.sync_word_bits;
         let mut sum_xy = Complex32::new(0.0, 0.0);
         let mut sum_yy = 0.0f32;
         let mut used = 0usize;
         let mut symbol_offset = start_idx;
+        let mut sym_base = 0usize;
 
-        for sym_idx in 0..total_symbols {
-            let is_preamble = sym_idx < repeat;
-            let sign = self.sync_symbols[sym_idx];
+        for local_sym_idx in 0..symbol_count {
+            let global_sym_idx = symbol_start + local_sym_idx;
+            let is_preamble = global_sym_idx < repeat;
+            let sign = self.sync_symbols[global_sym_idx];
             let sign_c = Complex32::new(sign, 0.0);
             let sf = if is_preamble {
                 self.preamble_sf
             } else {
                 self.sync_sf
-            };
-            let sym_base = if is_preamble {
-                sym_idx * self.preamble_sym_len
-            } else {
-                repeat * self.preamble_sym_len + (sym_idx - repeat) * self.sync_sym_len
             };
 
             for chip_idx in 0..sf {
@@ -584,11 +600,13 @@ impl MarySyncDetector {
                 used += 1;
             }
 
-            symbol_offset += if is_preamble {
+            let sym_len = if is_preamble {
                 self.preamble_sym_len
             } else {
                 self.sync_sym_len
             };
+            symbol_offset += sym_len;
+            sym_base += sym_len;
         }
 
         if used == 0 || sum_yy <= 1e-12 {
@@ -598,19 +616,16 @@ impl MarySyncDetector {
         let g = sum_xy / sum_yy;
         let mut mse_sum = 0.0f32;
         let mut symbol_offset = start_idx;
-        for sym_idx in 0..total_symbols {
-            let is_preamble = sym_idx < repeat;
-            let sign = self.sync_symbols[sym_idx];
+        let mut sym_base = 0usize;
+        for local_sym_idx in 0..symbol_count {
+            let global_sym_idx = symbol_start + local_sym_idx;
+            let is_preamble = global_sym_idx < repeat;
+            let sign = self.sync_symbols[global_sym_idx];
             let sign_c = Complex32::new(sign, 0.0);
             let sf = if is_preamble {
                 self.preamble_sf
             } else {
                 self.sync_sf
-            };
-            let sym_base = if is_preamble {
-                sym_idx * self.preamble_sym_len
-            } else {
-                repeat * self.preamble_sym_len + (sym_idx - repeat) * self.sync_sym_len
             };
 
             for chip_idx in 0..sf {
@@ -642,14 +657,167 @@ impl MarySyncDetector {
                 let x = code * sign_c;
                 mse_sum += (g * y - x).norm_sqr();
             }
-            symbol_offset += if is_preamble {
+
+            let sym_len = if is_preamble {
                 self.preamble_sym_len
             } else {
                 self.sync_sym_len
             };
+            symbol_offset += sym_len;
+            sym_base += sym_len;
         }
 
         Some(mse_sum / used as f32)
+    }
+
+    fn sequence_mse_complex_window(
+        &self,
+        samples: &[Complex32],
+        start_idx: usize,
+        cfo_rad_per_sample: f32,
+        symbol_start: usize,
+        symbol_count: usize,
+    ) -> Option<f32> {
+        let total_len = self.sequence_len_samples(symbol_start, symbol_count);
+        if start_idx + total_len > samples.len() {
+            return None;
+        }
+
+        let repeat = self.config.preamble_repeat;
+        let mut sum_xy = Complex32::new(0.0, 0.0);
+        let mut sum_yy = 0.0f32;
+        let mut used = 0usize;
+        let mut symbol_offset = start_idx;
+        let mut sym_base = 0usize;
+
+        for local_sym_idx in 0..symbol_count {
+            let global_sym_idx = symbol_start + local_sym_idx;
+            let is_preamble = global_sym_idx < repeat;
+            let sign = self.sync_symbols[global_sym_idx];
+            let sign_c = Complex32::new(sign, 0.0);
+            let sf = if is_preamble {
+                self.preamble_sf
+            } else {
+                self.sync_sf
+            };
+
+            for chip_idx in 0..sf {
+                let mut chip_y = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = symbol_offset + chip_idx * self.spc + s_idx;
+                    let mut y = samples[p];
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        y *= Complex32::new(c, s);
+                    }
+                    chip_y += y;
+                    used_samples += 1;
+                }
+                let y = if used_samples > 0 {
+                    chip_y / (used_samples as f32).sqrt()
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+
+                let code = if is_preamble {
+                    self.preamble_pn[chip_idx]
+                } else {
+                    Complex32::new(self.sync_pn[chip_idx], 0.0)
+                };
+                let x = code * sign_c;
+                sum_xy += x * y.conj();
+                sum_yy += y.norm_sqr();
+                used += 1;
+            }
+
+            let sym_len = if is_preamble {
+                self.preamble_sym_len
+            } else {
+                self.sync_sym_len
+            };
+            symbol_offset += sym_len;
+            sym_base += sym_len;
+        }
+
+        if used == 0 || sum_yy <= 1e-12 {
+            return None;
+        }
+
+        let g = sum_xy / sum_yy;
+        let mut mse_sum = 0.0f32;
+        let mut symbol_offset = start_idx;
+        let mut sym_base = 0usize;
+        for local_sym_idx in 0..symbol_count {
+            let global_sym_idx = symbol_start + local_sym_idx;
+            let is_preamble = global_sym_idx < repeat;
+            let sign = self.sync_symbols[global_sym_idx];
+            let sign_c = Complex32::new(sign, 0.0);
+            let sf = if is_preamble {
+                self.preamble_sf
+            } else {
+                self.sync_sf
+            };
+
+            for chip_idx in 0..sf {
+                let mut chip_y = Complex32::new(0.0, 0.0);
+                let mut used_samples = 0;
+                for s_idx in 0..self.spc {
+                    let p = symbol_offset + chip_idx * self.spc + s_idx;
+                    let mut y = samples[p];
+                    if cfo_rad_per_sample != 0.0 {
+                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
+                        let ang = -cfo_rad_per_sample * t;
+                        let (s, c) = ang.sin_cos();
+                        y *= Complex32::new(c, s);
+                    }
+                    chip_y += y;
+                    used_samples += 1;
+                }
+                let y = if used_samples > 0 {
+                    chip_y / (used_samples as f32).sqrt()
+                } else {
+                    Complex32::new(0.0, 0.0)
+                };
+
+                let code = if is_preamble {
+                    self.preamble_pn[chip_idx]
+                } else {
+                    Complex32::new(self.sync_pn[chip_idx], 0.0)
+                };
+                let x = code * sign_c;
+                mse_sum += (g * y - x).norm_sqr();
+            }
+
+            let sym_len = if is_preamble {
+                self.preamble_sym_len
+            } else {
+                self.sync_sym_len
+            };
+            symbol_offset += sym_len;
+            sym_base += sym_len;
+        }
+
+        Some(mse_sum / used as f32)
+    }
+
+    pub fn known_sequence_mse_iq(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        start_idx: usize,
+        cfo_rad_per_sample: f32,
+    ) -> Option<f32> {
+        self.sequence_mse_iq_window(
+            i_ch,
+            q_ch,
+            start_idx,
+            cfo_rad_per_sample,
+            0,
+            self.config.preamble_repeat + self.config.sync_word_bits,
+        )
     }
 
     pub fn known_sequence_mse_complex(
@@ -658,131 +826,45 @@ impl MarySyncDetector {
         start_idx: usize,
         cfo_rad_per_sample: f32,
     ) -> Option<f32> {
-        let total_len = self.known_interval_len_samples();
-        if start_idx + total_len > samples.len() {
-            return None;
-        }
+        self.sequence_mse_complex_window(
+            samples,
+            start_idx,
+            cfo_rad_per_sample,
+            0,
+            self.config.preamble_repeat + self.config.sync_word_bits,
+        )
+    }
 
-        let repeat = self.config.preamble_repeat;
-        let total_symbols = repeat + self.config.sync_word_bits;
-        let mut sum_xy = Complex32::new(0.0, 0.0);
-        let mut sum_yy = 0.0f32;
-        let mut used = 0usize;
-        let mut symbol_offset = start_idx;
+    pub fn sync_word_mse_iq(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        start_idx: usize,
+        cfo_rad_per_sample: f32,
+    ) -> Option<f32> {
+        self.sequence_mse_iq_window(
+            i_ch,
+            q_ch,
+            start_idx,
+            cfo_rad_per_sample,
+            self.config.preamble_repeat,
+            self.config.sync_word_bits,
+        )
+    }
 
-        for sym_idx in 0..total_symbols {
-            let is_preamble = sym_idx < repeat;
-            let sign = self.sync_symbols[sym_idx];
-            let sign_c = Complex32::new(sign, 0.0);
-            let sf = if is_preamble {
-                self.preamble_sf
-            } else {
-                self.sync_sf
-            };
-            let sym_base = if is_preamble {
-                sym_idx * self.preamble_sym_len
-            } else {
-                repeat * self.preamble_sym_len + (sym_idx - repeat) * self.sync_sym_len
-            };
-
-            for chip_idx in 0..sf {
-                let mut chip_y = Complex32::new(0.0, 0.0);
-                let mut used_samples = 0;
-                for s_idx in 0..self.spc {
-                    let p = symbol_offset + chip_idx * self.spc + s_idx;
-                    let mut y = samples[p];
-                    if cfo_rad_per_sample != 0.0 {
-                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
-                        let ang = -cfo_rad_per_sample * t;
-                        let (s, c) = ang.sin_cos();
-                        y *= Complex32::new(c, s);
-                    }
-                    chip_y += y;
-                    used_samples += 1;
-                }
-                let y = if used_samples > 0 {
-                    chip_y / (used_samples as f32).sqrt()
-                } else {
-                    Complex32::new(0.0, 0.0)
-                };
-
-                let code = if is_preamble {
-                    self.preamble_pn[chip_idx]
-                } else {
-                    Complex32::new(self.sync_pn[chip_idx], 0.0)
-                };
-                let x = code * sign_c;
-                sum_xy += x * y.conj();
-                sum_yy += y.norm_sqr();
-                used += 1;
-            }
-
-            symbol_offset += if is_preamble {
-                self.preamble_sym_len
-            } else {
-                self.sync_sym_len
-            };
-        }
-
-        if used == 0 || sum_yy <= 1e-12 {
-            return None;
-        }
-
-        let g = sum_xy / sum_yy;
-        let mut mse_sum = 0.0f32;
-        let mut symbol_offset = start_idx;
-        for sym_idx in 0..total_symbols {
-            let is_preamble = sym_idx < repeat;
-            let sign = self.sync_symbols[sym_idx];
-            let sign_c = Complex32::new(sign, 0.0);
-            let sf = if is_preamble {
-                self.preamble_sf
-            } else {
-                self.sync_sf
-            };
-            let sym_base = if is_preamble {
-                sym_idx * self.preamble_sym_len
-            } else {
-                repeat * self.preamble_sym_len + (sym_idx - repeat) * self.sync_sym_len
-            };
-
-            for chip_idx in 0..sf {
-                let mut chip_y = Complex32::new(0.0, 0.0);
-                let mut used_samples = 0;
-                for s_idx in 0..self.spc {
-                    let p = symbol_offset + chip_idx * self.spc + s_idx;
-                    let mut y = samples[p];
-                    if cfo_rad_per_sample != 0.0 {
-                        let t = (sym_base + chip_idx * self.spc + s_idx) as f32;
-                        let ang = -cfo_rad_per_sample * t;
-                        let (s, c) = ang.sin_cos();
-                        y *= Complex32::new(c, s);
-                    }
-                    chip_y += y;
-                    used_samples += 1;
-                }
-                let y = if used_samples > 0 {
-                    chip_y / (used_samples as f32).sqrt()
-                } else {
-                    Complex32::new(0.0, 0.0)
-                };
-
-                let code = if is_preamble {
-                    self.preamble_pn[chip_idx]
-                } else {
-                    Complex32::new(self.sync_pn[chip_idx], 0.0)
-                };
-                let x = code * sign_c;
-                mse_sum += (g * y - x).norm_sqr();
-            }
-            symbol_offset += if is_preamble {
-                self.preamble_sym_len
-            } else {
-                self.sync_sym_len
-            };
-        }
-
-        Some(mse_sum / used as f32)
+    pub fn sync_word_mse_complex(
+        &self,
+        samples: &[Complex32],
+        start_idx: usize,
+        cfo_rad_per_sample: f32,
+    ) -> Option<f32> {
+        self.sequence_mse_complex_window(
+            samples,
+            start_idx,
+            cfo_rad_per_sample,
+            self.config.preamble_repeat,
+            self.config.sync_word_bits,
+        )
     }
 }
 
@@ -1886,6 +1968,73 @@ mod tests {
             .known_sequence_mse_iq(&i, &q, offset, 0.0)
             .expect("known_sequence_mse_iq with offset");
         assert!(mse < 1e-8, "mse={}", mse);
+    }
+
+    #[test]
+    fn test_sync_word_mse_zero_noise_is_small_and_iq_complex_match() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 8;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        let (i, q) = synth_known_observation_with_cfo(
+            &detector,
+            &[(0usize, Complex32::new(0.8, -0.3))],
+            0.0,
+            0.0,
+            11,
+        );
+        let sync_start = detector.known_interval_len_samples() - detector.sync_word_len_samples();
+        let mse_iq = detector
+            .sync_word_mse_iq(&i, &q, sync_start, 0.0)
+            .expect("sync_word_mse_iq");
+        let samples: Vec<Complex32> = i
+            .iter()
+            .zip(q.iter())
+            .map(|(&ii, &qq)| Complex32::new(ii, qq))
+            .collect();
+        let mse_c = detector
+            .sync_word_mse_complex(&samples, sync_start, 0.0)
+            .expect("sync_word_mse_complex");
+
+        assert!(mse_iq < 1e-8, "mse_iq={}", mse_iq);
+        assert!(
+            (mse_iq - mse_c).abs() < 1e-8,
+            "mse_iq={} mse_c={}",
+            mse_iq,
+            mse_c
+        );
+    }
+
+    #[test]
+    fn test_sync_word_mse_cfo_compensation_effective() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 8;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let injected_cfo = 0.004f32;
+
+        let (i, q) = synth_known_observation_with_cfo(
+            &detector,
+            &[(0usize, Complex32::new(1.0, 0.0))],
+            0.0,
+            injected_cfo,
+            77,
+        );
+        let sync_start = detector.known_interval_len_samples() - detector.sync_word_len_samples();
+
+        let mse_no_comp = detector.sync_word_mse_iq(&i, &q, sync_start, 0.0).unwrap();
+        let mse_comp = detector
+            .sync_word_mse_iq(&i, &q, sync_start, injected_cfo)
+            .unwrap();
+        assert!(
+            mse_comp < mse_no_comp * 0.1,
+            "CFO compensation should reduce sync-word MSE: no_comp={} comp={}",
+            mse_no_comp,
+            mse_comp
+        );
     }
 
     #[test]

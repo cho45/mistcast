@@ -15,7 +15,7 @@ mod signal_pipeline;
 mod tracking;
 
 use self::decoder_stats::DecoderStats;
-use self::equalization::{postprocess_cir, EqualizationController, KnownIntervalPathMseInput};
+use self::equalization::{postprocess_cir, EqualizationController, SyncWordPathMseInput};
 use self::packet_decoder::{
     LlrCallback, PacketDecodeBuffers, PacketDecodeOptions, PacketDecodeRuntime,
 };
@@ -634,17 +634,18 @@ impl Decoder {
         let mut pred_mse_fde = f32::NAN;
         let mut pred_mse_raw = f32::NAN;
         if self.equalization.equalizer_ref().is_some() {
-            let known_end_idx =
-                preamble_start_idx + self.sync_detector.known_interval_len_samples();
+            let sync_end_idx = sync_start + self.sync_detector.sync_word_len_samples();
+            // Pred MSE は理論予測値ではなく、既知区間(sync word)を raw/FDE 経路に
+            // replay して得る実測 MSE を path selection 用に保持している。
             let (mse_raw, mse_fde) = self
                 .equalization
-                .evaluate_known_interval_path_mse_with_live_equalizer(KnownIntervalPathMseInput {
+                .evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
                     sync_detector: &self.sync_detector,
                     cir: &self.cir_buffer,
                     sample_buffer_i: &self.pipeline.sample_buffer_i,
                     sample_buffer_q: &self.pipeline.sample_buffer_q,
-                    preamble_start_idx,
-                    known_end_idx,
+                    sync_start_idx: sync_start,
+                    sync_end_idx,
                     cir_len,
                     mmse,
                     cfo_rad_per_sample: chq.cfo_rad_per_sample,
@@ -1069,6 +1070,74 @@ mod tests {
         assert_eq!(decoder.stats.last_pred_mse_raw, 0.250);
         assert_eq!(decoder.stats.last_est_snr_db, 12.5);
         assert_eq!(decoder.stats.last_path_used, 1);
+    }
+
+    #[test]
+    fn test_decoder_reports_sync_word_replay_mse_for_detected_frame() {
+        use crate::mary::encoder::Encoder;
+
+        let config = DspConfig::default_48k();
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(160, 10, config);
+        encoder.set_data(&[0xAB; 32]);
+        let frame = encoder.encode_frame().expect("frame");
+
+        let progress = decoder.process_samples(&frame);
+        eprintln!(
+            "pred_mse_raw={} pred_mse_fde={} last_path={} fde_frames={} raw_frames={}",
+            progress.last_pred_mse_raw,
+            progress.last_pred_mse_fde,
+            progress.last_path_used,
+            progress.fde_selected_frames,
+            progress.raw_selected_frames
+        );
+
+        assert!(
+            progress.last_pred_mse_raw.is_finite(),
+            "expected raw replay MSE to be finite, got {}",
+            progress.last_pred_mse_raw
+        );
+        assert!(
+            progress.last_pred_mse_fde.is_finite(),
+            "expected FDE replay MSE to be finite, got {}",
+            progress.last_pred_mse_fde
+        );
+    }
+
+    #[test]
+    fn test_decoder_reports_sync_word_replay_mse_for_detected_frame_chunked() {
+        use crate::mary::encoder::Encoder;
+
+        let mut config = DspConfig::default_48k();
+        config.packets_per_burst = 3;
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(160, 10, config);
+        encoder.set_data(&[0xAB; 32]);
+        let frame = encoder.encode_frame().expect("frame");
+
+        let mut last_progress = decoder.progress();
+        for chunk in frame.chunks(256) {
+            last_progress = decoder.process_samples(chunk);
+        }
+        eprintln!(
+            "chunked pred_mse_raw={} pred_mse_fde={} last_path={} fde_frames={} raw_frames={}",
+            last_progress.last_pred_mse_raw,
+            last_progress.last_pred_mse_fde,
+            last_progress.last_path_used,
+            last_progress.fde_selected_frames,
+            last_progress.raw_selected_frames
+        );
+
+        assert!(
+            last_progress.last_pred_mse_raw.is_finite(),
+            "expected chunked raw replay MSE to be finite, got {}",
+            last_progress.last_pred_mse_raw
+        );
+        assert!(
+            last_progress.last_pred_mse_fde.is_finite(),
+            "expected chunked FDE replay MSE to be finite, got {}",
+            last_progress.last_pred_mse_fde
+        );
     }
 
     #[test]
@@ -1982,6 +2051,68 @@ mod tests {
             .recovered_data()
             .expect("Should have recovered data");
         assert_eq!(&recovered[..data.len()], &data[..]);
+    }
+
+    #[test]
+    fn test_decoder_continuous_multiple_bursts_reports_pred_mse_each_frame() {
+        use crate::mary::encoder::Encoder;
+
+        let config = DspConfig::default_48k();
+        let mut encoder = Encoder::new(config.clone());
+
+        let data_size = 160;
+        let fountain_k = 10;
+        let mut decoder = Decoder::new(data_size, fountain_k, config.clone());
+        decoder.config.packets_per_burst = 1;
+
+        let data = vec![0x55u8; data_size];
+        encoder.set_data(&data);
+
+        let mut total_signal = Vec::new();
+        for _ in 0..8 {
+            if let Some(frame) = encoder.encode_frame() {
+                total_signal.extend(frame);
+            }
+        }
+        total_signal.extend(encoder.flush());
+        total_signal.extend(vec![0.0; 4096]);
+
+        let mut prev_frames = 0usize;
+        let mut observations = Vec::new();
+
+        for chunk in total_signal.chunks(512) {
+            let progress = decoder.process_samples(chunk);
+            let frames = progress.fde_selected_frames + progress.raw_selected_frames;
+            if frames > prev_frames {
+                observations.push((
+                    frames,
+                    progress.last_pred_mse_raw,
+                    progress.last_pred_mse_fde,
+                    progress.last_path_used,
+                ));
+                prev_frames = frames;
+            }
+        }
+
+        eprintln!("frame observations: {:?}", observations);
+        assert!(
+            !observations.is_empty(),
+            "expected at least one detected frame observation"
+        );
+        assert!(
+            observations
+                .iter()
+                .all(|(_, raw, _, _)| raw.is_finite()),
+            "expected raw replay MSE to stay finite: {:?}",
+            observations
+        );
+        assert!(
+            observations
+                .iter()
+                .all(|(_, _, fde, _)| fde.is_finite()),
+            "expected FDE replay MSE to stay finite: {:?}",
+            observations
+        );
     }
 
     #[test]
