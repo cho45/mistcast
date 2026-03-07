@@ -361,6 +361,12 @@ struct Cli {
     #[arg(long = "mary-cir-tap-alpha", default_value_t = 0.0)]
     mary_cir_tap_alpha: f32,
     #[arg(
+        long = "mary-viterbi-list",
+        value_parser = parse_positive_usize,
+        default_value_t = 1
+    )]
+    mary_viterbi_list: usize,
+    #[arg(
         long = "columns",
         value_delimiter = ',',
         value_parser = PossibleValuesParser::new(ALL_COLUMNS)
@@ -1319,6 +1325,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         cli.mary_fde_max_inv_gain,
     );
     decoder.set_cir_postprocess(cli.mary_cir_norm.into(), cli.mary_cir_tap_alpha);
+    decoder.set_viterbi_list_size(cli.mary_viterbi_list);
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
     let mut elapsed_sec = 0.0f32;
@@ -2129,6 +2136,7 @@ mod tests {
             mary_fde_max_inv_gain: None,
             mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
+            mary_viterbi_list: 1,
             columns: None,
             output: OutputFormat::Csv,
         };
@@ -2177,6 +2185,7 @@ mod tests {
             mary_fde_max_inv_gain: None,
             mary_cir_norm: CirNormArg::None,
             mary_cir_tap_alpha: 0.0,
+            mary_viterbi_list: 1,
             columns: None,
             output: OutputFormat::Csv,
         };

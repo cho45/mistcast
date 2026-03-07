@@ -110,6 +110,12 @@ enum DecoderState {
     EqualizedDecoding,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DecodeAttemptError {
+    Crc,
+    Parse,
+}
+
 /// MaryDQPSKデコーダ
 pub struct Decoder {
     pub config: DspConfig,
@@ -151,6 +157,7 @@ pub struct Decoder {
     fde_mmse_settings: MmseSettings,
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
+    viterbi_list_size: usize,
 
     // 統計
     pub received_packets: usize,
@@ -273,6 +280,7 @@ impl Decoder {
             fde_mmse_settings: MmseSettings::default(),
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
+            viterbi_list_size: 1,
             received_packets: 0,
             stalled_packets: 0,
             dependent_packets: 0,
@@ -343,6 +351,10 @@ impl Decoder {
     ) {
         self.cir_normalization_mode = normalization_mode;
         self.cir_tap_threshold_alpha = tap_threshold_alpha.max(0.0);
+    }
+
+    pub fn set_viterbi_list_size(&mut self, list_size: usize) {
+        self.viterbi_list_size = list_size.max(1);
     }
 
     pub fn process_samples(&mut self, samples: &[f32]) -> DecodeProgress {
@@ -1035,86 +1047,138 @@ impl Decoder {
             }
 
             let valid_llrs = &packet_llrs[..interleaved_bits];
-
-            let interleaver = BlockInterleaver::new(rows, cols);
-            // インプレースAPI使用
-            self.deinterleave_buffer.resize(interleaved_bits, 0.0);
-            interleaver.deinterleave_f32_in_place(
+            match self.decode_single_llr_candidate(
                 valid_llrs,
-                &mut self.deinterleave_buffer[..interleaved_bits],
-            );
-
-            let mut scrambler = Scrambler::default();
-            for llr in self.deinterleave_buffer[..interleaved_bits].iter_mut() {
-                if scrambler.next_bit() == 1 {
-                    *llr = -*llr;
-                }
-            }
-
-            if let Some(ref mut callback) = self.llr_callback {
-                callback(&self.deinterleave_buffer[..interleaved_bits]);
-            }
-
-            let decoded_bits = fec::decode_soft(&self.deinterleave_buffer[..fec_bits]);
-            if decoded_bits.len() < p_bits_len {
-                continue;
-            }
-
-            let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-
-            match Packet::deserialize(&decoded_bytes) {
-                Ok(packet) => {
-                    let pkt_k = packet.lt_k as usize;
-                    if pkt_k != self.fountain_decoder.params().k {
-                        self.rebuild_fountain_decoder(pkt_k);
-                    }
-
-                    self.last_packet_seq = Some(packet.lt_seq as u32);
-
-                    let fountain_packet = FountainPacket {
-                        seq: packet.lt_seq as u32,
-                        coefficients: crate::coding::fountain::reconstruct_packet_coefficients(
-                            packet.lt_seq as u32,
-                            self.fountain_decoder.params().k,
-                        ),
-                        data: packet.payload.to_vec(),
-                    };
-
-                    use crate::coding::fountain::ReceiveOutcome;
-                    let outcome = self.fountain_decoder.receive_with_outcome(fountain_packet);
-                    match outcome {
-                        ReceiveOutcome::AcceptedRankUp => {
-                            self.received_packets += 1;
-                            self.last_rank_up_seq = Some(packet.lt_seq as u32);
-                        }
-                        ReceiveOutcome::AcceptedNoRankUp => {
-                            self.received_packets += 1;
-                            self.stalled_packets += 1;
-                            self.dependent_packets += 1;
-                        }
-                        ReceiveOutcome::DuplicateSeq => {
-                            self.duplicate_packets += 1;
-                        }
-                        ReceiveOutcome::InvalidPacket => {
-                            self.parse_error_packets += 1;
-                        }
-                    }
-
-                    if let Some(data) = self.fountain_decoder.decode() {
-                        self.recovered_data = Some(data);
-                    }
+                rows,
+                cols,
+                interleaved_bits,
+                fec_bits,
+                p_bits_len,
+            ) {
+                Ok(()) => {
                     success_count += 1;
                 }
-                Err(e) => {
-                    use crate::frame::packet::PacketParseError;
-                    match e {
-                        PacketParseError::CrcMismatch { .. } => self.crc_error_packets += 1,
-                        _ => self.parse_error_packets += 1,
-                    }
+                Err(DecodeAttemptError::Crc) => {
+                    self.crc_error_packets += 1;
+                }
+                Err(DecodeAttemptError::Parse) => {
+                    self.parse_error_packets += 1;
                 }
             }
         }
         success_count
+    }
+
+    fn decode_single_llr_candidate(
+        &mut self,
+        llrs: &[f32],
+        rows: usize,
+        cols: usize,
+        interleaved_bits: usize,
+        fec_bits: usize,
+        p_bits_len: usize,
+    ) -> Result<(), DecodeAttemptError> {
+        let interleaver = BlockInterleaver::new(rows, cols);
+        // インプレースAPI使用
+        self.deinterleave_buffer.resize(interleaved_bits, 0.0);
+        interleaver
+            .deinterleave_f32_in_place(llrs, &mut self.deinterleave_buffer[..interleaved_bits]);
+
+        let mut scrambler = Scrambler::default();
+        for llr in self.deinterleave_buffer[..interleaved_bits].iter_mut() {
+            if scrambler.next_bit() == 1 {
+                *llr = -*llr;
+            }
+        }
+
+        if let Some(ref mut callback) = self.llr_callback {
+            callback(&self.deinterleave_buffer[..interleaved_bits]);
+        }
+
+        let decoded_candidates = fec::decode_soft_list(
+            &self.deinterleave_buffer[..fec_bits],
+            self.viterbi_list_size,
+        );
+        let mut saw_crc = false;
+        let mut saw_parse = false;
+        for decoded_bits in decoded_candidates {
+            if decoded_bits.len() < p_bits_len {
+                saw_parse = true;
+                continue;
+            }
+            match self.decode_decoded_bits(&decoded_bits[..p_bits_len]) {
+                Ok(()) => {
+                    return Ok(());
+                }
+                Err(DecodeAttemptError::Crc) => {
+                    saw_crc = true;
+                }
+                Err(DecodeAttemptError::Parse) => {
+                    saw_parse = true;
+                }
+            }
+        }
+        if saw_crc {
+            Err(DecodeAttemptError::Crc)
+        } else if saw_parse {
+            Err(DecodeAttemptError::Parse)
+        } else {
+            Err(DecodeAttemptError::Parse)
+        }
+    }
+
+    fn decode_decoded_bits(&mut self, packet_bits: &[u8]) -> Result<(), DecodeAttemptError> {
+        let decoded_bytes = fec::bits_to_bytes(packet_bits);
+        let packet = match Packet::deserialize(&decoded_bytes) {
+            Ok(packet) => packet,
+            Err(crate::frame::packet::PacketParseError::CrcMismatch { .. }) => {
+                return Err(DecodeAttemptError::Crc);
+            }
+            Err(_) => {
+                return Err(DecodeAttemptError::Parse);
+            }
+        };
+
+        let pkt_k = packet.lt_k as usize;
+        if pkt_k != self.fountain_decoder.params().k {
+            self.rebuild_fountain_decoder(pkt_k);
+        }
+
+        self.last_packet_seq = Some(packet.lt_seq as u32);
+
+        let fountain_packet = FountainPacket {
+            seq: packet.lt_seq as u32,
+            coefficients: crate::coding::fountain::reconstruct_packet_coefficients(
+                packet.lt_seq as u32,
+                self.fountain_decoder.params().k,
+            ),
+            data: packet.payload.to_vec(),
+        };
+
+        use crate::coding::fountain::ReceiveOutcome;
+        let outcome = self.fountain_decoder.receive_with_outcome(fountain_packet);
+        match outcome {
+            ReceiveOutcome::AcceptedRankUp => {
+                self.received_packets += 1;
+                self.last_rank_up_seq = Some(packet.lt_seq as u32);
+            }
+            ReceiveOutcome::AcceptedNoRankUp => {
+                self.received_packets += 1;
+                self.stalled_packets += 1;
+                self.dependent_packets += 1;
+            }
+            ReceiveOutcome::DuplicateSeq => {
+                self.duplicate_packets += 1;
+            }
+            ReceiveOutcome::InvalidPacket => {
+                self.parse_error_packets += 1;
+            }
+        }
+
+        if let Some(data) = self.fountain_decoder.decode() {
+            self.recovered_data = Some(data);
+        }
+        Ok(())
     }
 
     fn rebuild_fountain_decoder(&mut self, fountain_k: usize) {

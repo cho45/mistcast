@@ -155,14 +155,52 @@ pub fn decode(coded_bits: &[u8]) -> Vec<u8> {
 /// `llrs` は coded bit ごとの対数尤度比 (LLR)。
 /// 正: bit=0 を支持、負: bit=1 を支持。
 pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
+    decode_soft_list(llrs, 1)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Copy)]
+struct ListSurvivor {
+    valid: bool,
+    prev_state: u8,
+    prev_rank: usize,
+    bit: u8,
+}
+
+impl ListSurvivor {
+    #[inline]
+    fn invalid() -> Self {
+        Self {
+            valid: false,
+            prev_state: 0,
+            prev_rank: 0,
+            bit: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ListTransition {
+    score: f32,
+    prev_state: u8,
+    prev_rank: usize,
+    bit: u8,
+}
+
+/// Viterbiデコーダ (ソフト判定, LLR入力, List出力)
+///
+/// `list_size` 個までの候補系列をスコア順に返す（先頭が最尤）。
+pub fn decode_soft_list(llrs: &[f32], list_size: usize) -> Vec<Vec<u8>> {
     assert!(llrs.len().is_multiple_of(2), "LLR列は偶数長であること");
+    let list_size = list_size.max(1);
     let num_symbols = llrs.len() / 2;
 
     const NEG_INF: f32 = f32::NEG_INFINITY;
-    let mut path_metrics = vec![NEG_INF; NUM_STATES];
-    path_metrics[0] = 0.0;
-
-    let mut survivors: Vec<Vec<u8>> = Vec::with_capacity(num_symbols);
+    let mut path_metrics = vec![vec![NEG_INF; list_size]; NUM_STATES];
+    path_metrics[0][0] = 0.0;
+    let mut survivors = Vec::with_capacity(num_symbols);
 
     let data_len = num_symbols.saturating_sub(CONSTRAINT_LEN - 1);
 
@@ -170,49 +208,91 @@ pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
         let l0 = llrs[sym_idx * 2];
         let l1 = llrs[sym_idx * 2 + 1];
 
-        let mut new_metrics = vec![NEG_INF; NUM_STATES];
-        let mut survivor = vec![0u8; NUM_STATES];
+        let mut new_metrics = vec![vec![NEG_INF; list_size]; NUM_STATES];
+        let mut survivor_step = vec![vec![ListSurvivor::invalid(); list_size]; NUM_STATES];
+        let mut candidates = (0..NUM_STATES)
+            .map(|_| Vec::<ListTransition>::with_capacity(list_size * 2))
+            .collect::<Vec<_>>();
 
         let bit_end = if sym_idx >= data_len { 1u8 } else { 2u8 };
 
-        for (prev_state, &metric) in path_metrics.iter().enumerate().take(NUM_STATES) {
-            if !metric.is_finite() {
-                continue;
-            }
-            for bit in 0u8..bit_end {
-                let (v1, v2) = conv_output(prev_state as u8, bit);
-                let branch_score = llr_score(l0, v1) + llr_score(l1, v2);
-                let ns = next_state(prev_state as u8, bit) as usize;
-                let total = metric + branch_score;
-                if total > new_metrics[ns] {
-                    new_metrics[ns] = total;
-                    survivor[ns] = prev_state as u8;
+        for (prev_state, prev_metrics) in path_metrics.iter().enumerate().take(NUM_STATES) {
+            for (prev_rank, &metric) in prev_metrics.iter().enumerate().take(list_size) {
+                if !metric.is_finite() {
+                    continue;
+                }
+                for bit in 0u8..bit_end {
+                    let (v1, v2) = conv_output(prev_state as u8, bit);
+                    let branch_score = llr_score(l0, v1) + llr_score(l1, v2);
+                    let ns = next_state(prev_state as u8, bit) as usize;
+                    candidates[ns].push(ListTransition {
+                        score: metric + branch_score,
+                        prev_state: prev_state as u8,
+                        prev_rank,
+                        bit,
+                    });
                 }
             }
         }
 
-        path_metrics = new_metrics;
-        survivors.push(survivor);
-    }
-
-    let best_end_state = 0;
-    let mut decoded = vec![0u8; data_len];
-    let mut state = best_end_state as u8;
-
-    for t in (0..num_symbols).rev() {
-        let prev = survivors[t][state as usize];
-        let bit = if next_state(prev, 1) == state {
-            1u8
-        } else {
-            0u8
-        };
-        if t < data_len {
-            decoded[t] = bit;
+        for state in 0..NUM_STATES {
+            let cands = &mut candidates[state];
+            cands.sort_by(|a, b| b.score.total_cmp(&a.score));
+            let take = cands.len().min(list_size);
+            for rank in 0..take {
+                let c = cands[rank];
+                new_metrics[state][rank] = c.score;
+                survivor_step[state][rank] = ListSurvivor {
+                    valid: true,
+                    prev_state: c.prev_state,
+                    prev_rank: c.prev_rank,
+                    bit: c.bit,
+                };
+            }
         }
-        state = prev;
+
+        path_metrics = new_metrics;
+        survivors.push(survivor_step);
     }
 
-    decoded
+    let mut ranked = path_metrics[0]
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, s)| s.is_finite())
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let mut outputs = Vec::with_capacity(ranked.len().min(list_size));
+    for (rank0, _) in ranked.into_iter().take(list_size) {
+        let mut decoded = vec![0u8; data_len];
+        let mut state = 0usize;
+        let mut rank = rank0;
+        let mut valid_path = true;
+
+        for t in (0..num_symbols).rev() {
+            if rank >= list_size {
+                valid_path = false;
+                break;
+            }
+            let sv = survivors[t][state][rank];
+            if !sv.valid {
+                valid_path = false;
+                break;
+            }
+            if t < data_len {
+                decoded[t] = sv.bit;
+            }
+            state = sv.prev_state as usize;
+            rank = sv.prev_rank as usize;
+        }
+
+        if valid_path && !outputs.iter().any(|v| v == &decoded) {
+            outputs.push(decoded);
+        }
+    }
+
+    outputs
 }
 
 #[inline]
@@ -369,6 +449,47 @@ mod tests {
         let d1 = decode_soft(&scaled_llr);
         assert_eq!(d0, d1);
         assert_eq!(d0, original);
+    }
+
+    #[test]
+    fn test_soft_decode_list_k1_matches_decode_soft() {
+        let original: Vec<u8> = (0..80u32).map(|i| ((i * 31 + 3) % 2) as u8).collect();
+        let coded = encode(&original);
+        let llrs: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 1.2 } else { -1.2 })
+            .collect();
+        let d0 = decode_soft(&llrs);
+        let list = decode_soft_list(&llrs, 1);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0], d0);
+    }
+
+    #[test]
+    fn test_soft_decode_list_contains_best_path() {
+        let original: Vec<u8> = (0..80u32).map(|i| ((i * 19 + 11) % 2) as u8).collect();
+        let coded = encode(&original);
+        let mut llrs = Vec::with_capacity(coded.len());
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for &b in &coded {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let u = (state as u32) as f32 / u32::MAX as f32; // [0,1]
+            let noise = (u * 2.0 - 1.0) * 1.9; // [-1.9, 1.9]
+            let sym = if b == 0 { 1.0 } else { -1.0 };
+            llrs.push(sym + noise);
+        }
+        let best = decode_soft(&llrs);
+        let list = decode_soft_list(&llrs, 4);
+        assert!(!list.is_empty());
+        assert_eq!(list[0], best);
+    }
+
+    #[test]
+    #[should_panic(expected = "LLR列は偶数長であること")]
+    fn test_soft_decode_list_panics_on_odd_llr_len() {
+        let _ = decode_soft_list(&[1.0, -1.0, 0.5], 4);
     }
 
     #[test]
