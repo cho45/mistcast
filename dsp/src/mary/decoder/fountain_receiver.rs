@@ -7,7 +7,7 @@ use crate::coding::fountain::{
     reconstruct_packet_coefficients, FountainDecoder, FountainPacket, ReceiveOutcome,
 };
 use crate::frame::packet::Packet;
-use crate::mary::decoder_stats::DecoderStats;
+use super::decoder_stats::DecoderStats;
 
 pub(crate) struct PacketReceiveResult {
     pub recovered_data: Option<Vec<u8>>,

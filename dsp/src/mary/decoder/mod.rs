@@ -7,22 +7,28 @@
 //! 4. Max-Log-MAP LLR計算
 //! 5. Fountainデコーディング
 
+mod decoder_stats;
+mod equalization;
+mod fountain_receiver;
+mod packet_decoder;
+mod signal_pipeline;
+mod tracking;
+
 use crate::coding::fountain::{FountainDecoder, FountainParams};
 use crate::common::equalization::MmseSettings;
 use crate::common::walsh::WalshCorrelator;
 use crate::frame::packet::Packet;
-use crate::mary::decoder_stats::DecoderStats;
+use self::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
-use crate::mary::equalization::{EqualizationController, postprocess_cir};
-use crate::mary::fountain_receiver;
+use self::equalization::{EqualizationController, KnownIntervalPathMseInput, postprocess_cir};
 use crate::mary::interleaver_config;
-use crate::mary::packet_decoder::{
-    self, LlrCallback, PacketDecodeBuffers, PacketDecodeOptions,
+use self::packet_decoder::{
+    LlrCallback, PacketDecodeBuffers, PacketDecodeOptions, PacketDecodeRuntime,
 };
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
-use crate::mary::signal_pipeline::SignalPipeline;
+use self::signal_pipeline::SignalPipeline;
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector};
-use crate::mary::tracking::{self, TrackingState};
+use self::tracking::TrackingState;
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 use num_complex::Complex32;
@@ -32,8 +38,8 @@ const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.20;
 const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 
 // DecodeProgressとCirNormalizationModeは各モジュールから再エクスポート
-pub use crate::mary::decoder_stats::DecodeProgress;
-pub use crate::mary::equalization::CirNormalizationMode;
+pub use self::decoder_stats::DecodeProgress;
+pub use self::equalization::CirNormalizationMode;
 
 /// デコーダの状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -635,15 +641,17 @@ impl Decoder {
         if self.equalization.equalizer_ref().is_some() {
             let known_end_idx = preamble_start_idx + self.sync_detector.known_interval_len_samples();
             let (mse_raw, mse_fde) = self.equalization.known_interval_path_mse(
-                &self.sync_detector,
-                &self.cir_buffer,
-                &self.pipeline.sample_buffer_i,
-                &self.pipeline.sample_buffer_q,
-                preamble_start_idx,
-                known_end_idx,
-                cir_len,
-                mmse,
-                chq.cfo_rad_per_sample,
+                KnownIntervalPathMseInput {
+                    sync_detector: &self.sync_detector,
+                    cir: &self.cir_buffer,
+                    sample_buffer_i: &self.pipeline.sample_buffer_i,
+                    sample_buffer_q: &self.pipeline.sample_buffer_q,
+                    preamble_start_idx,
+                    known_end_idx,
+                    cir_len,
+                    mmse,
+                    cfo_rad_per_sample: chq.cfo_rad_per_sample,
+                },
             );
             pred_mse_fde = mse_fde;
             pred_mse_raw = mse_raw;
@@ -766,12 +774,14 @@ impl Decoder {
         };
 
         let result = packet_decoder::process_packet_core(
-            &self.demodulator,
-            &mut prev_phase,
-            &mut tracking_state,
-            &mut self.stats,
-            &mut self.packet_decode_buffers,
-            &mut self.llr_callback,
+            PacketDecodeRuntime {
+                demodulator: &self.demodulator,
+                prev_phase: &mut prev_phase,
+                tracking_state: &mut tracking_state,
+                stats: &mut self.stats,
+                buffers: &mut self.packet_decode_buffers,
+                llr_callback: &mut self.llr_callback,
+            },
             &options,
             |symbol_start, timing_offset, sample_shift| {
                 despread_symbol_with_timing_from(
@@ -1946,7 +1956,7 @@ mod tests {
         multipath_signal.extend(vec![0.0; 10000]);
 
         // 3. 軽微なノイズ重畳 (SNR ~25dB)
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x5EED_FDE);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x05EE_DFDE);
         for s in multipath_signal.iter_mut() {
             *s += (rng.gen::<f32>() - 0.5) * 0.05;
         }

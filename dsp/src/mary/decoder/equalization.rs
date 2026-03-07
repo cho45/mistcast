@@ -77,6 +77,18 @@ pub struct EqualizationController {
     cir_tap_threshold_alpha: f32,
 }
 
+pub struct KnownIntervalPathMseInput<'a> {
+    pub sync_detector: &'a MarySyncDetector,
+    pub cir: &'a [Complex32],
+    pub sample_buffer_i: &'a [f32],
+    pub sample_buffer_q: &'a [f32],
+    pub preamble_start_idx: usize,
+    pub known_end_idx: usize,
+    pub cir_len: usize,
+    pub mmse: MmseSettings,
+    pub cfo_rad_per_sample: f32,
+}
+
 impl EqualizationController {
     pub fn new(config: &DspConfig, fde_enabled: bool) -> Self {
         let equalizer = if fde_enabled {
@@ -181,18 +193,18 @@ impl EqualizationController {
     }
 
     /// 既知区間パスMSEを計算
-    pub fn known_interval_path_mse(
-        &mut self,
-        sync_detector: &MarySyncDetector,
-        cir: &[Complex32],
-        sample_buffer_i: &[f32],
-        sample_buffer_q: &[f32],
-        preamble_start_idx: usize,
-        known_end_idx: usize,
-        cir_len: usize,
-        mmse: MmseSettings,
-        cfo_rad_per_sample: f32,
-    ) -> (f32, f32) {
+    pub fn known_interval_path_mse(&mut self, input: KnownIntervalPathMseInput<'_>) -> (f32, f32) {
+        let KnownIntervalPathMseInput {
+            sync_detector,
+            cir,
+            sample_buffer_i,
+            sample_buffer_q,
+            preamble_start_idx,
+            known_end_idx,
+            cir_len,
+            mmse,
+            cfo_rad_per_sample,
+        } = input;
         if known_end_idx > sample_buffer_i.len() || known_end_idx > sample_buffer_q.len() {
             return (f32::NAN, f32::NAN);
         }
@@ -300,56 +312,6 @@ impl EqualizationController {
         added
     }
 
-    /// 等化器にサンプルを投入して処理
-    pub fn equalize(
-        &mut self,
-        input: &[Complex32],
-        raw_consumed: usize,
-        pending_warmup_input_samples: usize,
-        remaining_samples_in_frame: isize,
-        sample_buffer_len: usize,
-    ) -> usize {
-        if input.is_empty() {
-            return 0;
-        }
-
-        // A. 等化器へ投入済みオフセットを先に進める（drainで前方を削った分は後で戻す）
-        self.equalizer_input_offset = self.equalizer_input_offset.saturating_add(raw_consumed);
-
-        // B. 生バッファの物理削除情報を返す
-        let limit =
-            pending_warmup_input_samples + remaining_samples_in_frame.max(0) as usize;
-        let to_drain_raw = raw_consumed.min(limit).min(sample_buffer_len);
-
-        // C. 等化処理
-        if self.current_frame_use_fde {
-            if let Some(eq) = self.equalizer.as_mut() {
-                let output_len = input.len() + eq.overlap_len();
-                if self.equalized_buffer.capacity() < output_len {
-                    self.equalized_buffer.reserve(output_len);
-                }
-
-                let prev_len = self.equalized_buffer.len();
-                eq.process(input, &mut self.equalized_buffer);
-                eq.flush(&mut self.equalized_buffer);
-
-                // オーバーラップ分を維持しつつ、有効な出力のみを残す
-                let drain_to = prev_len;
-                if drain_to > 0 && drain_to < self.equalized_buffer.len() {
-                    self.equalized_buffer.drain(0..drain_to);
-                }
-            }
-        } else {
-            // FDE未使用: 生入力をそのままコピー
-            self.equalized_buffer.extend_from_slice(input);
-        }
-
-        // D. オフセットを戻す
-        self.equalizer_input_offset = self.equalizer_input_offset.saturating_sub(to_drain_raw);
-
-        to_drain_raw
-    }
-
     /// 等化器のCIRとMMSEパラメータを設定
     pub fn setup_equalizer(&mut self, cir: &[Complex32], mmse: MmseSettings) {
         if let Some(eq) = self.equalizer.as_mut() {
@@ -382,30 +344,6 @@ impl EqualizationController {
         self.fde_auto_path_select
     }
 
-    pub fn fde_selected_frames(&self) -> usize {
-        self.fde_selected_frames
-    }
-
-    pub fn raw_selected_frames(&self) -> usize {
-        self.raw_selected_frames
-    }
-
-    pub fn last_path_used(&self) -> i32 {
-        self.last_path_used
-    }
-
-    pub fn last_pred_mse_fde(&self) -> f32 {
-        self.last_pred_mse_fde
-    }
-
-    pub fn last_pred_mse_raw(&self) -> f32 {
-        self.last_pred_mse_raw
-    }
-
-    pub fn last_est_snr_db(&self) -> f32 {
-        self.last_est_snr_db
-    }
-
     pub fn fde_mmse_settings(&self) -> MmseSettings {
         self.fde_mmse_settings
     }
@@ -423,10 +361,6 @@ impl EqualizationController {
         self.equalizer_input_offset = 0;
     }
 
-    fn set_current_frame_use_fde(&mut self, value: bool) {
-        self.current_frame_use_fde = value;
-    }
-
     pub fn set_equalizer_input_offset(&mut self, value: usize) {
         self.equalizer_input_offset = value;
     }
@@ -439,9 +373,6 @@ impl EqualizationController {
         }
     }
 
-    pub fn take_equalized_buffer(&mut self) -> Vec<Complex32> {
-        std::mem::take(&mut self.equalized_buffer)
-    }
 }
 
 #[cfg(test)]

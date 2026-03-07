@@ -7,11 +7,11 @@ use crate::coding::fec;
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::Packet;
-use crate::mary::decoder_stats::DecoderStats;
+use super::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
 use crate::mary::params::PAYLOAD_SPREAD_FACTOR;
-use crate::mary::tracking::{
+use super::tracking::{
     self, TrackingState, PHASE_ERR_ABS_THRESH_0P5_RAD, PHASE_ERR_ABS_THRESH_1P0_RAD,
     TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH, TRACKING_PHASE_ERR_GATE_RAD,
     TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_PROP_GAIN_OFF,
@@ -66,19 +66,46 @@ pub(crate) struct PacketProcessResult {
     pub packet: Option<Packet>,
 }
 
+pub(crate) struct PacketDecodeRuntime<'a> {
+    pub demodulator: &'a Demodulator,
+    pub prev_phase: &'a mut Complex32,
+    pub tracking_state: &'a mut TrackingState,
+    pub stats: &'a mut DecoderStats,
+    pub buffers: &'a mut PacketDecodeBuffers,
+    pub llr_callback: &'a mut Option<LlrCallback>,
+}
+
+struct DecodeLayout {
+    rows: usize,
+    cols: usize,
+    interleaved_bits: usize,
+    fec_bits: usize,
+    payload_bits_len: usize,
+}
+
+struct DecodeCandidateContext<'a> {
+    stats: &'a mut DecoderStats,
+    buffers: &'a mut PacketDecodeBuffers,
+    llr_callback: &'a mut Option<LlrCallback>,
+    options: &'a PacketDecodeOptions,
+}
+
 pub(crate) fn process_packet_core<D>(
-    demodulator: &Demodulator,
-    prev_phase: &mut Complex32,
-    tracking_state: &mut TrackingState,
-    stats: &mut DecoderStats,
-    buffers: &mut PacketDecodeBuffers,
-    llr_callback: &mut Option<LlrCallback>,
+    runtime: PacketDecodeRuntime<'_>,
     options: &PacketDecodeOptions,
     mut despread_symbol: D,
 ) -> PacketProcessResult
 where
     D: FnMut(usize, f32, f32) -> Option<[Complex32; 16]>,
 {
+    let PacketDecodeRuntime {
+        demodulator,
+        prev_phase,
+        tracking_state,
+        stats,
+        buffers,
+        llr_callback,
+    } = runtime;
     let interleaved_bits = interleaver_config::interleaved_bits();
     let expected_symbols = interleaver_config::mary_symbols();
     let timing_limit = options.spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
@@ -266,32 +293,34 @@ fn decode_llrs(
     let cols = interleaver_config::INTERLEAVER_COLS;
     let interleaved_bits = interleaver_config::interleaved_bits();
     let packet_chunk_bits = interleaver_config::mary_aligned_bits();
+    let layout = DecodeLayout {
+        rows,
+        cols,
+        interleaved_bits,
+        fec_bits,
+        payload_bits_len: p_bits_len,
+    };
+    let mut context = DecodeCandidateContext {
+        stats,
+        buffers,
+        llr_callback,
+        options,
+    };
     for packet_llrs in llrs.chunks(packet_chunk_bits) {
         if packet_llrs.len() < interleaved_bits {
             break;
         }
 
         let valid_llrs = &packet_llrs[..interleaved_bits];
-        match decode_single_llr_candidate(
-            valid_llrs,
-            rows,
-            cols,
-            interleaved_bits,
-            fec_bits,
-            p_bits_len,
-            stats,
-            buffers,
-            llr_callback,
-            options,
-        ) {
+        match decode_single_llr_candidate(valid_llrs, &layout, &mut context) {
             Ok(packet) => {
                 return Some(packet);
             }
             Err(PacketDecodeError::Crc) => {
-                stats.crc_error_packets += 1;
+                context.stats.crc_error_packets += 1;
             }
             Err(PacketDecodeError::Parse) => {
-                stats.parse_error_packets += 1;
+                context.stats.parse_error_packets += 1;
             }
         }
     }
@@ -300,59 +329,60 @@ fn decode_llrs(
 
 fn decode_single_llr_candidate(
     llrs: &[f32],
-    rows: usize,
-    cols: usize,
-    interleaved_bits: usize,
-    fec_bits: usize,
-    p_bits_len: usize,
-    stats: &mut DecoderStats,
-    buffers: &mut PacketDecodeBuffers,
-    llr_callback: &mut Option<LlrCallback>,
-    options: &PacketDecodeOptions,
+    layout: &DecodeLayout,
+    context: &mut DecodeCandidateContext<'_>,
 ) -> Result<Packet, PacketDecodeError> {
-    let interleaver = BlockInterleaver::new(rows, cols);
-    buffers.deinterleave_buffer.resize(interleaved_bits, 0.0);
+    let interleaver = BlockInterleaver::new(layout.rows, layout.cols);
+    context
+        .buffers
+        .deinterleave_buffer
+        .resize(layout.interleaved_bits, 0.0);
     interleaver.deinterleave_f32_in_place(
         llrs,
-        &mut buffers.deinterleave_buffer[..interleaved_bits],
+        &mut context.buffers.deinterleave_buffer[..layout.interleaved_bits],
     );
 
     let mut scrambler = Scrambler::default();
-    for llr in buffers.deinterleave_buffer[..interleaved_bits].iter_mut() {
+    for llr in context.buffers.deinterleave_buffer[..layout.interleaved_bits].iter_mut() {
         if scrambler.next_bit() == 1 {
             *llr = -*llr;
         }
     }
 
-    if let Some(callback) = llr_callback.as_mut() {
-        callback(&buffers.deinterleave_buffer[..interleaved_bits]);
+    if let Some(callback) = context.llr_callback.as_mut() {
+        callback(&context.buffers.deinterleave_buffer[..layout.interleaved_bits]);
     }
 
-    let first_candidates =
-        fec::decode_soft_list(&buffers.deinterleave_buffer[..fec_bits], options.viterbi_list_size);
-    let first_attempt = try_decode_soft_list_candidates(first_candidates, p_bits_len);
+    let first_candidates = fec::decode_soft_list(
+        &context.buffers.deinterleave_buffer[..layout.fec_bits],
+        context.options.viterbi_list_size,
+    );
+    let first_attempt = try_decode_soft_list_candidates(first_candidates, layout.payload_bits_len);
     if let Ok(packet) = first_attempt {
         return Ok(packet);
     }
 
     let mut saw_crc = matches!(first_attempt, Err(PacketDecodeError::Crc));
 
-    if options.llr_erasure_second_pass_enabled && saw_crc {
-        stats.llr_second_pass_attempts += 1;
-        buffers.erasure_llr_buffer.resize(interleaved_bits, 0.0);
-        buffers.erasure_llr_buffer[..interleaved_bits]
-            .copy_from_slice(&buffers.deinterleave_buffer[..interleaved_bits]);
+    if context.options.llr_erasure_second_pass_enabled && saw_crc {
+        context.stats.llr_second_pass_attempts += 1;
+        context
+            .buffers
+            .erasure_llr_buffer
+            .resize(layout.interleaved_bits, 0.0);
+        context.buffers.erasure_llr_buffer[..layout.interleaved_bits]
+            .copy_from_slice(&context.buffers.deinterleave_buffer[..layout.interleaved_bits]);
         apply_llr_erasure_quantile(
-            &mut buffers.erasure_llr_buffer[..fec_bits],
-            options.llr_erasure_quantile,
+            &mut context.buffers.erasure_llr_buffer[..layout.fec_bits],
+            context.options.llr_erasure_quantile,
         );
         let second_candidates = fec::decode_soft_list(
-            &buffers.erasure_llr_buffer[..fec_bits],
-            options.llr_erasure_list_size,
+            &context.buffers.erasure_llr_buffer[..layout.fec_bits],
+            context.options.llr_erasure_list_size,
         );
-        match try_decode_soft_list_candidates(second_candidates, p_bits_len) {
+        match try_decode_soft_list_candidates(second_candidates, layout.payload_bits_len) {
             Ok(packet) => {
-                stats.llr_second_pass_rescued += 1;
+                context.stats.llr_second_pass_rescued += 1;
                 return Ok(packet);
             }
             Err(PacketDecodeError::Crc) => saw_crc = true,

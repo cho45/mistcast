@@ -49,29 +49,9 @@ impl TrackingState {
         }
     }
 
+    #[cfg(test)]
     pub fn reset(&mut self) {
         *self = Self::new();
-    }
-
-    /// 同期ワードから追跡状態を初期化
-    pub fn initialize_from_sync_word(
-        sync_word_phase: Complex32,
-        initial_cfo_hz: f32,
-        sample_rate: f32,
-        symbol_rate: f32,
-    ) -> Self {
-        // CFOから初期位相レートを計算
-        let phase_rate_per_sample = 2.0 * std::f32::consts::PI * initial_cfo_hz / sample_rate;
-        let samples_per_symbol = sample_rate / symbol_rate;
-        let phase_rate = phase_rate_per_sample * samples_per_symbol;
-
-        Self {
-            phase_ref: sync_word_phase,
-            phase_rate,
-            timing_offset: 0.0,
-            timing_rate: 0.0,
-            phase_gate_enabled: false,
-        }
     }
 }
 
@@ -174,47 +154,6 @@ pub fn next_phase_gate_enabled(
             TRACKING_PHASE_SNR_PROXY_ON_MIN,
         );
         pass_count >= 2
-    }
-}
-
-/// 位相誤差が閾値を超えているかチェック
-#[inline]
-pub fn phase_error_exceeds_threshold(phase_err_abs: f32) -> bool {
-    phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
-}
-
-/// 位相誤差をクリップ
-#[inline]
-pub fn clip_phase_error(phase_err: f32, enabled: bool) -> f32 {
-    if enabled {
-        phase_err.clamp(-TRACKING_PHASE_ERR_GATE_RAD, TRACKING_PHASE_ERR_GATE_RAD)
-    } else {
-        phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP)
-    }
-}
-
-/// 追跡パラメータ構造体
-pub struct TrackingParams {
-    pub timing_limit_chip: f32,
-    pub timing_rate_limit_chip: f32,
-    pub spc: usize,
-}
-
-impl TrackingParams {
-    pub fn from_config(spc: usize) -> Self {
-        Self {
-            timing_limit_chip: TRACKING_TIMING_LIMIT_CHIP,
-            timing_rate_limit_chip: TRACKING_TIMING_RATE_LIMIT_CHIP,
-            spc,
-        }
-    }
-
-    pub fn timing_limit(&self) -> f32 {
-        self.timing_limit_chip * self.spc as f32
-    }
-
-    pub fn timing_rate_limit(&self) -> f32 {
-        self.timing_rate_limit_chip * self.spc as f32
     }
 }
 

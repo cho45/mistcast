@@ -130,6 +130,7 @@ impl SignalPipeline {
     }
 
     /// バッファから指定数のサンプルを消費
+    #[cfg(test)]
     pub fn drain(&mut self, count: usize) {
         if count >= self.sample_buffer_i.len() {
             self.sample_buffer_i.clear();
@@ -141,6 +142,7 @@ impl SignalPipeline {
     }
 
     /// 利用可能なサンプル数を取得
+    #[cfg(test)]
     pub fn available_samples(&self) -> usize {
         self.sample_buffer_i.len()
     }
