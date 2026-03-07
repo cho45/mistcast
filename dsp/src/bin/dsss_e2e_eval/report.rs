@@ -109,9 +109,26 @@ struct ReportRow<'a> {
 }
 
 pub fn print_header(cli: &Cli) {
-    if matches!(cli.output, OutputFormat::Csv) {
-        let cols = selected_columns(cli);
-        println!("{}", cols.join(","));
+    match cli.output {
+        OutputFormat::Csv => {
+            let cols = selected_columns(cli);
+            println!("{}", cols.join(","));
+        }
+        OutputFormat::Table => {
+            let cols = selected_columns(cli);
+            let mut header_parts = vec![format!("{:<30}", "scenario")];
+            let mut sep_parts = vec![format!("{:-<30}", ":")];
+            for col in cols {
+                if col == "scenario" {
+                    continue;
+                }
+                header_parts.push(format!("{:<15}", col));
+                sep_parts.push(format!("{:-<15}", ":"));
+            }
+            println!("| {} |", header_parts.join(" | "));
+            println!("| {} |", sep_parts.join(" | "));
+        }
+        OutputFormat::Json => {}
     }
 }
 
@@ -198,14 +215,31 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
             println!("{}", serde_json::to_string(&json!(filtered)).unwrap());
         }
         OutputFormat::Table => {
-            println!(
-                "{:<40} | P={:.3} | BER={:.2e} | T={:.2}s | Goodput={:.1}bps",
-                scenario,
-                row.p_complete,
-                row.ber,
-                m.mean_completion_sec().unwrap_or(f32::NAN),
-                row.goodput_effective_bps
-            );
+            let cols = selected_columns(cli);
+            let json_val = serde_json::to_value(&row).unwrap();
+            let mut parts = vec![format!("{:<30}", scenario)];
+            for col in cols {
+                if col == "scenario" {
+                    continue;
+                }
+                let val = &json_val[col];
+                let s = if val.is_null() {
+                    "-".to_string()
+                } else if val.is_string() {
+                    val.as_str().unwrap().to_string()
+                } else if val.is_f64() {
+                    let f = val.as_f64().unwrap();
+                    if f.abs() < 1e-3 && f != 0.0 {
+                        format!("{:.2e}", f)
+                    } else {
+                        format!("{:.4}", f)
+                    }
+                } else {
+                    val.to_string()
+                };
+                parts.push(format!("{:<15}", s));
+            }
+            println!("| {} |", parts.join(" | "));
         }
     }
 }
