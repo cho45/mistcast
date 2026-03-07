@@ -590,7 +590,8 @@ mod tests {
     }
 
     #[test]
-    fn test_roc_curve_analysis() {
+    #[ignore = "diagnostic ROC report; expensive"]
+    fn test_roc_curve_analysis_diagnostic() {
         let config = crate::dsss::params::dsp_config_48k();
         let snr_db_list: &[f32] = &[-10.0, -6.0, -3.0, 0.0, 3.0, 6.0, 10.0];
         const NUM_TRIALS: usize = 100;
@@ -780,6 +781,68 @@ mod tests {
 
         let snr_0db_idx = snr_db_list.iter().position(|&s| s == 0.0).unwrap();
         assert!(auc_values[snr_0db_idx] >= 0.7);
+    }
+
+    #[test]
+    fn test_roc_curve_smoke() {
+        let config = crate::dsss::params::dsp_config_48k();
+        let detector = new_detector_default(config.clone());
+        const NUM_SIGNAL_TRIALS: usize = 20;
+        const NUM_NOISE_TRIALS: usize = 40;
+
+        let sf = config.spread_factor();
+        let spc = config.proc_samples_per_chip();
+        let sym_len = sf * spc;
+        let required_len = sym_len * (config.preamble_repeat + 1);
+
+        let ref_signal_power: f32 = {
+            let (i, q) = generate_signal_with_awgn_seeded(&config, 0, 60.0, 0);
+            let n = i.len().min(200);
+            if n == 0 {
+                1.0
+            } else {
+                (i[..n].iter().map(|&x| x * x).sum::<f32>()
+                    + q[..n].iter().map(|&x| x * x).sum::<f32>())
+                    / (2.0 * n as f32)
+            }
+        };
+        let signal_rms = ref_signal_power.sqrt();
+        let noise_sigma_0db = signal_rms / 2.0_f32.sqrt();
+
+        let mut false_positives = 0usize;
+        for trial in 0..NUM_NOISE_TRIALS {
+            let mut rng = StdRng::seed_from_u64(trial as u64 + 9000);
+            let dist = Normal::new(0.0, noise_sigma_0db as f64).unwrap();
+            let buf_len = required_len + 200;
+            let i: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
+            let q: Vec<f32> = (0..buf_len).map(|_| dist.sample(&mut rng) as f32).collect();
+            let (res, _) = detector.detect(&i, &q, 0);
+            if res.is_some() {
+                false_positives += 1;
+            }
+        }
+
+        let mut detections = 0usize;
+        for trial in 0..NUM_SIGNAL_TRIALS {
+            let (i, q) = generate_signal_with_awgn_seeded(&config, 500, 0.0, trial as u64 + 100);
+            let (res, _) = detector.detect(&i, &q, 0);
+            if res.is_some() {
+                detections += 1;
+            }
+        }
+
+        let false_positive_rate = false_positives as f64 / NUM_NOISE_TRIALS as f64;
+        let detection_rate = detections as f64 / NUM_SIGNAL_TRIALS as f64;
+        assert!(
+            false_positive_rate <= 0.10,
+            "Noise-only false positive rate too high: {:.1}%",
+            false_positive_rate * 100.0
+        );
+        assert!(
+            detection_rate >= 0.90,
+            "0dB detection rate too low: {:.1}%",
+            detection_rate * 100.0
+        );
     }
 
     #[test]
