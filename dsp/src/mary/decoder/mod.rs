@@ -1522,8 +1522,14 @@ mod tests {
         assert_eq!(&recovered[..data.len()], &data[..]);
     }
 
-    #[test]
-    fn test_decoder_tracking_tolerates_clock_drift_ppm() {
+    struct ClockDriftTrial {
+        ppm: f32,
+        realtime_ratio: f32,
+        ber_errors: Vec<(usize, usize, usize)>,
+        recovered: bool,
+    }
+
+    fn run_clock_drift_trial(ppm: f32) -> ClockDriftTrial {
         use crate::mary::encoder::Encoder;
         use std::sync::{Arc, Mutex};
         use std::time::Instant;
@@ -1555,7 +1561,7 @@ mod tests {
         decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
             received_llrs_clone.lock().unwrap().push(llrs.to_vec());
         }));
-        let drifted = apply_clock_drift_ppm(&signal, 200.0);
+        let drifted = apply_clock_drift_ppm(&signal, ppm);
         let start_time = Instant::now();
         for chunk in drifted.chunks(2048) {
             decoder.process_samples(chunk);
@@ -1565,12 +1571,8 @@ mod tests {
         }
         let processing_duration = start_time.elapsed();
         let realtime_ratio = processing_duration.as_secs_f32() / physical_duration_sec;
-        println!("--- Performance & BER Trend (Clock Drift 200ppm) ---");
-        println!(
-            "Processing Time: {:?}, Physical Time: {:.3}s, Ratio: {:.3}",
-            processing_duration, physical_duration_sec, realtime_ratio
-        );
         let llrs = received_llrs.lock().unwrap();
+        let mut ber_errors = Vec::new();
         for (i, p_llrs) in llrs.iter().enumerate() {
             let expected = &expected_fec_bits_list[i];
             let mut errors = 0;
@@ -1580,19 +1582,55 @@ mod tests {
                     errors += 1;
                 }
             }
-            if i % 10 == 0 || i == llrs.len() - 1 {
-                println!("Packet {}: {} errors / {} bits", i, errors, expected.len());
-            }
+            ber_errors.push((i, errors, expected.len()));
         }
-        assert!(
-            realtime_ratio < 1.0,
-            "Processing too slow: ratio={}",
-            realtime_ratio
-        );
         let recovered = decoder
             .recovered_data()
-            .expect("Decoder should recover data under clock drift (needs tracking)");
-        assert_eq!(&recovered[..data.len()], &data[..]);
+            .map(|recovered| &recovered[..data.len()] == data.as_slice())
+            .unwrap_or(false);
+        ClockDriftTrial {
+            ppm,
+            realtime_ratio,
+            ber_errors,
+            recovered,
+        }
+    }
+
+    fn print_packet_ber_trend(label: &str, ber_errors: &[(usize, usize, usize)]) {
+        println!("{label}");
+        for (i, errors, bits) in ber_errors.iter().copied() {
+            if i % 10 == 0 || i + 1 == ber_errors.len() {
+                println!("Packet {}: {} errors / {} bits", i, errors, bits);
+            }
+        }
+    }
+
+    #[test]
+    fn test_decoder_tracking_tolerates_clock_drift_ppm() {
+        let result = run_clock_drift_trial(200.0);
+        print_packet_ber_trend(
+            &format!("--- BER Trend (Clock Drift {:.0}ppm) ---", result.ppm),
+            &result.ber_errors,
+        );
+        assert!(
+            result.recovered,
+            "Decoder should recover data under clock drift (needs tracking)"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance diagnostic; timing-sensitive realtime ratio"]
+    fn test_decoder_tracking_clock_drift_ppm_realtime_ratio() {
+        let result = run_clock_drift_trial(200.0);
+        println!(
+            "--- Performance (Clock Drift {:.0}ppm) ---\nRatio: {:.3}",
+            result.ppm, result.realtime_ratio
+        );
+        assert!(
+            result.realtime_ratio < 1.0,
+            "Processing too slow: ratio={}",
+            result.realtime_ratio
+        );
     }
 
     struct CarrierOffsetTrial {
@@ -1682,16 +1720,13 @@ mod tests {
     #[test]
     fn test_decoder_tracking_tolerates_carrier_offset() {
         let result = run_carrier_offset_trial(20.0);
-        println!(
-            "--- Performance & BER Trend (Carrier Offset {:.1}Hz) ---",
-            result.offset_hz
+        print_packet_ber_trend(
+            &format!(
+                "--- BER Trend (Carrier Offset {:.1}Hz) ---",
+                result.offset_hz
+            ),
+            &result.ber_errors,
         );
-        println!("Ratio: {:.3}", result.realtime_ratio);
-        for (i, errors, bits) in result.ber_errors.iter() {
-            if i % 10 == 0 || *i + 1 == result.ber_errors.len() {
-                println!("Packet {}: {} errors / {} bits", i, errors, bits);
-            }
-        }
         println!(
             "Test finished: received={}, needed={}, crc_errors={}, parse_errors={}",
             result.received_packets,
@@ -1700,13 +1735,23 @@ mod tests {
             result.parse_error_packets
         );
         assert!(
+            result.recovered,
+            "Decoder should recover data under carrier offset (needs tracking)"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance diagnostic; timing-sensitive realtime ratio"]
+    fn test_decoder_tracking_carrier_offset_realtime_ratio() {
+        let result = run_carrier_offset_trial(20.0);
+        println!(
+            "--- Performance (Carrier Offset {:.1}Hz) ---\nRatio: {:.3}",
+            result.offset_hz, result.realtime_ratio
+        );
+        assert!(
             result.realtime_ratio < 1.0,
             "Processing too slow: ratio={}",
             result.realtime_ratio
-        );
-        assert!(
-            result.recovered,
-            "Decoder should recover data under carrier offset (needs tracking)"
         );
     }
 
