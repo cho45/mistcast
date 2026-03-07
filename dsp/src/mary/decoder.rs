@@ -7,12 +7,13 @@
 //! 4. Max-Log-MAP LLR計算
 //! 5. Fountainデコーディング
 
-use crate::coding::fountain::{FountainDecoder, FountainPacket, FountainParams};
+use crate::coding::fountain::{FountainDecoder, FountainParams};
 use crate::common::walsh::WalshCorrelator;
 use crate::frame::packet::Packet;
 use crate::mary::decoder_stats::DecoderStats;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::equalization::{EqualizationController, postprocess_cir};
+use crate::mary::fountain_receiver;
 use crate::mary::interleaver_config;
 use crate::mary::packet_decoder::{
     self, LlrCallback, PacketDecodeBuffers, PacketDecodeOptions,
@@ -683,38 +684,12 @@ impl Decoder {
             self.rebuild_fountain_decoder(pkt_k);
         }
 
-        self.stats.last_packet_seq = Some(packet.lt_seq as u32);
-
-        let fountain_packet = FountainPacket {
-            seq: packet.lt_seq as u32,
-            coefficients: crate::coding::fountain::reconstruct_packet_coefficients(
-                packet.lt_seq as u32,
-                self.fountain_decoder.params().k,
-            ),
-            data: packet.payload.to_vec(),
-        };
-
-        use crate::coding::fountain::ReceiveOutcome;
-        let outcome = self.fountain_decoder.receive_with_outcome(fountain_packet);
-        match outcome {
-            ReceiveOutcome::AcceptedRankUp => {
-                self.stats.received_packets += 1;
-                self.stats.last_rank_up_seq = Some(packet.lt_seq as u32);
-            }
-            ReceiveOutcome::AcceptedNoRankUp => {
-                self.stats.received_packets += 1;
-                self.stats.stalled_packets += 1;
-                self.stats.dependent_packets += 1;
-            }
-            ReceiveOutcome::DuplicateSeq => {
-                self.stats.duplicate_packets += 1;
-            }
-            ReceiveOutcome::InvalidPacket => {
-                self.stats.parse_error_packets += 1;
-            }
-        }
-
-        if let Some(data) = self.fountain_decoder.decode() {
+        let result = fountain_receiver::receive_packet(
+            &mut self.fountain_decoder,
+            &mut self.stats,
+            packet,
+        );
+        if let Some(data) = result.recovered_data {
             self.recovered_data = Some(data);
         }
     }

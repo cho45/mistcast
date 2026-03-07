@@ -8,6 +8,7 @@ pub mod decoder_stats;
 pub mod demodulator;
 pub mod encoder;
 pub mod equalization;
+pub mod fountain_receiver;
 pub mod modulator;
 pub mod packet_decoder;
 pub mod params;
