@@ -172,8 +172,11 @@ impl EqualizationController {
         self.cir_tap_threshold_alpha = tap_threshold_alpha.max(0.0);
     }
 
-    /// 既知区間パスMSEを計算
-    pub fn known_interval_path_mse(&mut self, input: KnownIntervalPathMseInput<'_>) -> (f32, f32) {
+    /// live equalizer を一時的に再構成して、既知区間パスMSEを評価する
+    pub fn evaluate_known_interval_path_mse_with_live_equalizer(
+        &mut self,
+        input: KnownIntervalPathMseInput<'_>,
+    ) -> (f32, f32) {
         let KnownIntervalPathMseInput {
             sync_detector,
             cir,

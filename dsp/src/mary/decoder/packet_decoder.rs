@@ -3,20 +3,20 @@
 //! 等化済みシンボル列から1パケット分の LLR を生成し、
 //! デインターリーブ・デスクランブル・soft-list 復号までを担当する。
 
-use crate::coding::fec;
-use crate::coding::interleaver::BlockInterleaver;
-use crate::coding::scrambler::Scrambler;
-use crate::frame::packet::Packet;
 use super::decoder_stats::DecoderStats;
-use crate::mary::demodulator::Demodulator;
-use crate::mary::interleaver_config;
-use crate::mary::params::PAYLOAD_SPREAD_FACTOR;
 use super::tracking::{
     self, TrackingState, PHASE_ERR_ABS_THRESH_0P5_RAD, PHASE_ERR_ABS_THRESH_1P0_RAD,
     TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH, TRACKING_PHASE_ERR_GATE_RAD,
     TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_PROP_GAIN_OFF,
     TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_STEP_CLAMP,
 };
+use crate::coding::fec;
+use crate::coding::interleaver::BlockInterleaver;
+use crate::coding::scrambler::Scrambler;
+use crate::frame::packet::Packet;
+use crate::mary::demodulator::Demodulator;
+use crate::mary::interleaver_config;
+use crate::mary::params::PAYLOAD_SPREAD_FACTOR;
 use num_complex::Complex32;
 
 /// LLR観測用コールバック型
@@ -61,7 +61,6 @@ impl PacketDecodeBuffers {
 }
 
 pub(crate) struct PacketProcessResult {
-    pub success: bool,
     pub processed: bool,
     pub packet: Option<Packet>,
 }
@@ -117,17 +116,15 @@ where
     for sym_idx in 0..expected_symbols {
         let symbol_start = options.spc + sym_idx * PAYLOAD_SPREAD_FACTOR * options.spc;
 
-        let on_corrs = if let Some(c) =
-            despread_symbol(symbol_start, tracking_state.timing_offset, 0.0)
-        {
-            c
-        } else {
-            return PacketProcessResult {
-                success: false,
-                processed: false,
-                packet: None,
+        let on_corrs =
+            if let Some(c) = despread_symbol(symbol_start, tracking_state.timing_offset, 0.0) {
+                c
+            } else {
+                return PacketProcessResult {
+                    processed: false,
+                    packet: None,
+                };
             };
-        };
         let early_corrs = if let Some(c) = despread_symbol(
             symbol_start,
             tracking_state.timing_offset,
@@ -136,7 +133,6 @@ where
             c
         } else {
             return PacketProcessResult {
-                success: false,
                 processed: false,
                 packet: None,
             };
@@ -149,7 +145,6 @@ where
             c
         } else {
             return PacketProcessResult {
-                success: false,
                 processed: false,
                 packet: None,
             };
@@ -174,7 +169,8 @@ where
         let on_rot = best_corr * tracking_state.phase_ref.conj();
         let diff = on_rot * prev_phase.conj();
 
-        let energies: [f32; 16] = on_corrs.map(|c| (c * tracking_state.phase_ref.conj()).norm_sqr());
+        let energies: [f32; 16] =
+            on_corrs.map(|c| (c * tracking_state.phase_ref.conj()).norm_sqr());
         let walsh_llr = demodulator.walsh_llr(&energies, max_energy);
         let dqpsk_norm = on_rot.norm().max(1e-6);
         let dqpsk_llr = demodulator.dqpsk_llr(diff, dqpsk_norm);
@@ -223,7 +219,8 @@ where
         } else {
             let damped_err =
                 phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
-            tracking_state.phase_rate = (tracking_state.phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY
+            tracking_state.phase_rate = (tracking_state.phase_rate
+                * TRACKING_PHASE_RATE_HOLD_DECAY
                 + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
                 .clamp(
                     -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
@@ -240,11 +237,8 @@ where
             early_corrs[best_idx].norm(),
             late_corrs[best_idx].norm(),
         );
-        tracking_state.timing_rate = tracking::update_timing_rate(
-            tracking_state.timing_rate,
-            timing_err,
-            timing_rate_limit,
-        );
+        tracking_state.timing_rate =
+            tracking::update_timing_rate(tracking_state.timing_rate, timing_err, timing_rate_limit);
         tracking_state.timing_offset = tracking::update_timing_offset(
             tracking_state.timing_offset,
             tracking_state.timing_rate,
@@ -274,7 +268,6 @@ where
     buffers.packet_llrs_buffer = llr_buf;
 
     PacketProcessResult {
-        success: packet.is_some(),
         processed: true,
         packet,
     }

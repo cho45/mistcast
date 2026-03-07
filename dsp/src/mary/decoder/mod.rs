@@ -53,9 +53,16 @@ struct SearchState {
     last_search_idx: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FramePhase {
+    SyncHandoffPending,
+    PacketDecoding,
+}
+
 struct FrameSession {
     tracking_state: TrackingState,
-    packets_processed_in_burst: usize,
+    phase: FramePhase,
+    payload_packets_processed: usize,
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
@@ -65,7 +72,8 @@ impl FrameSession {
     fn new(warmup_samples: usize, frame_samples: usize) -> Self {
         Self {
             tracking_state: TrackingState::new(),
-            packets_processed_in_burst: 0,
+            phase: FramePhase::SyncHandoffPending,
+            payload_packets_processed: 0,
             pending_warmup_samples: warmup_samples,
             pending_warmup_input_samples: warmup_samples,
             remaining_samples_in_frame: frame_samples as isize,
@@ -73,20 +81,20 @@ impl FrameSession {
     }
 
     fn packets_decoded_in_burst(&self) -> usize {
-        self.packets_processed_in_burst.saturating_sub(1)
+        self.payload_packets_processed
     }
 
     fn sync_handoff_completed(&self) -> bool {
-        self.packets_processed_in_burst != 0
+        matches!(self.phase, FramePhase::PacketDecoding)
     }
 
     fn complete_sync_handoff(&mut self, tracking_state: TrackingState) {
         self.tracking_state = tracking_state;
-        self.packets_processed_in_burst = 1;
+        self.phase = FramePhase::PacketDecoding;
     }
 
-    fn record_packet_result(&mut self, _success: bool) {
-        self.packets_processed_in_burst += 1;
+    fn record_packet_result(&mut self) {
+        self.payload_packets_processed += 1;
     }
 
     fn input_fully_consumed(&self) -> bool {
@@ -280,17 +288,12 @@ impl Decoder {
 
     fn fill_complex_buffer_from_pipeline(&mut self, start: usize, len: usize) {
         self.complex_buffer.clear();
-        if self.complex_buffer.capacity() < len {
-            self.complex_buffer.reserve(len);
-        }
-        unsafe {
-            self.complex_buffer.set_len(len);
-        }
-        for (dst_idx, src_idx) in (start..start + len).enumerate() {
-            self.complex_buffer[dst_idx] = Complex32::new(
+        self.complex_buffer.reserve(len);
+        for src_idx in start..start + len {
+            self.complex_buffer.push(Complex32::new(
                 self.pipeline.sample_buffer_i[src_idx],
                 self.pipeline.sample_buffer_q[src_idx],
-            );
+            ));
         }
     }
 
@@ -583,8 +586,7 @@ impl Decoder {
             self.receive_decoded_packet(packet);
         }
 
-        self.frame_session_mut()
-            .record_packet_result(result.success);
+        self.frame_session_mut().record_packet_result();
         true
     }
 
@@ -634,19 +636,19 @@ impl Decoder {
         if self.equalization.equalizer_ref().is_some() {
             let known_end_idx =
                 preamble_start_idx + self.sync_detector.known_interval_len_samples();
-            let (mse_raw, mse_fde) =
-                self.equalization
-                    .known_interval_path_mse(KnownIntervalPathMseInput {
-                        sync_detector: &self.sync_detector,
-                        cir: &self.cir_buffer,
-                        sample_buffer_i: &self.pipeline.sample_buffer_i,
-                        sample_buffer_q: &self.pipeline.sample_buffer_q,
-                        preamble_start_idx,
-                        known_end_idx,
-                        cir_len,
-                        mmse,
-                        cfo_rad_per_sample: chq.cfo_rad_per_sample,
-                    });
+            let (mse_raw, mse_fde) = self
+                .equalization
+                .evaluate_known_interval_path_mse_with_live_equalizer(KnownIntervalPathMseInput {
+                    sync_detector: &self.sync_detector,
+                    cir: &self.cir_buffer,
+                    sample_buffer_i: &self.pipeline.sample_buffer_i,
+                    sample_buffer_q: &self.pipeline.sample_buffer_q,
+                    preamble_start_idx,
+                    known_end_idx,
+                    cir_len,
+                    mmse,
+                    cfo_rad_per_sample: chq.cfo_rad_per_sample,
+                });
             pred_mse_fde = mse_fde;
             pred_mse_raw = mse_raw;
             self.equalization.select_path(
@@ -1813,7 +1815,8 @@ mod tests {
                 timing_rate: 0.0,
                 phase_gate_enabled: false,
             },
-            packets_processed_in_burst: 1,
+            phase: FramePhase::PacketDecoding,
+            payload_packets_processed: 0,
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: packet_samples as isize,
