@@ -56,7 +56,6 @@ struct SearchState {
 struct FrameSession {
     tracking_state: TrackingState,
     packets_processed_in_burst: usize,
-    consecutive_crc_errors: usize,
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
@@ -67,7 +66,6 @@ impl FrameSession {
         Self {
             tracking_state: TrackingState::new(),
             packets_processed_in_burst: 0,
-            consecutive_crc_errors: 0,
             pending_warmup_samples: warmup_samples,
             pending_warmup_input_samples: warmup_samples,
             remaining_samples_in_frame: frame_samples as isize,
@@ -87,12 +85,7 @@ impl FrameSession {
         self.packets_processed_in_burst = 1;
     }
 
-    fn record_packet_result(&mut self, success: bool) {
-        if success {
-            self.consecutive_crc_errors = 0;
-        } else {
-            self.consecutive_crc_errors += 1;
-        }
+    fn record_packet_result(&mut self, _success: bool) {
         self.packets_processed_in_burst += 1;
     }
 
@@ -1821,7 +1814,6 @@ mod tests {
                 phase_gate_enabled: false,
             },
             packets_processed_in_burst: 1,
-            consecutive_crc_errors: 0,
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: packet_samples as isize,
