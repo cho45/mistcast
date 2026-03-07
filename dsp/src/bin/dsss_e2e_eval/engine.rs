@@ -1,17 +1,16 @@
 use crate::channel::{apply_channel, ChannelImpairment};
-use crate::metrics::TrialState;
+use crate::metrics::Metrics;
 use dsp::dsss::decoder::Decoder as DsssDecoder;
 use dsp::mary::decoder::Decoder as MaryDecoder;
 use rand::rngs::StdRng;
 
 pub const TX_WARMUP_SAMPLES: usize = 4096;
-pub const TX_TAIL_SAMPLES: usize = 4096*2;
+pub const TX_TAIL_SAMPLES: usize = 4096;
 
 /// プロセスを継続するか、完了したか
 pub enum ControlFlow {
     Continue,
 }
-
 
 /// デコーダが持つべきメソッドを示すマーカートレイト
 pub trait ProcessSamples {
@@ -39,16 +38,16 @@ pub fn process_samples_in_chunks<D, F>(
     samples: &[f32],
     chunk_size: usize,
     decoder: &mut D,
-    state: &mut TrialState,
+    state: &mut Metrics,
     mut on_progress: F,
 ) where
     D: ProcessSamples,
-    F: FnMut(&mut D, &D::Progress, &mut TrialState) -> ControlFlow,
+    F: FnMut(&mut D, &D::Progress, &mut Metrics) -> ControlFlow,
 {
     for piece in samples.chunks(chunk_size) {
         let start_time = std::time::Instant::now();
         let progress = decoder.process_samples(piece);
-        state.total_process_ns += start_time.elapsed().as_nanos() as u64;
+        state.total_process_time_ns += start_time.elapsed().as_nanos() as u64;
 
         on_progress(decoder, &progress, state);
     }
@@ -65,17 +64,17 @@ pub struct SimulationConfig<'a> {
 pub fn run_warmup<E, D>(
     encoder: &mut E,
     decoder: &mut D,
-    state: &mut TrialState,
+    state: &mut Metrics,
     cfg: &mut SimulationConfig,
 ) where
     E: WarmupSignal,
     D: ProcessSamples,
 {
     let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
-    state.tx_signal_energy_sum += signal_energy(&warmup);
-    state.tx_signal_samples += warmup.len();
+    state.total_tx_signal_energy += signal_energy(&warmup);
+    state.total_tx_signal_samples += warmup.len();
     let warmup_rx = apply_channel(&warmup, cfg.imp, cfg.rng, false);
-    state.elapsed_sec += warmup_rx.len() as f32 / cfg.sample_rate;
+    state.total_sim_sec += warmup_rx.len() as f32 / cfg.sample_rate;
     process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
@@ -85,7 +84,7 @@ pub fn run_warmup<E, D>(
 pub fn run_flush<E, D>(
     encoder: &mut E,
     decoder: &mut D,
-    state: &mut TrialState,
+    state: &mut Metrics,
     cfg: &mut SimulationConfig,
 ) where
     E: FlushSignal,
@@ -95,10 +94,10 @@ pub fn run_flush<E, D>(
     if flush.is_empty() {
         return;
     }
-    state.tx_signal_energy_sum += signal_energy(&flush);
-    state.tx_signal_samples += flush.len();
+    state.total_tx_signal_energy += signal_energy(&flush);
+    state.total_tx_signal_samples += flush.len();
     let flush_rx = apply_channel(&flush, cfg.imp, cfg.rng, false);
-    state.elapsed_sec += flush_rx.len() as f32 / cfg.sample_rate;
+    state.total_sim_sec += flush_rx.len() as f32 / cfg.sample_rate;
     process_samples_in_chunks(&flush_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
@@ -108,7 +107,7 @@ pub fn run_flush<E, D>(
 pub fn run_tail<E, D>(
     encoder: &mut E,
     decoder: &mut D,
-    state: &mut TrialState,
+    state: &mut Metrics,
     cfg: &mut SimulationConfig,
 ) where
     E: WarmupSignal,
@@ -118,10 +117,10 @@ pub fn run_tail<E, D>(
     if tail.is_empty() {
         return;
     }
-    state.tx_signal_energy_sum += signal_energy(&tail);
-    state.tx_signal_samples += tail.len();
+    state.total_tx_signal_energy += signal_energy(&tail);
+    state.total_tx_signal_samples += tail.len();
     let tail_rx = apply_channel(&tail, cfg.imp, cfg.rng, false);
-    state.elapsed_sec += tail_rx.len() as f32 / cfg.sample_rate;
+    state.total_sim_sec += tail_rx.len() as f32 / cfg.sample_rate;
     process_samples_in_chunks(&tail_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });

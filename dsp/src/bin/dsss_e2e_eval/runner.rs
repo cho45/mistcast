@@ -4,7 +4,7 @@ use crate::engine::{
     process_samples_in_chunks, run_flush, run_tail, run_warmup,
     signal_energy, ControlFlow, SimulationConfig,
 };
-use crate::metrics::{TrialResult, TrialResultBuilder, TrialState, PhaseStats};
+use crate::metrics::{Metrics, PhaseStats};
 use crate::utils::{count_bit_errors_bytes, BerAccumulator};
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
 use dsp::mary::decoder::Decoder as MaryDecoder;
@@ -36,7 +36,7 @@ pub fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
     }
 }
 
-pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
+pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metrics {
     let mut tx_cfg = DspConfig::new(cli.sample_rate);
     tx_cfg.chip_rate = cli.chip_rate;
     tx_cfg.carrier_freq = cli.carrier_freq;
@@ -60,14 +60,7 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     decoder.config.packets_per_burst = cli.packets_per_frame;
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
-    let mut state = TrialState {
-        elapsed_sec: 0.0f32,
-        frame_attempts: 0,
-        dropped_frames: 0,
-        tx_signal_energy_sum: 0.0f64,
-        tx_signal_samples: 0,
-        total_process_ns: 0,
-    };
+    let mut m = Metrics::new(cli.packets_per_frame);
 
     let chunk = cli.chunk_samples.max(1);
 
@@ -78,54 +71,54 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         chunk_size: chunk,
     };
 
-    let mut total_synced_frames = 0usize;
-    let mut total_accepted_packets = 0usize;
-    let mut total_crc_error_packets = 0usize;
-    let mut completion_secs = Vec::new();
-    let mut total_bit_errors = 0usize;
-    let mut total_bits_compared = 0usize;
     let mut last_reset_sec = 0.0f32;
+    // セッション（前回のreset以降）の統計を追跡
+    let mut session_synced = 0usize;
+    let mut session_accepted = 0usize;
+    let mut session_crc_err = 0usize;
 
-    run_warmup(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);
+    run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
     {
         let mut stream = encoder.encode_stream(&payload);
         loop {
-            if state.elapsed_sec >= cli.total_sim_sec {
+            if m.total_sim_sec >= cli.total_sim_sec {
                 break;
             }
             let Some(frame) = stream.next() else {
                 break;
             };
-            state.frame_attempts += 1;
-            state.tx_signal_energy_sum += signal_energy(&frame);
-            state.tx_signal_samples += frame.len();
+            m.total_frame_attempts += 1;
+            m.total_tx_signal_energy += signal_energy(&frame);
+            m.total_tx_signal_samples += frame.len();
 
             let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
             if drop_frame {
-                state.dropped_frames += 1;
+                m.dropped_frames += 1;
             }
             let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
-            state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+            m.total_sim_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
             
             process_samples_in_chunks(
                 &rx_frame,
                 chunk,
                 &mut decoder,
-                &mut state,
-                |decoder, progress, state| {
-                    if progress.complete {
-                        total_synced_frames += progress.synced_frames;
-                        total_accepted_packets += progress.received_packets;
-                        total_crc_error_packets += progress.crc_error_packets;
+                &mut m,
+                |decoder: &mut DsssDecoder, progress, m: &mut Metrics| {
+                    session_synced = progress.synced_frames;
+                    session_accepted = progress.received_packets;
+                    session_crc_err = progress.crc_error_packets;
 
+                    if progress.complete {
+                        m.add_packet_stats(session_synced, session_accepted, session_crc_err);
                         let recovered = decoder.recovered_data();
                         let errs = count_bit_errors_bytes(&payload, recovered);
-                        total_bit_errors += errs;
-                        total_bits_compared += payload.len() * 8;
-                        completion_secs.push(state.elapsed_sec - last_reset_sec);
+                        m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
                         
                         decoder.reset();
-                        last_reset_sec = state.elapsed_sec;
+                        last_reset_sec = m.total_sim_sec;
+                        session_synced = 0;
+                        session_accepted = 0;
+                        session_crc_err = 0;
                     }
                     ControlFlow::Continue
                 },
@@ -133,33 +126,28 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         }
     }
 
-    run_flush(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);
-    run_tail(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);
+    run_flush(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
+    run_tail(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
     let final_progress = decoder.process_samples(&[]);
-    total_synced_frames += final_progress.synced_frames;
-    total_accepted_packets += final_progress.received_packets;
-    total_crc_error_packets += final_progress.crc_error_packets;
+    session_synced = final_progress.synced_frames;
+    session_accepted = final_progress.received_packets;
+    session_crc_err = final_progress.crc_error_packets;
+    
     let recovered = decoder.recovered_data();
     if recovered.is_some() {
         let errs = count_bit_errors_bytes(&payload, recovered);
-        total_bit_errors += errs;
-        total_bits_compared += payload.len() * 8;
-        completion_secs.push(state.elapsed_sec - last_reset_sec);
+        m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
+        m.add_packet_stats(session_synced, session_accepted, session_crc_err);
+        decoder.reset();
+    } else {
+        m.add_packet_stats(session_synced, session_accepted, session_crc_err);
     }
 
-    TrialResultBuilder::new(&state, cli.packets_per_frame)
-        .bit_errors(total_bit_errors, total_bits_compared)
-        .completion_secs(completion_secs)
-        .packet_stats(
-            total_synced_frames,
-            total_accepted_packets,
-            total_crc_error_packets,
-        )
-        .build()
+    m
 }
 
-pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialResult {
+pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metrics {
     let mut tx_cfg = dsp::mary::params::dsp_config(cli.sample_rate);
     tx_cfg.chip_rate = cli.chip_rate;
     tx_cfg.carrier_freq = cli.carrier_freq;
@@ -197,14 +185,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     );
 
     let mut rng = StdRng::seed_from_u64(seed ^ 0xD55A_0001);
-    let mut state = TrialState {
-        elapsed_sec: 0.0f32,
-        frame_attempts: 0,
-        dropped_frames: 0,
-        tx_signal_energy_sum: 0.0f64,
-        tx_signal_samples: 0,
-        total_process_ns: 0,
-    };
+    let mut m = Metrics::new(cli.packets_per_frame);
 
     let chunk = cli.chunk_samples.max(1);
 
@@ -222,21 +203,15 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     let ber_accum = BerAccumulator::new();
     decoder.llr_callback = Some(ber_accum.llr_callback());
 
-    let mut total_synced_frames = 0usize;
-    let mut total_accepted_packets = 0usize;
-    let mut total_crc_error_packets = 0usize;
-    let mut completion_secs = Vec::new();
-    let mut total_bit_errors = 0usize;
-    let mut total_bits_compared = 0usize;
-    let mut last_phase_stats = None;
-    let mut last_llr_attempts = 0usize;
-    let mut last_llr_rescued = 0usize;
     let mut last_reset_sec = 0.0f32;
+    let mut session_synced = 0usize;
+    let mut session_accepted = 0usize;
+    let mut session_crc_err = 0usize;
 
-    run_warmup(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);
+    run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
     loop {
-        if state.elapsed_sec >= cli.total_sim_sec {
+        if m.total_sim_sec >= cli.total_sim_sec {
             break;
         }
 
@@ -249,35 +224,35 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
         }
         let frame = encoder.encode_burst(&packets);
 
-        state.frame_attempts += 1;
-        state.tx_signal_energy_sum += signal_energy(&frame);
-        state.tx_signal_samples += frame.len();
+        m.total_frame_attempts += 1;
+        m.total_tx_signal_energy += signal_energy(&frame);
+        m.total_tx_signal_samples += frame.len();
 
         let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
         if drop_frame {
-            state.dropped_frames += 1;
+            m.dropped_frames += 1;
         }
         let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
-        state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+        m.total_sim_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
 
         process_samples_in_chunks(
             &rx_frame,
             chunk,
             &mut decoder,
-            &mut state,
-            |decoder, progress, state| {
+            &mut m,
+            |decoder: &mut MaryDecoder, progress, m: &mut Metrics| {
+                session_synced = progress.fde_selected_frames + progress.raw_selected_frames;
+                session_accepted = progress.received_packets;
+                session_crc_err = progress.crc_error_packets;
+
                 if progress.complete {
-                    total_synced_frames += progress.fde_selected_frames + progress.raw_selected_frames;
-                    total_accepted_packets += progress.received_packets;
-                    total_crc_error_packets += progress.crc_error_packets;
+                    m.add_packet_stats(session_synced, session_accepted, session_crc_err);
                     
                     let recovered = decoder.recovered_data();
                     let errs = count_bit_errors_bytes(&payload, recovered);
-                    total_bit_errors += errs;
-                    total_bits_compared += payload.len() * 8;
-                    completion_secs.push(state.elapsed_sec - last_reset_sec);
+                    m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
 
-                    last_phase_stats = Some(PhaseStats {
+                    m.set_mary_phase(PhaseStats {
                         last_est_snr_db: progress.last_est_snr_db,
                         phase_gate_on_symbols: progress.phase_gate_on_symbols,
                         phase_gate_off_symbols: progress.phase_gate_off_symbols,
@@ -287,55 +262,41 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
                         phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
                         phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
                     });
-                    last_llr_attempts = progress.llr_second_pass_attempts;
-                    last_llr_rescued = progress.llr_second_pass_rescued;
+                    m.set_mary_llr(progress.llr_second_pass_attempts, progress.llr_second_pass_rescued);
 
                     decoder.reset();
-                    last_reset_sec = state.elapsed_sec;
+                    last_reset_sec = m.total_sim_sec;
+                    session_synced = 0;
+                    session_accepted = 0;
+                    session_crc_err = 0;
                 }
                 ControlFlow::Continue
             },
         );
     }
 
-    run_flush(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);
-    run_tail(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);
+    run_flush(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
+    run_tail(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
     let final_progress = decoder.process_samples(&[]);
-    total_synced_frames += final_progress.fde_selected_frames + final_progress.raw_selected_frames;
-    total_accepted_packets += final_progress.received_packets;
-    total_crc_error_packets += final_progress.crc_error_packets;
+    session_synced = final_progress.fde_selected_frames + final_progress.raw_selected_frames;
+    session_accepted = final_progress.received_packets;
+    session_crc_err = final_progress.crc_error_packets;
+    
     let recovered = decoder.recovered_data();
     if recovered.is_some() {
         let errs = count_bit_errors_bytes(&payload, recovered);
-        total_bit_errors += errs;
-        total_bits_compared += payload.len() * 8;
-        completion_secs.push(state.elapsed_sec - last_reset_sec);
+        m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
+        m.add_packet_stats(session_synced, session_accepted, session_crc_err);
+        decoder.reset();
+    } else {
+        m.add_packet_stats(session_synced, session_accepted, session_crc_err);
     }
 
-    let pre_fec = ber_accum.extract_pre_fec();
-    let post_fec = ber_accum.extract_post_fec();
-    let (post_decode_attempts, post_decode_matched) = ber_accum.extract_decode_stats();
+    m.set_mary_raw_ber(ber_accum.extract_pre_fec());
+    m.set_mary_post_ber(ber_accum.extract_post_fec());
+    let (attempts, matched) = ber_accum.extract_decode_stats();
+    m.set_mary_decode_stats(attempts, matched);
 
-    let mut builder = TrialResultBuilder::new(&state, cli.packets_per_frame)
-        .bit_errors(total_bit_errors, total_bits_compared)
-        .completion_secs(completion_secs)
-        .packet_stats(
-            total_synced_frames,
-            total_accepted_packets,
-            total_crc_error_packets,
-        )
-        .mary_raw_ber(pre_fec)
-        .mary_post_ber(post_fec)
-        .mary_llr(
-            last_llr_attempts,
-            last_llr_rescued,
-        )
-        .mary_decode_stats(post_decode_attempts, post_decode_matched);
-
-    if let Some(ps) = last_phase_stats {
-        builder = builder.mary_phase(ps);
-    }
-
-    builder.build()
+    m
 }

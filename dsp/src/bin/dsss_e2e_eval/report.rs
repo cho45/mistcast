@@ -3,7 +3,6 @@ use crate::config::{selected_columns, Cli, OutputFormat};
 use crate::metrics::Metrics;
 use serde::Serialize;
 use serde_json::json;
-
 #[derive(Serialize)]
 struct ReportRow<'a> {
     scenario: &'a str,
@@ -11,6 +10,7 @@ struct ReportRow<'a> {
     mary_fde_mode: String,
     total_sim_sec: f32,
     awgn_snr_db: f32,
+
     p_complete: f32, // パケット到達率 (PDR)
     ber: f32,
     raw_ber: f32,

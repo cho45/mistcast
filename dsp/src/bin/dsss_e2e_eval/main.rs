@@ -13,14 +13,11 @@ use runner::{run_trial_dsss_e2e, run_trial_mary_e2e};
 use report::{print_awgn_limit, print_header, print_row};
 
 fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
-    let mut metrics = Metrics::default();
-    let trial_seed = cli.seed;
-    let tr = if matches!(cli.phy, Phy::Mary) {
-        run_trial_mary_e2e(imp, cli, trial_seed)
+    let metrics = if matches!(cli.phy, Phy::Mary) {
+        run_trial_mary_e2e(imp, cli, cli.seed)
     } else {
-        run_trial_dsss_e2e(imp, cli, trial_seed)
+        run_trial_dsss_e2e(imp, cli, cli.seed)
     };
-    metrics.push(tr);
     print_row(scenario, cli, imp, &metrics);
     metrics
 }
@@ -187,7 +184,7 @@ mod tests {
         };
 
         let res = run_trial_dsss_e2e(&cli.base_impairment(), &cli, cli.seed);
-        assert!(res.avg_completion_sec.is_some());
+        assert!(!res.completion_secs.is_empty());
     }
 
     #[test]
@@ -237,6 +234,6 @@ mod tests {
         };
 
         let res = run_trial_mary_e2e(&cli.base_impairment(), &cli, cli.seed);
-        assert!(res.avg_completion_sec.is_some());
+        assert!(!res.completion_secs.is_empty());
     }
 }
