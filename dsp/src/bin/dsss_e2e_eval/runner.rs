@@ -1,7 +1,7 @@
 use crate::channel::{apply_channel, ChannelImpairment};
 use crate::config::{Cli, MaryFdeMode};
 use crate::engine::{
-    process_samples_in_chunks, run_flush, run_gap_with_completion, run_tail, run_warmup,
+    process_samples_in_chunks, run_flush, run_tail, run_warmup,
     signal_energy, ControlFlow, SimulationConfig,
 };
 use crate::metrics::{TrialResult, TrialResultBuilder, TrialState, PhaseStats};
@@ -70,7 +70,6 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     };
 
     let chunk = cli.chunk_samples.max(1);
-    let gap = cli.gap_samples;
 
     let mut sim_cfg = SimulationConfig {
         sample_rate: tx_cfg.sample_rate,
@@ -129,30 +128,6 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
                         last_reset_sec = state.elapsed_sec;
                     }
                     ControlFlow::Continue
-                },
-            );
-
-            run_gap_with_completion(
-                &mut decoder,
-                &mut state,
-                &mut sim_cfg,
-                gap,
-                |decoder, progress, state| {
-                    if progress.complete {
-                        total_synced_frames += progress.synced_frames;
-                        total_accepted_packets += progress.received_packets;
-                        total_crc_error_packets += progress.crc_error_packets;
-
-                        let recovered = decoder.recovered_data();
-                        let errs = count_bit_errors_bytes(&payload, recovered);
-                        total_bit_errors += errs;
-                        total_bits_compared += payload.len() * 8;
-                        completion_secs.push(state.elapsed_sec - last_reset_sec);
-                        
-                        decoder.reset();
-                        last_reset_sec = state.elapsed_sec;
-                    }
-                    false
                 },
             );
         }
@@ -238,7 +213,6 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
     };
 
     let chunk = cli.chunk_samples.max(1);
-    let gap = cli.gap_samples;
 
     let mut sim_cfg = SimulationConfig {
         sample_rate: tx_cfg.sample_rate,
@@ -328,45 +302,6 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Tria
                 ControlFlow::Continue
             },
         );
-
-        if gap > 0 {
-            run_gap_with_completion(
-                &mut decoder,
-                &mut state,
-                &mut sim_cfg,
-                gap,
-                |decoder, progress, state| {
-                    if progress.complete {
-                        total_synced_frames += progress.fde_selected_frames + progress.raw_selected_frames;
-                        total_accepted_packets += progress.received_packets;
-                        total_crc_error_packets += progress.crc_error_packets;
-
-                        let recovered = decoder.recovered_data();
-                        let errs = count_bit_errors_bytes(&payload, recovered);
-                        total_bit_errors += errs;
-                        total_bits_compared += payload.len() * 8;
-                        completion_secs.push(state.elapsed_sec - last_reset_sec);
-
-                        last_phase_stats = Some(PhaseStats {
-                            last_est_snr_db: progress.last_est_snr_db,
-                            phase_gate_on_symbols: progress.phase_gate_on_symbols,
-                            phase_gate_off_symbols: progress.phase_gate_off_symbols,
-                            phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
-                            phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
-                            phase_err_abs_count: progress.phase_err_abs_count,
-                            phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
-                            phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
-                        });
-                        last_llr_attempts = progress.llr_second_pass_attempts;
-                        last_llr_rescued = progress.llr_second_pass_rescued;
-
-                        decoder.reset();
-                        last_reset_sec = state.elapsed_sec;
-                    }
-                    false
-                },
-            );
-        }
     }
 
     run_flush(&mut encoder, &mut decoder, &mut state, &mut sim_cfg);

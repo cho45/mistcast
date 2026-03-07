@@ -1,17 +1,17 @@
-use crate::channel::{add_awgn_with_rng, apply_channel, apply_clock_drift_ppm, ChannelImpairment};
+use crate::channel::{apply_channel, ChannelImpairment};
 use crate::metrics::TrialState;
 use dsp::dsss::decoder::Decoder as DsssDecoder;
 use dsp::mary::decoder::Decoder as MaryDecoder;
 use rand::rngs::StdRng;
 
 pub const TX_WARMUP_SAMPLES: usize = 4096;
-pub const TX_TAIL_SAMPLES: usize = 4096*4;
+pub const TX_TAIL_SAMPLES: usize = 4096*2;
 
 /// プロセスを継続するか、完了したか
 pub enum ControlFlow {
     Continue,
-    Complete,
 }
+
 
 /// デコーダが持つべきメソッドを示すマーカートレイト
 pub trait ProcessSamples {
@@ -41,8 +41,7 @@ pub fn process_samples_in_chunks<D, F>(
     decoder: &mut D,
     state: &mut TrialState,
     mut on_progress: F,
-) -> bool
-where
+) where
     D: ProcessSamples,
     F: FnMut(&mut D, &D::Progress, &mut TrialState) -> ControlFlow,
 {
@@ -51,12 +50,8 @@ where
         let progress = decoder.process_samples(piece);
         state.total_process_ns += start_time.elapsed().as_nanos() as u64;
 
-        match on_progress(decoder, &progress, state) {
-            ControlFlow::Continue => {}
-            ControlFlow::Complete => return true,
-        }
+        on_progress(decoder, &progress, state);
     }
-    false
 }
 
 pub struct SimulationConfig<'a> {
@@ -83,35 +78,6 @@ pub fn run_warmup<E, D>(
     state.elapsed_sec += warmup_rx.len() as f32 / cfg.sample_rate;
     process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
-    });
-}
-
-/// ギャップ処理を実行する（完了チェック付き）
-pub fn run_gap_with_completion<D, F>(
-    decoder: &mut D,
-    state: &mut TrialState,
-    cfg: &mut SimulationConfig,
-    gap_samples: usize,
-    mut on_complete: F,
-) where
-    D: ProcessSamples,
-    F: FnMut(&mut D, &D::Progress, &mut TrialState) -> bool,
-{
-    if gap_samples == 0 {
-        return;
-    }
-    let mut gap_sig = vec![0.0f32; gap_samples];
-    add_awgn_with_rng(&mut gap_sig, cfg.imp.sigma, cfg.rng);
-    if cfg.imp.ppm.abs() >= 1.0 {
-        gap_sig = apply_clock_drift_ppm(&gap_sig, cfg.imp.ppm);
-    }
-    state.elapsed_sec += gap_sig.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&gap_sig, cfg.chunk_size, decoder, state, |decoder, progress, state| {
-        if on_complete(decoder, progress, state) {
-            ControlFlow::Complete
-        } else {
-            ControlFlow::Continue
-        }
     });
 }
 

@@ -180,10 +180,8 @@ pub struct Cli {
     pub total_sim_sec: f32,
     #[arg(long = "payload-bytes", value_parser = parse_positive_usize, default_value_t = 64)]
     pub payload_bytes: usize,
-    #[arg(long = "chunk-samples", value_parser = parse_positive_usize, default_value_t = 16_384)]
+    #[arg(long = "chunk-samples", value_parser = parse_positive_usize, default_value_t = 2048)]
     pub chunk_samples: usize,
-    #[arg(long = "gap-samples", default_value_t = 64)]
-    pub gap_samples: usize,
     #[arg(long, default_value_t = 0xA11CE_u64)]
     pub seed: u64,
     #[arg(long = "target-p", value_parser = parse_unit_interval_f32, default_value_t = 0.95)]
