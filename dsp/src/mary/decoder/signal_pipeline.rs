@@ -187,4 +187,86 @@ mod tests {
         pipeline.drain(available / 2);
         assert_eq!(pipeline.available_samples(), available - available / 2);
     }
+
+    #[test]
+    fn test_mix_real_to_iq_zero_alloc_generates_expected_baseband_for_first_sample() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+
+        pipeline.mix_real_to_iq_zero_alloc(&[1.0]);
+
+        assert_eq!(pipeline.mix_buffer_i.len(), 1);
+        assert_eq!(pipeline.mix_buffer_q.len(), 1);
+        assert!((pipeline.mix_buffer_i[0] - 2.0).abs() < 1e-6);
+        assert!(pipeline.mix_buffer_q[0].abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_mix_real_to_iq_zero_alloc_clears_previous_mix_buffers() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+
+        pipeline.mix_real_to_iq_zero_alloc(&[1.0, 2.0, 3.0]);
+        assert_eq!(pipeline.mix_buffer_i.len(), 3);
+
+        pipeline.mix_real_to_iq_zero_alloc(&[4.0]);
+
+        assert_eq!(pipeline.mix_buffer_i.len(), 1);
+        assert_eq!(pipeline.mix_buffer_q.len(), 1);
+    }
+
+    #[test]
+    fn test_signal_pipeline_process_samples_empty_input_keeps_buffers_empty() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+
+        let count = pipeline.process_samples(&[]);
+
+        assert_eq!(count, 0);
+        assert_eq!(pipeline.available_samples(), 0);
+        assert!(pipeline.sample_buffer_q.is_empty());
+    }
+
+    #[test]
+    fn test_signal_pipeline_drain_overflow_clears_all_samples() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+        let samples = vec![0.0f32; 1000];
+        pipeline.process_samples(&samples);
+
+        pipeline.drain(usize::MAX);
+
+        assert_eq!(pipeline.available_samples(), 0);
+        assert!(pipeline.sample_buffer_q.is_empty());
+    }
+
+    #[test]
+    fn test_signal_pipeline_reset_clears_internal_scratch_buffers() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+        pipeline.mix_buffer_i.push(1.0);
+        pipeline.mix_buffer_q.push(2.0);
+        pipeline.resample_buffer_i.push(3.0);
+        pipeline.resample_buffer_q.push(4.0);
+        pipeline.rrc_filtered_i.push(5.0);
+        pipeline.rrc_filtered_q.push(6.0);
+        pipeline.sample_buffer_i.push(7.0);
+        pipeline.sample_buffer_q.push(8.0);
+        let _ = pipeline.lo_nco.step();
+
+        pipeline.reset();
+
+        assert!(pipeline.mix_buffer_i.is_empty());
+        assert!(pipeline.mix_buffer_q.is_empty());
+        assert!(pipeline.resample_buffer_i.is_empty());
+        assert!(pipeline.resample_buffer_q.is_empty());
+        assert!(pipeline.rrc_filtered_i.is_empty());
+        assert!(pipeline.rrc_filtered_q.is_empty());
+        assert!(pipeline.sample_buffer_i.is_empty());
+        assert!(pipeline.sample_buffer_q.is_empty());
+
+        pipeline.mix_real_to_iq_zero_alloc(&[1.0]);
+        assert!((pipeline.mix_buffer_i[0] - 2.0).abs() < 1e-6);
+        assert!(pipeline.mix_buffer_q[0].abs() < 1e-6);
+    }
 }
