@@ -651,14 +651,23 @@ impl TrialResultBuilder {
 
     fn success(mut self, success: bool, bit_errors: usize, bits_compared: usize) -> Self {
         self.success = success;
-        self.completion_sec = if success { Some(self.elapsed_sec) } else { None };
+        self.completion_sec = if success {
+            Some(self.elapsed_sec)
+        } else {
+            None
+        };
         self.first_attempt_success = success && self.attempts == 1;
         self.bit_errors = bit_errors;
         self.bits_compared = bits_compared;
         self
     }
 
-    fn frame_stats<SF, AF, EF>(mut self, synced_frames: SF, accepted_frames: AF, crc_error_frames: EF) -> Self
+    fn frame_stats<SF, AF, EF>(
+        mut self,
+        synced_frames: SF,
+        accepted_frames: AF,
+        crc_error_frames: EF,
+    ) -> Self
     where
         SF: Into<usize>,
         AF: Into<usize>,
@@ -746,7 +755,11 @@ impl TrialResultBuilder {
         self
     }
 
-    fn mary_decode_stats(mut self, post_decode_attempts: usize, post_decode_matched: usize) -> Self {
+    fn mary_decode_stats(
+        mut self,
+        post_decode_attempts: usize,
+        post_decode_matched: usize,
+    ) -> Self {
         self.post_decode_attempts = post_decode_attempts;
         self.post_decode_matched = post_decode_matched;
         self
@@ -977,6 +990,217 @@ impl WarmupSignal for dsp::mary::encoder::Encoder {
 impl FlushSignal for dsp::mary::encoder::Encoder {
     fn flush(&mut self) -> Vec<f32> {
         dsp::mary::encoder::Encoder::flush(self)
+    }
+}
+
+/// Mary BER集計用モジュール
+mod mary_ber {
+    use super::*;
+
+    /// BER集計用構造体
+    pub struct BerAccumulator {
+        expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+        expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+        raw_bit_errors: Arc<Mutex<usize>>,
+        raw_bits_compared: Arc<Mutex<usize>>,
+        raw_error_runs: Arc<Mutex<usize>>,
+        raw_error_run_bits: Arc<Mutex<usize>>,
+        raw_error_run_max: Arc<Mutex<usize>>,
+        codeword_error_weights: Arc<Mutex<Vec<usize>>>,
+        post_bit_errors: Arc<Mutex<usize>>,
+        post_bits_compared: Arc<Mutex<usize>>,
+        post_error_runs: Arc<Mutex<usize>>,
+        post_error_run_bits: Arc<Mutex<usize>>,
+        post_error_run_max: Arc<Mutex<usize>>,
+        post_codeword_error_weights: Arc<Mutex<Vec<usize>>>,
+        post_decode_attempts: Arc<Mutex<usize>>,
+        post_decode_matched: Arc<Mutex<usize>>,
+    }
+
+    impl BerAccumulator {
+        pub fn new() -> Self {
+            Self {
+                expected_fec_bits: Arc::new(Mutex::new(HashMap::new())),
+                expected_packet_bits: Arc::new(Mutex::new(HashMap::new())),
+                raw_bit_errors: Arc::new(Mutex::new(0)),
+                raw_bits_compared: Arc::new(Mutex::new(0)),
+                raw_error_runs: Arc::new(Mutex::new(0)),
+                raw_error_run_bits: Arc::new(Mutex::new(0)),
+                raw_error_run_max: Arc::new(Mutex::new(0)),
+                codeword_error_weights: Arc::new(Mutex::new(Vec::new())),
+                post_bit_errors: Arc::new(Mutex::new(0)),
+                post_bits_compared: Arc::new(Mutex::new(0)),
+                post_error_runs: Arc::new(Mutex::new(0)),
+                post_error_run_bits: Arc::new(Mutex::new(0)),
+                post_error_run_max: Arc::new(Mutex::new(0)),
+                post_codeword_error_weights: Arc::new(Mutex::new(Vec::new())),
+                post_decode_attempts: Arc::new(Mutex::new(0)),
+                post_decode_matched: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        /// パケットを登録（FEC符号化後のビット列を記録）
+        pub fn register_packet(
+            &self,
+            seq: u16,
+            packet: &dsp::coding::fountain::FountainPacket,
+            k: usize,
+        ) {
+            let pkt = Packet::new(seq, k, &packet.data);
+            let bits = fec::bytes_to_bits(&pkt.serialize());
+            let fec_encoded = fec::encode(&bits);
+            self.expected_packet_bits.lock().unwrap().insert(seq, bits);
+            self.expected_fec_bits
+                .lock()
+                .unwrap()
+                .insert(seq, fec_encoded);
+        }
+
+        /// LLRコールバックを生成
+        pub fn llr_callback(&self) -> Box<dyn Fn(&[f32]) + Send + Sync> {
+            let efb = Arc::clone(&self.expected_fec_bits);
+            let epb = Arc::clone(&self.expected_packet_bits);
+            let rbe = Arc::clone(&self.raw_bit_errors);
+            let rbc = Arc::clone(&self.raw_bits_compared);
+            let rer = Arc::clone(&self.raw_error_runs);
+            let rrb = Arc::clone(&self.raw_error_run_bits);
+            let rrm = Arc::clone(&self.raw_error_run_max);
+            let cew = Arc::clone(&self.codeword_error_weights);
+            let pbe = Arc::clone(&self.post_bit_errors);
+            let pbc = Arc::clone(&self.post_bits_compared);
+            let per = Arc::clone(&self.post_error_runs);
+            let prb = Arc::clone(&self.post_error_run_bits);
+            let prm = Arc::clone(&self.post_error_run_max);
+            let pcew = Arc::clone(&self.post_codeword_error_weights);
+            let pda = Arc::clone(&self.post_decode_attempts);
+            let pdm = Arc::clone(&self.post_decode_matched);
+
+            Box::new(move |llrs: &[f32]| {
+                let decoded_bits = fec::decode_soft(llrs);
+                let p_bits_len = PACKET_BYTES * 8;
+                if decoded_bits.len() < p_bits_len {
+                    return;
+                }
+                let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
+                if decoded_bytes.len() < 3 {
+                    return;
+                }
+                *pda.lock().unwrap() += 1;
+                let seq = u16::from_be_bytes([decoded_bytes[1], decoded_bytes[2]]);
+                let expected_raw = match efb.lock().unwrap().get(&seq) {
+                    Some(bits) => bits.clone(),
+                    None => return,
+                };
+                let (errors, compare_len, runs, run_bits, run_max) =
+                    bit_errors_and_runs_from_llr(&expected_raw, llrs);
+                *rbe.lock().unwrap() += errors;
+                *rbc.lock().unwrap() += compare_len;
+                *rer.lock().unwrap() += runs;
+                *rrb.lock().unwrap() += run_bits;
+                let mut max_guard = rrm.lock().unwrap();
+                *max_guard = (*max_guard).max(run_max);
+                cew.lock().unwrap().push(errors);
+
+                let expected_post = match epb.lock().unwrap().get(&seq) {
+                    Some(bits) => bits.clone(),
+                    None => return,
+                };
+                *pdm.lock().unwrap() += 1;
+                let (post_errors, post_compare_len, post_runs, post_run_bits, post_run_max) =
+                    bit_errors_and_runs_from_bits(&expected_post, &decoded_bits[..p_bits_len]);
+                *pbe.lock().unwrap() += post_errors;
+                *pbc.lock().unwrap() += post_compare_len;
+                *per.lock().unwrap() += post_runs;
+                *prb.lock().unwrap() += post_run_bits;
+                let mut post_max_guard = prm.lock().unwrap();
+                *post_max_guard = (*post_max_guard).max(post_run_max);
+                pcew.lock().unwrap().push(post_errors);
+            })
+        }
+
+        /// Pre-FEC解析結果を取得
+        pub fn extract_pre_fec(
+            &self,
+        ) -> (
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            Vec<usize>,
+        ) {
+            let raw_bit_errors = *self.raw_bit_errors.lock().unwrap();
+            let raw_bits_compared = *self.raw_bits_compared.lock().unwrap();
+            let raw_error_runs = *self.raw_error_runs.lock().unwrap();
+            let raw_error_run_bits = *self.raw_error_run_bits.lock().unwrap();
+            let raw_error_run_max = *self.raw_error_run_max.lock().unwrap();
+            let codeword_error_weights = self.codeword_error_weights.lock().unwrap().clone();
+            let codeword_count = codeword_error_weights.len();
+            let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
+            let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
+            (
+                raw_bit_errors,
+                raw_bits_compared,
+                raw_error_runs,
+                raw_error_run_bits,
+                raw_error_run_max,
+                codeword_count,
+                codeword_error_sum,
+                codeword_error_max,
+                codeword_error_weights,
+            )
+        }
+
+        /// Post-FEC解析結果を取得
+        pub fn extract_post_fec(
+            &self,
+        ) -> (
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            Vec<usize>,
+        ) {
+            let post_bit_errors = *self.post_bit_errors.lock().unwrap();
+            let post_bits_compared = *self.post_bits_compared.lock().unwrap();
+            let post_error_runs = *self.post_error_runs.lock().unwrap();
+            let post_error_run_bits = *self.post_error_run_bits.lock().unwrap();
+            let post_error_run_max = *self.post_error_run_max.lock().unwrap();
+            let post_codeword_error_weights =
+                self.post_codeword_error_weights.lock().unwrap().clone();
+            let post_codeword_count = post_codeword_error_weights.len();
+            let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
+            let post_codeword_error_max = post_codeword_error_weights
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            (
+                post_bit_errors,
+                post_bits_compared,
+                post_error_runs,
+                post_error_run_bits,
+                post_error_run_max,
+                post_codeword_count,
+                post_codeword_error_sum,
+                post_codeword_error_max,
+                post_codeword_error_weights,
+            )
+        }
+
+        /// デコード統計を取得
+        pub fn extract_decode_stats(&self) -> (usize, usize) {
+            let post_decode_attempts = *self.post_decode_attempts.lock().unwrap();
+            let post_decode_matched = *self.post_decode_matched.lock().unwrap();
+            (post_decode_attempts, post_decode_matched)
+        }
     }
 }
 
@@ -1619,7 +1843,15 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
     let chunk = cli.chunk_samples.max(1);
     let gap = cli.gap_samples;
 
-    run_warmup(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
+    run_warmup(
+        &mut encoder,
+        &mut decoder,
+        &mut state,
+        tx_cfg.sample_rate,
+        imp,
+        &mut rng,
+        chunk,
+    );
     {
         let mut stream = encoder.encode_stream(&payload);
         loop {
@@ -1639,13 +1871,19 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
             }
             let rx_frame = apply_channel(&frame, imp, &mut rng, drop_burst);
             state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
-            let complete = process_samples_in_chunks(&rx_frame, chunk, &mut decoder, &mut state, |progress, _state| {
-                if progress.complete {
-                    ControlFlow::Complete
-                } else {
-                    ControlFlow::Continue
-                }
-            });
+            let complete = process_samples_in_chunks(
+                &rx_frame,
+                chunk,
+                &mut decoder,
+                &mut state,
+                |progress, _state| {
+                    if progress.complete {
+                        ControlFlow::Complete
+                    } else {
+                        ControlFlow::Continue
+                    }
+                },
+            );
             if complete {
                 let progress = decoder.process_samples(&[]);
                 let recovered = decoder.recovered_data();
@@ -1653,19 +1891,32 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let bits_compared = payload.len() * 8;
                 return TrialResultBuilder::new(&state)
                     .success(errs == 0, errs, bits_compared)
-                    .frame_stats(progress.synced_frames, progress.received_packets, progress.crc_error_packets)
+                    .frame_stats(
+                        progress.synced_frames,
+                        progress.received_packets,
+                        progress.crc_error_packets,
+                    )
                     .build();
             }
 
             let mut complete = false;
-            run_gap_with_completion(&mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk, gap, |progress, _state| {
-                if progress.complete {
-                    complete = true;
-                    true
-                } else {
-                    false
-                }
-            });
+            run_gap_with_completion(
+                &mut decoder,
+                &mut state,
+                tx_cfg.sample_rate,
+                imp,
+                &mut rng,
+                chunk,
+                gap,
+                |progress, _state| {
+                    if progress.complete {
+                        complete = true;
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
             if complete {
                 let progress = decoder.process_samples(&[]);
                 let recovered = decoder.recovered_data();
@@ -1673,22 +1924,46 @@ fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 let bits_compared = payload.len() * 8;
                 return TrialResultBuilder::new(&state)
                     .success(errs == 0, errs, bits_compared)
-                    .frame_stats(progress.synced_frames, progress.received_packets, progress.crc_error_packets)
+                    .frame_stats(
+                        progress.synced_frames,
+                        progress.received_packets,
+                        progress.crc_error_packets,
+                    )
                     .build();
             }
         }
     }
 
-    run_flush(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
+    run_flush(
+        &mut encoder,
+        &mut decoder,
+        &mut state,
+        tx_cfg.sample_rate,
+        imp,
+        &mut rng,
+        chunk,
+    );
 
-    run_tail(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
+    run_tail(
+        &mut encoder,
+        &mut decoder,
+        &mut state,
+        tx_cfg.sample_rate,
+        imp,
+        &mut rng,
+        chunk,
+    );
 
     let bits_compared = payload.len() * 8;
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
     let final_progress = decoder.process_samples(&[]);
     TrialResultBuilder::new(&state)
         .success(false, bit_errors, bits_compared)
-        .frame_stats(final_progress.synced_frames, final_progress.received_packets, final_progress.crc_error_packets)
+        .frame_stats(
+            final_progress.synced_frames,
+            final_progress.received_packets,
+            final_progress.crc_error_packets,
+        )
         .build()
 }
 
@@ -1748,85 +2023,18 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
     // FEC前/後のBER計測用: 送信時の期待ビット列を seq -> bits で記録し、
     // 受信側LLRから復元した seq と照合して到着順ズレの影響を避けて集計する。
-    let expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
-    let expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let raw_bit_errors_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let raw_bits_compared_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let raw_error_runs_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let raw_error_run_bits_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let raw_error_run_max_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let codeword_error_weights_acc: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
-    let post_bit_errors_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let post_bits_compared_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let post_error_runs_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let post_error_run_bits_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let post_error_run_max_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let post_codeword_error_weights_acc: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
-    let post_decode_attempts_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    let post_decode_matched_acc: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-    {
-        let efb = Arc::clone(&expected_fec_bits);
-        let epb = Arc::clone(&expected_packet_bits);
-        let rbe = Arc::clone(&raw_bit_errors_acc);
-        let rbc = Arc::clone(&raw_bits_compared_acc);
-        let rer = Arc::clone(&raw_error_runs_acc);
-        let rrb = Arc::clone(&raw_error_run_bits_acc);
-        let rrm = Arc::clone(&raw_error_run_max_acc);
-        let cew = Arc::clone(&codeword_error_weights_acc);
-        let pbe = Arc::clone(&post_bit_errors_acc);
-        let pbc = Arc::clone(&post_bits_compared_acc);
-        let per = Arc::clone(&post_error_runs_acc);
-        let prb = Arc::clone(&post_error_run_bits_acc);
-        let prm = Arc::clone(&post_error_run_max_acc);
-        let pcew = Arc::clone(&post_codeword_error_weights_acc);
-        let pda = Arc::clone(&post_decode_attempts_acc);
-        let pdm = Arc::clone(&post_decode_matched_acc);
-        decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
-            let decoded_bits = fec::decode_soft(llrs);
-            let p_bits_len = PACKET_BYTES * 8;
-            if decoded_bits.len() < p_bits_len {
-                return;
-            }
-            let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-            if decoded_bytes.len() < 3 {
-                return;
-            }
-            *pda.lock().unwrap() += 1;
-            // CRC検証は通さず、ヘッダ先頭3byteから seq を直接復元して照合する。
-            let seq = u16::from_be_bytes([decoded_bytes[1], decoded_bytes[2]]);
-            let expected_raw = match efb.lock().unwrap().get(&seq) {
-                Some(bits) => bits.clone(),
-                None => return,
-            };
-            let (errors, compare_len, runs, run_bits, run_max) =
-                bit_errors_and_runs_from_llr(&expected_raw, llrs);
-            *rbe.lock().unwrap() += errors;
-            *rbc.lock().unwrap() += compare_len;
-            *rer.lock().unwrap() += runs;
-            *rrb.lock().unwrap() += run_bits;
-            let mut max_guard = rrm.lock().unwrap();
-            *max_guard = (*max_guard).max(run_max);
-            cew.lock().unwrap().push(errors);
+    let ber_accum = mary_ber::BerAccumulator::new();
+    decoder.llr_callback = Some(ber_accum.llr_callback());
 
-            let expected_post = match epb.lock().unwrap().get(&seq) {
-                Some(bits) => bits.clone(),
-                None => return,
-            };
-            *pdm.lock().unwrap() += 1;
-            let (post_errors, post_compare_len, post_runs, post_run_bits, post_run_max) =
-                bit_errors_and_runs_from_bits(&expected_post, &decoded_bits[..p_bits_len]);
-            *pbe.lock().unwrap() += post_errors;
-            *pbc.lock().unwrap() += post_compare_len;
-            *per.lock().unwrap() += post_runs;
-            *prb.lock().unwrap() += post_run_bits;
-            let mut post_max_guard = prm.lock().unwrap();
-            *post_max_guard = (*post_max_guard).max(post_run_max);
-            pcew.lock().unwrap().push(post_errors);
-        }));
-    }
-
-    run_warmup(&mut encoder, &mut decoder, &mut state, tx_cfg.sample_rate, imp, &mut rng, chunk);
+    run_warmup(
+        &mut encoder,
+        &mut decoder,
+        &mut state,
+        tx_cfg.sample_rate,
+        imp,
+        &mut rng,
+        chunk,
+    );
 
     loop {
         if state.elapsed_sec >= cli.max_sec {
@@ -1837,15 +2045,7 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         let mut packets = Vec::with_capacity(burst_count);
         for _ in 0..burst_count {
             let fp = fountain_encoder.next_packet();
-            // raw BER用: このパケットのFEC符号化結果を記録
-            {
-                let seq = (fp.seq % (u32::from(u16::MAX) + 1)) as u16;
-                let pkt = Packet::new(seq, k, &fp.data);
-                let bits = fec::bytes_to_bits(&pkt.serialize());
-                let fec_encoded = fec::encode(&bits);
-                expected_packet_bits.lock().unwrap().insert(seq, bits);
-                expected_fec_bits.lock().unwrap().insert(seq, fec_encoded);
-            }
+            ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
             packets.push(fp);
         }
         let frame = encoder.encode_burst(&packets);
@@ -1861,50 +2061,90 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
         let rx_frame = apply_channel(&frame, imp, &mut rng, drop_burst);
         state.elapsed_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
 
-        let complete = process_samples_in_chunks(&rx_frame, chunk, &mut decoder, &mut state, |progress, _state| {
-            if progress.complete {
-                ControlFlow::Complete
-            } else {
-                ControlFlow::Continue
-            }
-        });
+        let complete = process_samples_in_chunks(
+            &rx_frame,
+            chunk,
+            &mut decoder,
+            &mut state,
+            |progress, _state| {
+                if progress.complete {
+                    ControlFlow::Complete
+                } else {
+                    ControlFlow::Continue
+                }
+            },
+        );
         if complete {
             let progress = decoder.process_samples(&[]);
             let recovered = decoder.recovered_data();
             let errs = count_bit_errors_bytes(&payload, recovered);
             let bits_compared = payload.len() * 8;
-            let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
-            let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
-            let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
-            let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
-            let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
-            let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
-            let codeword_count = codeword_error_weights.len();
-            let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
-            let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
-            let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
-            let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
-            let post_error_runs = *post_error_runs_acc.lock().unwrap();
-            let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
-            let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
-            let post_codeword_error_weights =
-                post_codeword_error_weights_acc.lock().unwrap().clone();
-            let post_codeword_count = post_codeword_error_weights.len();
-            let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
-            let post_codeword_error_max = post_codeword_error_weights
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(0);
-            let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
-            let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
+            let (
+                raw_bit_errors,
+                raw_bits_compared,
+                raw_error_runs,
+                raw_error_run_bits,
+                raw_error_run_max,
+                codeword_count,
+                codeword_error_sum,
+                codeword_error_max,
+                codeword_error_weights,
+            ) = ber_accum.extract_pre_fec();
+            let (
+                post_bit_errors,
+                post_bits_compared,
+                post_error_runs,
+                post_error_run_bits,
+                post_error_run_max,
+                post_codeword_count,
+                post_codeword_error_sum,
+                post_codeword_error_max,
+                post_codeword_error_weights,
+            ) = ber_accum.extract_post_fec();
+            let (post_decode_attempts, post_decode_matched) = ber_accum.extract_decode_stats();
             return TrialResultBuilder::new(&state)
                 .success(errs == 0, errs, bits_compared)
-                .frame_stats(progress.fde_selected_frames + progress.raw_selected_frames, progress.received_packets, progress.crc_error_packets)
-                .mary_raw_ber(raw_bit_errors, raw_bits_compared, raw_error_runs, raw_error_run_bits, raw_error_run_max, codeword_count, codeword_error_sum, codeword_error_max, codeword_error_weights)
-                .mary_post_ber(post_bit_errors, post_bits_compared, post_error_runs, post_error_run_bits, post_error_run_max, post_codeword_count, post_codeword_error_sum, post_codeword_error_max, post_codeword_error_weights)
-                .mary_phase(progress.last_est_snr_db, progress.phase_gate_on_symbols, progress.phase_gate_off_symbols, progress.phase_innovation_reject_symbols, progress.phase_err_abs_sum_rad, progress.phase_err_abs_count, progress.phase_err_abs_ge_0p5_symbols, progress.phase_err_abs_ge_1p0_symbols)
-                .mary_llr(progress.llr_second_pass_attempts, progress.llr_second_pass_rescued)
+                .frame_stats(
+                    progress.fde_selected_frames + progress.raw_selected_frames,
+                    progress.received_packets,
+                    progress.crc_error_packets,
+                )
+                .mary_raw_ber(
+                    raw_bit_errors,
+                    raw_bits_compared,
+                    raw_error_runs,
+                    raw_error_run_bits,
+                    raw_error_run_max,
+                    codeword_count,
+                    codeword_error_sum,
+                    codeword_error_max,
+                    codeword_error_weights,
+                )
+                .mary_post_ber(
+                    post_bit_errors,
+                    post_bits_compared,
+                    post_error_runs,
+                    post_error_run_bits,
+                    post_error_run_max,
+                    post_codeword_count,
+                    post_codeword_error_sum,
+                    post_codeword_error_max,
+                    post_codeword_error_weights,
+                )
+                .mary_phase(
+                    progress.last_est_snr_db,
+                    progress.phase_gate_on_symbols,
+                    progress.phase_gate_off_symbols,
+                    progress.phase_innovation_reject_symbols,
+                    progress.phase_err_abs_sum_rad,
+                    progress.phase_err_abs_count,
+                    progress.phase_err_abs_ge_0p5_symbols,
+                    progress.phase_err_abs_ge_1p0_symbols,
+                )
+                .mary_llr(
+                    progress.llr_second_pass_attempts,
+                    progress.llr_second_pass_rescued,
+                )
                 .mary_decode_stats(post_decode_attempts, post_decode_matched)
                 .build();
         }
@@ -1916,51 +2156,90 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
                 gap_sig = apply_clock_drift_ppm(&gap_sig, imp.ppm);
             }
             state.elapsed_sec += gap_sig.len() as f32 / tx_cfg.sample_rate;
-            let complete = process_samples_in_chunks(&gap_sig, chunk, &mut decoder, &mut state, |progress, _state| {
-                if progress.complete {
-                    ControlFlow::Complete
-                } else {
-                    ControlFlow::Continue
-                }
-            });
+            let complete = process_samples_in_chunks(
+                &gap_sig,
+                chunk,
+                &mut decoder,
+                &mut state,
+                |progress, _state| {
+                    if progress.complete {
+                        ControlFlow::Complete
+                    } else {
+                        ControlFlow::Continue
+                    }
+                },
+            );
             if complete {
                 let progress = decoder.process_samples(&[]);
                 let recovered = decoder.recovered_data();
                 let errs = count_bit_errors_bytes(&payload, recovered);
                 let bits_compared = payload.len() * 8;
-                let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
-                let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
-                let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
-                let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
-                let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
-                let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
-                let codeword_count = codeword_error_weights.len();
-                let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
-                let codeword_error_max =
-                    codeword_error_weights.iter().copied().max().unwrap_or(0);
-                let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
-                let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
-                let post_error_runs = *post_error_runs_acc.lock().unwrap();
-                let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
-                let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
-                let post_codeword_error_weights =
-                    post_codeword_error_weights_acc.lock().unwrap().clone();
-                let post_codeword_count = post_codeword_error_weights.len();
-                let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
-                let post_codeword_error_max = post_codeword_error_weights
-                    .iter()
-                    .copied()
-                    .max()
-                    .unwrap_or(0);
-                let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
-                let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
+                let (
+                    raw_bit_errors,
+                    raw_bits_compared,
+                    raw_error_runs,
+                    raw_error_run_bits,
+                    raw_error_run_max,
+                    codeword_count,
+                    codeword_error_sum,
+                    codeword_error_max,
+                    codeword_error_weights,
+                ) = ber_accum.extract_pre_fec();
+                let (
+                    post_bit_errors,
+                    post_bits_compared,
+                    post_error_runs,
+                    post_error_run_bits,
+                    post_error_run_max,
+                    post_codeword_count,
+                    post_codeword_error_sum,
+                    post_codeword_error_max,
+                    post_codeword_error_weights,
+                ) = ber_accum.extract_post_fec();
+                let (post_decode_attempts, post_decode_matched) = ber_accum.extract_decode_stats();
                 return TrialResultBuilder::new(&state)
                     .success(errs == 0, errs, bits_compared)
-                    .frame_stats(progress.fde_selected_frames + progress.raw_selected_frames, progress.received_packets, progress.crc_error_packets)
-                    .mary_raw_ber(raw_bit_errors, raw_bits_compared, raw_error_runs, raw_error_run_bits, raw_error_run_max, codeword_count, codeword_error_sum, codeword_error_max, codeword_error_weights)
-                    .mary_post_ber(post_bit_errors, post_bits_compared, post_error_runs, post_error_run_bits, post_error_run_max, post_codeword_count, post_codeword_error_sum, post_codeword_error_max, post_codeword_error_weights)
-                    .mary_phase(progress.last_est_snr_db, progress.phase_gate_on_symbols, progress.phase_gate_off_symbols, progress.phase_innovation_reject_symbols, progress.phase_err_abs_sum_rad, progress.phase_err_abs_count, progress.phase_err_abs_ge_0p5_symbols, progress.phase_err_abs_ge_1p0_symbols)
-                    .mary_llr(progress.llr_second_pass_attempts, progress.llr_second_pass_rescued)
+                    .frame_stats(
+                        progress.fde_selected_frames + progress.raw_selected_frames,
+                        progress.received_packets,
+                        progress.crc_error_packets,
+                    )
+                    .mary_raw_ber(
+                        raw_bit_errors,
+                        raw_bits_compared,
+                        raw_error_runs,
+                        raw_error_run_bits,
+                        raw_error_run_max,
+                        codeword_count,
+                        codeword_error_sum,
+                        codeword_error_max,
+                        codeword_error_weights,
+                    )
+                    .mary_post_ber(
+                        post_bit_errors,
+                        post_bits_compared,
+                        post_error_runs,
+                        post_error_run_bits,
+                        post_error_run_max,
+                        post_codeword_count,
+                        post_codeword_error_sum,
+                        post_codeword_error_max,
+                        post_codeword_error_weights,
+                    )
+                    .mary_phase(
+                        progress.last_est_snr_db,
+                        progress.phase_gate_on_symbols,
+                        progress.phase_gate_off_symbols,
+                        progress.phase_innovation_reject_symbols,
+                        progress.phase_err_abs_sum_rad,
+                        progress.phase_err_abs_count,
+                        progress.phase_err_abs_ge_0p5_symbols,
+                        progress.phase_err_abs_ge_1p0_symbols,
+                    )
+                    .mary_llr(
+                        progress.llr_second_pass_attempts,
+                        progress.llr_second_pass_rescued,
+                    )
                     .mary_decode_stats(post_decode_attempts, post_decode_matched)
                     .build();
             }
@@ -1991,38 +2270,73 @@ fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> TrialRes
 
     let bits_compared = payload.len() * 8;
     let bit_errors = count_bit_errors_bytes(&payload, decoder.recovered_data());
-    let raw_bit_errors = *raw_bit_errors_acc.lock().unwrap();
-    let raw_bits_compared = *raw_bits_compared_acc.lock().unwrap();
-    let raw_error_runs = *raw_error_runs_acc.lock().unwrap();
-    let raw_error_run_bits = *raw_error_run_bits_acc.lock().unwrap();
-    let raw_error_run_max = *raw_error_run_max_acc.lock().unwrap();
-    let codeword_error_weights = codeword_error_weights_acc.lock().unwrap().clone();
-    let codeword_count = codeword_error_weights.len();
-    let codeword_error_sum = codeword_error_weights.iter().sum::<usize>();
-    let codeword_error_max = codeword_error_weights.iter().copied().max().unwrap_or(0);
-    let post_bit_errors = *post_bit_errors_acc.lock().unwrap();
-    let post_bits_compared = *post_bits_compared_acc.lock().unwrap();
-    let post_error_runs = *post_error_runs_acc.lock().unwrap();
-    let post_error_run_bits = *post_error_run_bits_acc.lock().unwrap();
-    let post_error_run_max = *post_error_run_max_acc.lock().unwrap();
-    let post_codeword_error_weights = post_codeword_error_weights_acc.lock().unwrap().clone();
-    let post_codeword_count = post_codeword_error_weights.len();
-    let post_codeword_error_sum = post_codeword_error_weights.iter().sum::<usize>();
-    let post_codeword_error_max = post_codeword_error_weights
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(0);
-    let post_decode_attempts = *post_decode_attempts_acc.lock().unwrap();
-    let post_decode_matched = *post_decode_matched_acc.lock().unwrap();
+    let (
+        raw_bit_errors,
+        raw_bits_compared,
+        raw_error_runs,
+        raw_error_run_bits,
+        raw_error_run_max,
+        codeword_count,
+        codeword_error_sum,
+        codeword_error_max,
+        codeword_error_weights,
+    ) = ber_accum.extract_pre_fec();
+    let (
+        post_bit_errors,
+        post_bits_compared,
+        post_error_runs,
+        post_error_run_bits,
+        post_error_run_max,
+        post_codeword_count,
+        post_codeword_error_sum,
+        post_codeword_error_max,
+        post_codeword_error_weights,
+    ) = ber_accum.extract_post_fec();
+    let (post_decode_attempts, post_decode_matched) = ber_accum.extract_decode_stats();
     let final_progress = decoder.process_samples(&[]);
     TrialResultBuilder::new(&state)
         .success(false, bit_errors, bits_compared)
-        .frame_stats(final_progress.synced_frames, final_progress.received_packets, final_progress.crc_error_packets)
-        .mary_raw_ber(raw_bit_errors, raw_bits_compared, raw_error_runs, raw_error_run_bits, raw_error_run_max, codeword_count, codeword_error_sum, codeword_error_max, codeword_error_weights)
-        .mary_post_ber(post_bit_errors, post_bits_compared, post_error_runs, post_error_run_bits, post_error_run_max, post_codeword_count, post_codeword_error_sum, post_codeword_error_max, post_codeword_error_weights)
-        .mary_phase(final_progress.last_est_snr_db, final_progress.phase_gate_on_symbols, final_progress.phase_gate_off_symbols, final_progress.phase_innovation_reject_symbols, final_progress.phase_err_abs_sum_rad, final_progress.phase_err_abs_count, final_progress.phase_err_abs_ge_0p5_symbols, final_progress.phase_err_abs_ge_1p0_symbols)
-        .mary_llr(final_progress.llr_second_pass_attempts, final_progress.llr_second_pass_rescued)
+        .frame_stats(
+            final_progress.synced_frames,
+            final_progress.received_packets,
+            final_progress.crc_error_packets,
+        )
+        .mary_raw_ber(
+            raw_bit_errors,
+            raw_bits_compared,
+            raw_error_runs,
+            raw_error_run_bits,
+            raw_error_run_max,
+            codeword_count,
+            codeword_error_sum,
+            codeword_error_max,
+            codeword_error_weights,
+        )
+        .mary_post_ber(
+            post_bit_errors,
+            post_bits_compared,
+            post_error_runs,
+            post_error_run_bits,
+            post_error_run_max,
+            post_codeword_count,
+            post_codeword_error_sum,
+            post_codeword_error_max,
+            post_codeword_error_weights,
+        )
+        .mary_phase(
+            final_progress.last_est_snr_db,
+            final_progress.phase_gate_on_symbols,
+            final_progress.phase_gate_off_symbols,
+            final_progress.phase_innovation_reject_symbols,
+            final_progress.phase_err_abs_sum_rad,
+            final_progress.phase_err_abs_count,
+            final_progress.phase_err_abs_ge_0p5_symbols,
+            final_progress.phase_err_abs_ge_1p0_symbols,
+        )
+        .mary_llr(
+            final_progress.llr_second_pass_attempts,
+            final_progress.llr_second_pass_rescued,
+        )
         .mary_decode_stats(post_decode_attempts, post_decode_matched)
         .build()
 }
