@@ -48,6 +48,9 @@ struct SearchState {
 }
 
 struct FrameSession {
+    tracking_state: TrackingState,
+    packets_processed_in_burst: usize,
+    consecutive_crc_errors: usize,
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
@@ -56,10 +59,35 @@ struct FrameSession {
 impl FrameSession {
     fn new(warmup_samples: usize, frame_samples: usize) -> Self {
         Self {
+            tracking_state: TrackingState::new(),
+            packets_processed_in_burst: 0,
+            consecutive_crc_errors: 0,
             pending_warmup_samples: warmup_samples,
             pending_warmup_input_samples: warmup_samples,
             remaining_samples_in_frame: frame_samples as isize,
         }
+    }
+
+    fn packets_decoded_in_burst(&self) -> usize {
+        self.packets_processed_in_burst.saturating_sub(1)
+    }
+
+    fn sync_handoff_completed(&self) -> bool {
+        self.packets_processed_in_burst != 0
+    }
+
+    fn complete_sync_handoff(&mut self, tracking_state: TrackingState) {
+        self.tracking_state = tracking_state;
+        self.packets_processed_in_burst = 1;
+    }
+
+    fn record_packet_result(&mut self, success: bool) {
+        if success {
+            self.consecutive_crc_errors = 0;
+        } else {
+            self.consecutive_crc_errors += 1;
+        }
+        self.packets_processed_in_burst += 1;
     }
 
     fn input_fully_consumed(&self) -> bool {
@@ -106,9 +134,6 @@ pub struct Decoder {
     state: DecoderState,
     search: SearchState,
     frame_session: Option<FrameSession>,
-    tracking_state: Option<TrackingState>,
-    packets_processed_in_burst: usize,
-    consecutive_crc_errors: usize,
     viterbi_list_size: usize,
     llr_erasure_second_pass_enabled: bool,
     llr_erasure_quantile: f32,
@@ -127,6 +152,18 @@ pub struct Decoder {
 }
 
 impl Decoder {
+    fn frame_session(&self) -> &FrameSession {
+        self.frame_session
+            .as_ref()
+            .expect("frame session must be initialized")
+    }
+
+    fn frame_session_mut(&mut self) -> &mut FrameSession {
+        self.frame_session
+            .as_mut()
+            .expect("frame session must be initialized")
+    }
+
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let tc = MarySyncDetector::THRESHOLD_COARSE_DEFAULT;
@@ -147,9 +184,6 @@ impl Decoder {
             state: DecoderState::Searching,
             search: SearchState::default(),
             frame_session: None,
-            tracking_state: None,
-            packets_processed_in_burst: 0,
-            consecutive_crc_errors: 0,
             viterbi_list_size: 1,
             llr_erasure_second_pass_enabled: false,
             llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
@@ -249,7 +283,9 @@ impl Decoder {
     }
 
     fn packets_decoded_in_burst(&self) -> usize {
-        self.packets_processed_in_burst.saturating_sub(1)
+        self.frame_session
+            .as_ref()
+            .map_or(0, FrameSession::packets_decoded_in_burst)
     }
 
     fn frame_input_fully_consumed(&self) -> bool {
@@ -276,8 +312,6 @@ impl Decoder {
         self.equalization.clear_equalized_buffer();
         self.state = DecoderState::Searching;
         self.frame_session = None;
-        self.tracking_state = None;
-        self.packets_processed_in_burst = 0;
     }
 
     fn trim_search_buffers_if_needed(&mut self) {
@@ -330,15 +364,7 @@ impl Decoder {
 
         self.equalize_from_complex_buffer(warmup_real_len, warmup_real_len);
 
-        self.packets_processed_in_burst = 0;
-        self.consecutive_crc_errors = 0;
-        self.tracking_state = Some(TrackingState {
-            phase_ref: Complex32::new(1.0, 0.0),
-            phase_rate: 0.0,
-            timing_offset: 0.0,
-            timing_rate: 0.0,
-            phase_gate_enabled: false,
-        });
+        self.frame_session_mut().tracking_state = TrackingState::new();
         self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
         self.state = DecoderState::EqualizedDecoding;
     }
@@ -356,7 +382,7 @@ impl Decoder {
     }
 
     fn perform_sync_handoff_if_needed(&mut self, spc: usize, sync_word_bits: usize) -> bool {
-        if self.packets_processed_in_burst != 0 {
+        if self.frame_session().sync_handoff_completed() {
             return true;
         }
 
@@ -397,7 +423,7 @@ impl Decoder {
             self.equalization.drain_equalized_buffer(best_timing_offset);
         }
 
-        let mut st = self.tracking_state.expect("st must exist");
+        let mut st = self.frame_session().tracking_state;
 
         self.complex_buffer.clear();
         if self.complex_buffer.capacity() < sync_word_bits {
@@ -509,8 +535,7 @@ impl Decoder {
             st.timing_rate = 0.0;
         }
 
-        self.tracking_state = Some(st);
-        self.packets_processed_in_burst = 1;
+        self.frame_session_mut().complete_sync_handoff(st);
         self.equalization
             .drain_equalized_buffer(required_sync_samples.saturating_sub(spc));
         true
@@ -666,11 +691,11 @@ impl Decoder {
             self.abort_current_frame();
             return false;
         }
-        let mut st = self.tracking_state.expect("st exists");
+        let mut st = self.frame_session().tracking_state;
         let offset_int = st.timing_offset.round().clamp(-1.0, 1.0) as i32;
         let actual_drain_len = (packet_samples as i32 + offset_int).max(0) as usize;
         st.timing_offset -= offset_int as f32;
-        self.tracking_state = Some(st);
+        self.frame_session_mut().tracking_state = st;
 
         let buffer_len = self.equalization.equalized_buffer().len();
         self.equalization.equalized_buffer_mut()
@@ -680,12 +705,7 @@ impl Decoder {
             self.receive_decoded_packet(packet);
         }
 
-        if result.success {
-            self.consecutive_crc_errors = 0;
-        } else {
-            self.consecutive_crc_errors += 1;
-        }
-        self.packets_processed_in_burst += 1;
+        self.frame_session_mut().record_packet_result(result.success);
 
         if self.frame_is_complete(max_packets) {
             self.transition_to_searching_after_frame_end();
@@ -696,9 +716,7 @@ impl Decoder {
 
     fn process_packet_core(&mut self) -> packet_decoder::PacketProcessResult {
         let spc = self.config.proc_samples_per_chip().max(1);
-        let mut tracking_state = self
-            .tracking_state
-            .expect("Tracking state must be initialized");
+        let mut tracking_state = self.frame_session().tracking_state;
         let mut prev_phase = self.demodulator.prev_phase();
         let equalized_buffer = self.equalization.equalized_buffer();
         let correlators = self.demodulator.correlators();
@@ -730,7 +748,7 @@ impl Decoder {
                 )
             },
         );
-        self.tracking_state = Some(tracking_state);
+        self.frame_session_mut().tracking_state = tracking_state;
         self.demodulator.set_prev_phase(prev_phase);
         result
     }
@@ -889,9 +907,6 @@ impl Decoder {
         self.state = DecoderState::Searching;
         self.search = SearchState::default();
         self.frame_session = None;
-        self.tracking_state = None;
-        self.packets_processed_in_burst = 0;
-        self.consecutive_crc_errors = 0;
         self.stats.reset();
         self.packet_decode_buffers.clear();
     }
@@ -1744,13 +1759,19 @@ mod tests {
 
         decoder.state = DecoderState::EqualizedDecoding;
         decoder.config.packets_per_burst = 2;
-        decoder.packets_processed_in_burst = 1;
-        decoder.tracking_state = Some(TrackingState {
-            phase_ref: Complex32::new(1.0, 0.0),
-            phase_rate: 0.0,
-            timing_offset: -(spc as f32) * tracking::TRACKING_TIMING_LIMIT_CHIP,
-            timing_rate: 0.0,
-            phase_gate_enabled: false,
+        decoder.frame_session = Some(FrameSession {
+            tracking_state: TrackingState {
+                phase_ref: Complex32::new(1.0, 0.0),
+                phase_rate: 0.0,
+                timing_offset: -(spc as f32) * tracking::TRACKING_TIMING_LIMIT_CHIP,
+                timing_rate: 0.0,
+                phase_gate_enabled: false,
+            },
+            packets_processed_in_burst: 1,
+            consecutive_crc_errors: 0,
+            pending_warmup_samples: 0,
+            pending_warmup_input_samples: 0,
+            remaining_samples_in_frame: packet_samples as isize,
         });
         decoder.equalization.clear_equalized_buffer();
         decoder.equalization.equalized_buffer_mut().extend_from_slice(&vec![Complex32::new(0.0, 0.0); packet_samples + spc + 8]);
