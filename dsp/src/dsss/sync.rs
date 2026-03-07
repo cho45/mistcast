@@ -68,7 +68,6 @@ pub struct SyncDetector {
     config: DspConfig,
     pn: Vec<f32>,
     sync_symbols: Vec<f32>, // プリアンブル構造 + SYNC_WORD
-    sf: usize,
     spc: usize,
     sym_len: usize,
     pub threshold_coarse: f32,
@@ -76,6 +75,9 @@ pub struct SyncDetector {
 }
 
 impl SyncDetector {
+    pub fn config(&self) -> &DspConfig {
+        &self.config
+    }
     /// 基準となるデフォルトのしきい値 (SF=15 用に最適化)
     pub const THRESHOLD_COARSE_DEFAULT: f32 = 0.10;
     pub const THRESHOLD_FINE_DEFAULT: f32 = 0.14;
@@ -114,7 +116,6 @@ impl SyncDetector {
             config,
             pn,
             sync_symbols,
-            sf,
             spc,
             sym_len,
             threshold_coarse,
@@ -938,7 +939,7 @@ mod tests {
                 for rep in 0..repeat {
                     let (ci, cq, en) =
                         detector.correlate_one_symbol(&i_noise, &q_noise, rep * sym_len);
-                    total_rho_p += (ci * ci + cq * cq) / (detector.sf as f32 * en);
+                    total_rho_p += (ci * ci + cq * cq) / (detector.config().spread_factor() as f32 * en);
                 }
                 let rho_p = total_rho_p / repeat as f32;
                 let rho_phi = (score - 0.7 * rho_p) / 0.3;
@@ -1120,7 +1121,7 @@ mod tests {
         let detector = new_detector_default(config.clone());
         let sf = config.spread_factor();
 
-        let mut modulator = Modulator::new(config.clone());
+        let _modulator = Modulator::new(config.clone());
         
         // 遅延を排してチップレベルで比較するために、内部メソッドを模倣
         let mut mseq = crate::common::msequence::MSequence::new(config.mseq_order);
@@ -1170,9 +1171,10 @@ mod tests {
         println!("Modulator symbols (I): {:?}", mod_symbols);
 
         assert_eq!(detector.sync_symbols.len(), mod_symbols.len());
-        for i in 0..detector.sync_symbols.len() {
-            assert!((detector.sync_symbols[i] - mod_symbols[i]).abs() < 1e-6,
-                "Symbol mismatch at index {}: detector={}, mod={}", i, detector.sync_symbols[i], mod_symbols[i]);
+        for (i, &expected) in detector.sync_symbols.iter().enumerate() {
+            let mod_symbol = mod_symbols[i];
+            assert!((expected - mod_symbol).abs() < 1e-6,
+                "Symbol mismatch at index {}: detector={}, mod={}", i, expected, mod_symbol);
         }
     }
 
@@ -1192,14 +1194,13 @@ mod tests {
         let mut sync_count = 0;
         println!("--- Repeated detect on single frame ---");
         while search_idx < i.len() {
-            let (res, next_idx) = detector.detect(&i, &q, search_idx);
+            let (res, _next_idx) = detector.detect(&i, &q, search_idx);
             if let Some(sync) = res {
                 sync_count += 1;
                 println!("Sync {}: peak_idx={}, score={:.4}", sync_count, sync.peak_sample_idx, sync.score);
                 // Decoder::process_samples と同様に、1シンボル分だけ進めてみる
                 search_idx = sync.peak_sample_idx - (config.preamble_repeat * sym_len) + sym_len;
             } else {
-                search_idx = next_idx;
                 break;
             }
         }
@@ -1211,8 +1212,8 @@ mod tests {
 
     #[test]
     fn test_sync_zombie_repro_on_payload() {
-        let mut config = crate::dsss::params::dsp_config_48k();
-        let detector = new_detector_default(config.clone());
+        let config = crate::dsss::params::dsp_config_48k();
+        let _detector = new_detector_default(config.clone());
         let sf = config.spread_factor();
         let spc = config.proc_samples_per_chip();
         let sym_len = sf * spc;
@@ -1243,14 +1244,13 @@ mod tests {
         
         println!("--- Zombie Sync Check with Threshold 0.6 ---");
         while search_idx + (detector_robust.sync_symbols.len() * sym_len) < i_ch.len() {
-            let (res, next_idx) = detector_robust.detect(&i_ch, &q_ch, search_idx);
+            let (res, _next_idx) = detector_robust.detect(&i_ch, &q_ch, search_idx);
             if let Some(sync) = res {
                 sync_count += 1;
                 println!("Sync {}: peak_idx={}, score={:.4}", sync_count, sync.peak_sample_idx, sync.score);
                 // 検出されたら同期ワードの長さ分スキップ (安全な進め方)
                 search_idx = sync.peak_sample_idx;
             } else {
-                search_idx = next_idx;
                 break;
             }
         }
