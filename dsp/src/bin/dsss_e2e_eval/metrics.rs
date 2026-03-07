@@ -70,24 +70,22 @@ pub fn error_weight_hist(weights: &[usize]) -> Option<String> {
 
 #[derive(Default, Clone, Debug)]
 pub struct TrialResult {
-    pub success: bool,
-    pub completion_sec: Option<f32>,
+    pub avg_completion_sec: Option<f32>,
     pub elapsed_sec: f32,
-    pub attempts: usize,
+    pub frame_attempts: usize,
+    pub packets_per_frame: usize,
     /// 同期成立したフレーム数
     pub synced_frames: usize,
-    /// CRC通過フレーム数（Accepted）
-    pub accepted_frames: usize,
-    /// CRCエラーフレーム数
-    pub crc_error_frames: usize,
-    pub first_attempt_success: bool,
+    /// CRC通過パケット数（Accepted）
+    pub accepted_packets: usize,
+    /// CRCエラーパケット数
+    pub crc_error_packets: usize,
     pub bit_errors: usize,
     pub bits_compared: usize,
-    pub dropped_attempts: usize,
+    pub dropped_frames: usize,
     pub tx_signal_energy_sum: f64,
     pub tx_signal_samples: usize,
     pub process_time_ns: u64,
-    /// FEC符号化ビットのハード判定BER（Fountain符号の外側の生BER）
     pub raw_bit_errors: usize,
     pub raw_bits_compared: usize,
     pub raw_error_runs: usize,
@@ -122,17 +120,15 @@ pub struct TrialResult {
 
 #[derive(Default, Clone, Debug)]
 pub struct Metrics {
-    pub trials: usize,
-    pub successes: usize,
-    pub first_attempt_successes: usize,
-    pub total_attempts: usize,
+    pub total_sim_sec: f32,
+    pub total_frame_attempts: usize,
+    pub packets_per_frame: usize,
     pub total_synced_frames: usize,
-    pub total_accepted_frames: usize,
-    pub total_crc_error_frames: usize,
+    pub total_accepted_packets: usize,
+    pub total_crc_error_packets: usize,
     pub total_bit_errors: usize,
     pub total_bits_compared: usize,
-    pub total_elapsed_sec: f32,
-    pub dropped_attempts: usize,
+    pub dropped_frames: usize,
     pub total_tx_signal_energy: f64,
     pub total_tx_signal_samples: usize,
     pub total_process_time_ns: u64,
@@ -172,8 +168,8 @@ pub struct Metrics {
 
 pub struct TrialState {
     pub elapsed_sec: f32,
-    pub attempts: usize,
-    pub dropped_attempts: usize,
+    pub frame_attempts: usize,
+    pub dropped_frames: usize,
     pub tx_signal_energy_sum: f64,
     pub tx_signal_samples: usize,
     pub total_process_ns: u64,
@@ -191,17 +187,16 @@ pub struct PhaseStats {
 }
 
 pub struct TrialResultBuilder {
-    pub success: bool,
-    pub completion_sec: Option<f32>,
+    pub avg_completion_sec: Option<f32>,
     pub elapsed_sec: f32,
-    pub attempts: usize,
+    pub frame_attempts: usize,
+    pub packets_per_frame: usize,
     pub synced_frames: usize,
-    pub accepted_frames: usize,
-    pub crc_error_frames: usize,
-    pub first_attempt_success: bool,
+    pub accepted_packets: usize,
+    pub crc_error_packets: usize,
     pub bit_errors: usize,
     pub bits_compared: usize,
-    pub dropped_attempts: usize,
+    pub dropped_frames: usize,
     pub tx_signal_energy_sum: f64,
     pub tx_signal_samples: usize,
     pub process_time_ns: u64,
@@ -238,19 +233,18 @@ pub struct TrialResultBuilder {
 }
 
 impl TrialResultBuilder {
-    pub fn new(state: &TrialState) -> Self {
+    pub fn new(state: &TrialState, packets_per_frame: usize) -> Self {
         Self {
-            success: false,
-            completion_sec: None,
+            avg_completion_sec: None,
             elapsed_sec: state.elapsed_sec,
-            attempts: state.attempts,
+            frame_attempts: state.frame_attempts,
+            packets_per_frame,
             synced_frames: 0,
-            accepted_frames: 0,
-            crc_error_frames: 0,
-            first_attempt_success: false,
+            accepted_packets: 0,
+            crc_error_packets: 0,
             bit_errors: 0,
             bits_compared: 0,
-            dropped_attempts: state.dropped_attempts,
+            dropped_frames: state.dropped_frames,
             tx_signal_energy_sum: state.tx_signal_energy_sum,
             tx_signal_samples: state.tx_signal_samples,
             process_time_ns: state.total_process_ns,
@@ -287,33 +281,31 @@ impl TrialResultBuilder {
         }
     }
 
-    pub fn success(mut self, success: bool, bit_errors: usize, bits_compared: usize) -> Self {
-        self.success = success;
-        self.completion_sec = if success {
-            Some(self.elapsed_sec)
-        } else {
-            None
-        };
-        self.first_attempt_success = success && self.attempts == 1;
+    pub fn completion_sec(mut self, avg: Option<f32>) -> Self {
+        self.avg_completion_sec = avg;
+        self
+    }
+
+    pub fn bit_errors(mut self, bit_errors: usize, bits_compared: usize) -> Self {
         self.bit_errors = bit_errors;
         self.bits_compared = bits_compared;
         self
     }
 
-    pub fn frame_stats<SF, AF, EF>(
+    pub fn packet_stats<SF, AP, EP>(
         mut self,
         synced_frames: SF,
-        accepted_frames: AF,
-        crc_error_frames: EF,
+        accepted_packets: AP,
+        crc_error_packets: EP,
     ) -> Self
     where
         SF: Into<usize>,
-        AF: Into<usize>,
-        EF: Into<usize>,
+        AP: Into<usize>,
+        EP: Into<usize>,
     {
         self.synced_frames = synced_frames.into();
-        self.accepted_frames = accepted_frames.into();
-        self.crc_error_frames = crc_error_frames.into();
+        self.accepted_packets = accepted_packets.into();
+        self.crc_error_packets = crc_error_packets.into();
         self
     }
 
@@ -373,17 +365,16 @@ impl TrialResultBuilder {
 
     pub fn build(self) -> TrialResult {
         TrialResult {
-            success: self.success,
-            completion_sec: self.completion_sec,
+            avg_completion_sec: self.avg_completion_sec,
             elapsed_sec: self.elapsed_sec,
-            attempts: self.attempts,
+            frame_attempts: self.frame_attempts,
+            packets_per_frame: self.packets_per_frame,
             synced_frames: self.synced_frames,
-            accepted_frames: self.accepted_frames,
-            crc_error_frames: self.crc_error_frames,
-            first_attempt_success: self.first_attempt_success,
+            accepted_packets: self.accepted_packets,
+            crc_error_packets: self.crc_error_packets,
             bit_errors: self.bit_errors,
             bits_compared: self.bits_compared,
-            dropped_attempts: self.dropped_attempts,
+            dropped_frames: self.dropped_frames,
             tx_signal_energy_sum: self.tx_signal_energy_sum,
             tx_signal_samples: self.tx_signal_samples,
             process_time_ns: self.process_time_ns,
@@ -423,15 +414,15 @@ impl TrialResultBuilder {
 
 impl Metrics {
     pub fn push(&mut self, t: TrialResult) {
-        self.trials += 1;
-        self.total_elapsed_sec += t.elapsed_sec;
-        self.total_attempts += t.attempts;
+        self.total_sim_sec += t.elapsed_sec;
+        self.total_frame_attempts += t.frame_attempts;
+        self.packets_per_frame = t.packets_per_frame;
         self.total_synced_frames += t.synced_frames;
-        self.total_accepted_frames += t.accepted_frames;
-        self.total_crc_error_frames += t.crc_error_frames;
+        self.total_accepted_packets += t.accepted_packets;
+        self.total_crc_error_packets += t.crc_error_packets;
         self.total_bit_errors += t.bit_errors;
         self.total_bits_compared += t.bits_compared;
-        self.dropped_attempts += t.dropped_attempts;
+        self.dropped_frames += t.dropped_frames;
         self.total_raw_bit_errors += t.raw_bit_errors;
         self.total_raw_bits_compared += t.raw_bits_compared;
         self.total_raw_error_runs += t.raw_error_runs;
@@ -470,36 +461,31 @@ impl Metrics {
         self.total_llr_second_pass_attempts += t.llr_second_pass_attempts;
         self.total_llr_second_pass_rescued += t.llr_second_pass_rescued;
 
-        if t.first_attempt_success {
-            self.first_attempt_successes += 1;
-        }
-        if t.success {
-            self.successes += 1;
-            if let Some(c) = t.completion_sec {
-                self.completion_secs.push(c);
-            }
+        if let Some(c) = t.avg_completion_sec {
+            self.completion_secs.push(c);
         }
     }
 
     pub fn p_complete(&self) -> f32 {
-        ratio(self.successes, self.trials)
+        let total_packets_sent = self.total_frame_attempts * self.packets_per_frame;
+        ratio(self.total_accepted_packets, total_packets_sent)
     }
 
     pub fn synced_frame_ratio(&self) -> f32 {
-        ratio(self.total_synced_frames, self.total_attempts)
+        ratio(self.total_synced_frames, self.total_frame_attempts)
     }
 
     pub fn crc_pass_ratio(&self) -> f32 {
         ratio(
-            self.total_accepted_frames,
-            self.total_accepted_frames + self.total_crc_error_frames,
+            self.total_accepted_packets,
+            self.total_accepted_packets + self.total_crc_error_packets,
         )
     }
 
     pub fn llr_second_pass_trigger_ratio(&self) -> f32 {
         ratio(
             self.total_llr_second_pass_attempts,
-            self.total_accepted_frames + self.total_crc_error_frames,
+            self.total_accepted_packets + self.total_crc_error_packets,
         )
     }
 
@@ -531,10 +517,10 @@ impl Metrics {
     }
 
     pub fn goodput_effective_bps(&self, payload_bits: usize) -> f32 {
-        if self.total_elapsed_sec <= 0.0 {
+        if self.total_sim_sec <= 0.0 {
             0.0
         } else {
-            (payload_bits * self.successes) as f32 / self.total_elapsed_sec
+            (payload_bits * self.total_accepted_packets) as f32 / self.total_sim_sec
         }
     }
 

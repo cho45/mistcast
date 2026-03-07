@@ -57,7 +57,7 @@ pub const DEFAULT_COLUMNS: &[&str] = &[
     "scenario",
     "phy",
     "mary_fde_mode",
-    "trials",
+    "total_sim_sec",
     "awgn_snr_db",
     "p_complete",
     "ber",
@@ -84,7 +84,7 @@ pub const ALL_COLUMNS: &[&str] = &[
     "scenario",
     "phy",
     "mary_fde_mode",
-    "trials",
+    "total_sim_sec",
     "awgn_snr_db",
     "p_complete",
     "ber",
@@ -176,12 +176,10 @@ pub struct Cli {
     pub phy: Phy,
     #[arg(long, value_enum, default_value_t = EvalMode::Point)]
     pub mode: EvalMode,
-    #[arg(long, value_parser = parse_positive_usize, default_value_t = 40)]
-    pub trials: usize,
+    #[arg(long = "total-sim-sec", value_parser = parse_positive_f32, default_value_t = 10.0)]
+    pub total_sim_sec: f32,
     #[arg(long = "payload-bytes", value_parser = parse_positive_usize, default_value_t = 64)]
     pub payload_bytes: usize,
-    #[arg(long = "max-sec", value_parser = parse_positive_f32, default_value_t = 2.0)]
-    pub max_sec: f32,
     #[arg(long = "chunk-samples", value_parser = parse_positive_usize, default_value_t = 16_384)]
     pub chunk_samples: usize,
     #[arg(long = "gap-samples", default_value_t = 64)]

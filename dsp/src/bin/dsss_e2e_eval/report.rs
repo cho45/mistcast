@@ -9,9 +9,9 @@ struct ReportRow<'a> {
     scenario: &'a str,
     phy: String,
     mary_fde_mode: String,
-    trials: usize,
+    total_sim_sec: f32,
     awgn_snr_db: f32,
-    p_complete: f32,
+    p_complete: f32, // パケット到達率 (PDR)
     ber: f32,
     raw_ber: f32,
     goodput_effective_bps: f32,
@@ -62,7 +62,7 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
         scenario,
         phy: format!("{:?}", cli.phy).to_lowercase(),
         mary_fde_mode: format!("{:?}", cli.mary_fde_mode).to_lowercase(),
-        trials: m.trials,
+        total_sim_sec: m.total_sim_sec,
         awgn_snr_db: m.awgn_snr_db(imp.sigma).unwrap_or(f32::NAN),
         p_complete: m.p_complete(),
         ber: m.ber(),
@@ -110,7 +110,6 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
                 .has_headers(false)
                 .from_writer(Vec::new());
             
-            // selected_columnsの順序に従って値を抽出して書き込む
             let json_val = serde_json::to_value(&row).unwrap();
             let mut values = Vec::new();
             for col in cols {

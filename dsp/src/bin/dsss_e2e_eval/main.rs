@@ -14,17 +14,13 @@ use report::{print_awgn_limit, print_header, print_row};
 
 fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
     let mut metrics = Metrics::default();
-    for trial_idx in 0..cli.trials {
-        let trial_seed = cli
-            .seed
-            .wrapping_add((trial_idx as u64).wrapping_mul(0x9E37_79B9));
-        let tr = if matches!(cli.phy, Phy::Mary) {
-            run_trial_mary_e2e(imp, cli, trial_seed)
-        } else {
-            run_trial_dsss_e2e(imp, cli, trial_seed)
-        };
-        metrics.push(tr);
-    }
+    let trial_seed = cli.seed;
+    let tr = if matches!(cli.phy, Phy::Mary) {
+        run_trial_mary_e2e(imp, cli, trial_seed)
+    } else {
+        run_trial_dsss_e2e(imp, cli, trial_seed)
+    };
+    metrics.push(tr);
     print_row(scenario, cli, imp, &metrics);
     metrics
 }
@@ -149,9 +145,8 @@ mod tests {
         let cli = Cli {
             phy: Phy::Dsss,
             mode: EvalMode::Point,
-            trials: 1,
+            total_sim_sec: 1.0,
             payload_bytes: 16,
-            max_sec: 5.0,
             chunk_samples: 1024,
             gap_samples: 0,
             seed: 123,
@@ -193,7 +188,7 @@ mod tests {
         };
 
         let res = run_trial_dsss_e2e(&cli.base_impairment(), &cli, cli.seed);
-        assert!(res.success);
+        assert!(res.avg_completion_sec.is_some());
     }
 
     #[test]
@@ -201,9 +196,8 @@ mod tests {
         let cli = Cli {
             phy: Phy::Mary,
             mode: EvalMode::Point,
-            trials: 1,
+            total_sim_sec: 1.0,
             payload_bytes: 16,
-            max_sec: 5.0,
             chunk_samples: 1024,
             gap_samples: 0,
             seed: 456,
@@ -245,6 +239,6 @@ mod tests {
         };
 
         let res = run_trial_mary_e2e(&cli.base_impairment(), &cli, cli.seed);
-        assert!(res.success);
+        assert!(res.avg_completion_sec.is_some());
     }
 }

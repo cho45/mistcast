@@ -35,9 +35,6 @@ impl ProcessSamples for MaryDecoder {
 }
 
 /// チャンク単位でサンプルを処理し、処理時間を計測する
-///
-/// # 戻り値
-/// 完了した場合は true、継続する場合は false
 pub fn process_samples_in_chunks<D, F>(
     samples: &[f32],
     chunk_size: usize,
@@ -47,14 +44,14 @@ pub fn process_samples_in_chunks<D, F>(
 ) -> bool
 where
     D: ProcessSamples,
-    F: FnMut(&D::Progress, &mut TrialState) -> ControlFlow,
+    F: FnMut(&mut D, &D::Progress, &mut TrialState) -> ControlFlow,
 {
     for piece in samples.chunks(chunk_size) {
         let start_time = std::time::Instant::now();
         let progress = decoder.process_samples(piece);
         state.total_process_ns += start_time.elapsed().as_nanos() as u64;
 
-        match on_progress(&progress, state) {
+        match on_progress(decoder, &progress, state) {
             ControlFlow::Continue => {}
             ControlFlow::Complete => return true,
         }
@@ -84,7 +81,7 @@ pub fn run_warmup<E, D>(
     state.tx_signal_samples += warmup.len();
     let warmup_rx = apply_channel(&warmup, cfg.imp, cfg.rng, false);
     state.elapsed_sec += warmup_rx.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _| {
+    process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
 }
@@ -98,7 +95,7 @@ pub fn run_gap_with_completion<D, F>(
     mut on_complete: F,
 ) where
     D: ProcessSamples,
-    F: FnMut(&D::Progress, &mut TrialState) -> bool,
+    F: FnMut(&mut D, &D::Progress, &mut TrialState) -> bool,
 {
     if gap_samples == 0 {
         return;
@@ -109,8 +106,8 @@ pub fn run_gap_with_completion<D, F>(
         gap_sig = apply_clock_drift_ppm(&gap_sig, cfg.imp.ppm);
     }
     state.elapsed_sec += gap_sig.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&gap_sig, cfg.chunk_size, decoder, state, |progress, state| {
-        if on_complete(progress, state) {
+    process_samples_in_chunks(&gap_sig, cfg.chunk_size, decoder, state, |decoder, progress, state| {
+        if on_complete(decoder, progress, state) {
             ControlFlow::Complete
         } else {
             ControlFlow::Continue
@@ -136,7 +133,7 @@ pub fn run_flush<E, D>(
     state.tx_signal_samples += flush.len();
     let flush_rx = apply_channel(&flush, cfg.imp, cfg.rng, false);
     state.elapsed_sec += flush_rx.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&flush_rx, cfg.chunk_size, decoder, state, |_, _| {
+    process_samples_in_chunks(&flush_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
 }
@@ -159,22 +156,19 @@ pub fn run_tail<E, D>(
     state.tx_signal_samples += tail.len();
     let tail_rx = apply_channel(&tail, cfg.imp, cfg.rng, false);
     state.elapsed_sec += tail_rx.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&tail_rx, cfg.chunk_size, decoder, state, |_, _| {
+    process_samples_in_chunks(&tail_rx, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
 }
 
-/// ウォームアップ/テール信号生成のためのトレイト
 pub trait WarmupSignal {
     fn modulate_silence(&mut self, samples: usize) -> Vec<f32>;
 }
 
-/// フラッシュ信号生成のためのトレイト
 pub trait FlushSignal {
     fn flush(&mut self) -> Vec<f32>;
 }
 
-// DsssEncoderにトレイトを実装
 impl WarmupSignal for dsp::dsss::encoder::Encoder {
     fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
         dsp::dsss::encoder::Encoder::modulate_silence(self, samples)
@@ -187,7 +181,6 @@ impl FlushSignal for dsp::dsss::encoder::Encoder {
     }
 }
 
-// MaryEncoderにトレイトを実装
 impl WarmupSignal for dsp::mary::encoder::Encoder {
     fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
         dsp::mary::encoder::Encoder::modulate_silence(self, samples)
