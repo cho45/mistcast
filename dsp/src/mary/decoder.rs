@@ -21,41 +21,12 @@ use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
 use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector, SyncResult};
+use crate::mary::tracking::{self, TrackingState, PHASE_ERR_ABS_THRESH_0P5_RAD, PHASE_ERR_ABS_THRESH_1P0_RAD, TRACKING_PHASE_ERR_GATE_RAD, TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH, TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_PROP_GAIN_OFF, TRACKING_PHASE_STEP_CLAMP};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
 use num_complex::Complex32;
 
-const TRACKING_TIMING_PROP_GAIN: f32 = 0.18;
-const TRACKING_TIMING_RATE_GAIN: f32 = 0.01;
-// 位相追従ゲイン設計メモ (default_48k):
-// - proc_fs = chip_rate * INTERNAL_SPC = 8k * 3 = 24kHz
-// - payload 1symbol = PAYLOAD_SPREAD_FACTOR * spc = 16 * 3 = 48sample = 2.0ms
-// - 目標 CFO 20Hz の位相回転は Δphi = 2π f Ts ≈ 2π*20*0.002 = 0.251rad/symbol
-// - 目安:
-//   - TRACKING_PHASE_PROP_GAIN は 0.25..0.45 程度
-//   - TRACKING_PHASE_FREQ_GAIN は 0.03..0.08 程度
-//     (|phase_err|≈0.25rad 時に 8..30 symbol で 0.25rad/symbol へ到達できる帯域)
-const TRACKING_PHASE_PROP_GAIN: f32 = 0.35;
-const TRACKING_PHASE_FREQ_GAIN: f32 = 0.05;
-const TRACKING_TIMING_LIMIT_CHIP: f32 = 2.0;
-const TRACKING_TIMING_RATE_LIMIT_CHIP: f32 = 0.25;
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
-const TRACKING_PHASE_RATE_LIMIT_RAD: f32 = 2.6;
-const TRACKING_PHASE_STEP_CLAMP: f32 = 2.8;
-const TRACKING_PHASE_DQPSK_CONF_ON_MIN: f32 = 1.10;
-const TRACKING_PHASE_WALSH_CONF_ON_MIN: f32 = 0.12;
-const TRACKING_PHASE_SNR_PROXY_ON_MIN: f32 = 4.0;
-const TRACKING_PHASE_DQPSK_CONF_OFF_MIN: f32 = 0.70;
-const TRACKING_PHASE_WALSH_CONF_OFF_MIN: f32 = 0.08;
-const TRACKING_PHASE_SNR_PROXY_OFF_MIN: f32 = 2.8;
-const TRACKING_PHASE_RATE_HOLD_DECAY: f32 = 0.9;
-const TRACKING_PHASE_PROP_GAIN_OFF: f32 = 0.08;
-const TRACKING_PHASE_FREQ_GAIN_OFF: f32 = 0.01;
-const TRACKING_PHASE_OFF_ERR_CLAMP: f32 = 0.35;
-const TRACKING_PHASE_ERR_GATE_RAD: f32 = 1.00;
-const TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH: f32 = 1.60;
-const PHASE_ERR_ABS_THRESH_0P5_RAD: f32 = 0.5;
-const PHASE_ERR_ABS_THRESH_1P0_RAD: f32 = 1.0;
 const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.20;
 const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 
@@ -141,15 +112,6 @@ pub struct Decoder {
     packet_llrs_buffer: Vec<f32>,
     deinterleave_buffer: Vec<f32>,
     erasure_llr_buffer: Vec<f32>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TrackingState {
-    phase_ref: Complex32,
-    phase_rate: f32,
-    timing_offset: f32,
-    timing_rate: f32,
-    phase_gate_enabled: bool,
 }
 
 impl Decoder {
@@ -659,7 +621,7 @@ impl Decoder {
                 let early = self.despread_symbol_inner(symbol_start, -early_late_delta, sf_sync, 0);
                 let late = self.despread_symbol_inner(symbol_start, early_late_delta, sf_sync, 0);
                 if let (Some(e), Some(l)) = (early, late) {
-                    let err = timing_error_from_early_late(e[0].norm(), l[0].norm());
+                    let err = tracking::timing_error_from_early_late(e[0].norm(), l[0].norm());
                     let w = on.norm_sqr().max(1e-6);
                     let x = i as f32;
                     sw += w;
@@ -694,8 +656,8 @@ impl Decoder {
 
             let sync_to_payload_scale = PAYLOAD_SPREAD_FACTOR as f32 / SYNC_SPREAD_FACTOR as f32;
             st.phase_rate = (omega_sync * sync_to_payload_scale).clamp(
-                -TRACKING_PHASE_RATE_LIMIT_RAD,
-                TRACKING_PHASE_RATE_LIMIT_RAD,
+                -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
             );
 
             let last_sync_idx = (self.complex_buffer.len() - 1) as f32;
@@ -716,8 +678,8 @@ impl Decoder {
                 self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
             }
 
-            let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
-            let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
+            let timing_limit = spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
+            let timing_rate_limit = spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
             if sw > 1e-9 {
                 let denom = sw * sxx - sx * sx;
                 if denom.abs() > 1e-9 {
@@ -827,8 +789,8 @@ impl Decoder {
         let mut st = self
             .tracking_state
             .expect("Tracking state must be initialized");
-        let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
-        let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
+        let timing_limit = spc as f32 * tracking::TRACKING_TIMING_LIMIT_CHIP;
+        let timing_rate_limit = spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
 
         // ゼロアロケーション: 事前確保バッファ使用
@@ -896,7 +858,7 @@ impl Decoder {
             let snr_proxy = max_energy / (noise_floor + 1e-6);
             let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
             st.phase_gate_enabled =
-                next_phase_gate_enabled(st.phase_gate_enabled, dqpsk_conf, walsh_conf, snr_proxy);
+                tracking::next_phase_gate_enabled(st.phase_gate_enabled, dqpsk_conf, walsh_conf, snr_proxy);
             if st.phase_gate_enabled {
                 self.stats.phase_gate_on_symbols += 1;
             } else {
@@ -904,7 +866,7 @@ impl Decoder {
             }
 
             let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
-            let phase_err = phase_error_from_diff(diff, decided);
+            let phase_err = tracking::phase_error_from_diff(diff, decided);
             let phase_err_abs = phase_err.abs();
             self.stats.phase_err_abs_sum_rad += phase_err_abs as f64;
             self.stats.phase_err_abs_count += 1;
@@ -921,16 +883,16 @@ impl Decoder {
                 self.stats.phase_innovation_reject_symbols += 1;
             }
             let phase_step = if st.phase_gate_enabled {
-                st.phase_rate = update_phase_rate(st.phase_rate, phase_err);
-                phase_step_from_phase_error(phase_err, st.phase_rate)
+                st.phase_rate = tracking::update_phase_rate(st.phase_rate, phase_err);
+                tracking::phase_step_from_phase_error(phase_err, st.phase_rate)
             } else {
                 let damped_err =
                     phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
                 st.phase_rate = (st.phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY
                     + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
                     .clamp(
-                        -TRACKING_PHASE_RATE_LIMIT_RAD,
-                        TRACKING_PHASE_RATE_LIMIT_RAD,
+                        -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                        tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
                     );
                 (st.phase_rate + TRACKING_PHASE_PROP_GAIN_OFF * damped_err)
                     .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
@@ -939,13 +901,13 @@ impl Decoder {
             st.phase_ref *= Complex32::new(cos_dphi, sin_dphi);
             st.phase_ref /= st.phase_ref.norm().max(1e-6);
 
-            let timing_err = timing_error_from_early_late(
+            let timing_err = tracking::timing_error_from_early_late(
                 early_corrs[best_idx].norm(),
                 late_corrs[best_idx].norm(),
             );
-            st.timing_rate = update_timing_rate(st.timing_rate, timing_err, timing_rate_limit);
+            st.timing_rate = tracking::update_timing_rate(st.timing_rate, timing_err, timing_rate_limit);
             st.timing_offset =
-                update_timing_offset(st.timing_offset, st.timing_rate, timing_err, timing_limit);
+                tracking::update_timing_offset(st.timing_offset, st.timing_rate, timing_err, timing_limit);
 
             // 差分検波の参照は毎シンボル更新する。
             // ここを凍結すると次シンボルの diff が2シンボル差分になり誤り伝搬が増える。
@@ -1449,48 +1411,6 @@ impl Decoder {
 }
 
 #[inline]
-fn timing_error_from_early_late(early_mag: f32, late_mag: f32) -> f32 {
-    (late_mag - early_mag) / (late_mag + early_mag + 1e-6)
-}
-
-#[inline]
-fn update_timing_rate(timing_rate: f32, timing_err: f32, timing_rate_limit: f32) -> f32 {
-    (timing_rate + TRACKING_TIMING_RATE_GAIN * timing_err)
-        .clamp(-timing_rate_limit, timing_rate_limit)
-}
-
-#[inline]
-fn update_timing_offset(
-    timing_offset: f32,
-    timing_rate: f32,
-    timing_err: f32,
-    timing_limit: f32,
-) -> f32 {
-    (timing_offset + timing_rate + TRACKING_TIMING_PROP_GAIN * timing_err)
-        .clamp(-timing_limit, timing_limit)
-}
-
-#[inline]
-fn phase_error_from_diff(diff: Complex32, decided_symbol: Complex32) -> f32 {
-    let diff_data_removed = diff * decided_symbol.conj();
-    diff_data_removed.im.atan2(diff_data_removed.re)
-}
-
-#[inline]
-fn update_phase_rate(phase_rate: f32, phase_err: f32) -> f32 {
-    (phase_rate + TRACKING_PHASE_FREQ_GAIN * phase_err).clamp(
-        -TRACKING_PHASE_RATE_LIMIT_RAD,
-        TRACKING_PHASE_RATE_LIMIT_RAD,
-    )
-}
-
-#[inline]
-fn phase_step_from_phase_error(phase_err: f32, phase_rate: f32) -> f32 {
-    (phase_rate + TRACKING_PHASE_PROP_GAIN * phase_err)
-        .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
-}
-
-#[inline]
 fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
     if llrs.is_empty() {
         return;
@@ -1513,50 +1433,6 @@ fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
         if llr.abs() <= threshold {
             *llr = 0.0;
         }
-    }
-}
-
-#[inline]
-fn phase_gate_pass_count(
-    dqpsk_conf: f32,
-    walsh_conf: f32,
-    snr_proxy: f32,
-    dqpsk_thr: f32,
-    walsh_thr: f32,
-    snr_thr: f32,
-) -> u8 {
-    u8::from(dqpsk_conf >= dqpsk_thr)
-        + u8::from(walsh_conf >= walsh_thr)
-        + u8::from(snr_proxy >= snr_thr)
-}
-
-#[inline]
-fn next_phase_gate_enabled(
-    prev_enabled: bool,
-    dqpsk_conf: f32,
-    walsh_conf: f32,
-    snr_proxy: f32,
-) -> bool {
-    let pass_on = phase_gate_pass_count(
-        dqpsk_conf,
-        walsh_conf,
-        snr_proxy,
-        TRACKING_PHASE_DQPSK_CONF_ON_MIN,
-        TRACKING_PHASE_WALSH_CONF_ON_MIN,
-        TRACKING_PHASE_SNR_PROXY_ON_MIN,
-    );
-    let pass_off = phase_gate_pass_count(
-        dqpsk_conf,
-        walsh_conf,
-        snr_proxy,
-        TRACKING_PHASE_DQPSK_CONF_OFF_MIN,
-        TRACKING_PHASE_WALSH_CONF_OFF_MIN,
-        TRACKING_PHASE_SNR_PROXY_OFF_MIN,
-    );
-    if prev_enabled {
-        pass_off >= 2
-    } else {
-        pass_on >= 2
     }
 }
 
@@ -1621,13 +1497,13 @@ mod tests {
     #[test]
     fn test_next_phase_gate_enabled_uses_2_of_3_and_hysteresis() {
         // OFF→ON: ON閾値で2条件満たせば有効化する
-        assert!(next_phase_gate_enabled(false, 1.2, 0.15, 1.0));
+        assert!(tracking::next_phase_gate_enabled(false, 1.2, 0.15, 1.0));
 
         // ON維持: ON閾値は割ってもOFF閾値で2条件満たせば維持する
-        assert!(next_phase_gate_enabled(true, 0.8, 0.1, 1.0));
+        assert!(tracking::next_phase_gate_enabled(true, 0.8, 0.1, 1.0));
 
         // ON→OFF: OFF閾値で1条件以下なら無効化する
-        assert!(!next_phase_gate_enabled(true, 0.10, 0.01, 1.1));
+        assert!(!tracking::next_phase_gate_enabled(true, 0.10, 0.01, 1.1));
     }
 
     #[test]
@@ -2333,7 +2209,7 @@ mod tests {
 
         // 先頭付近のシンボルで、trackingの下限方向へ寄せる
         let symbol_start = spc;
-        let timing_offset = -(spc as f32) * TRACKING_TIMING_LIMIT_CHIP;
+        let timing_offset = -(spc as f32) * tracking::TRACKING_TIMING_LIMIT_CHIP;
         let sample_shift = -(spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
 
         let corrs = decoder.despread_symbol_with_timing(symbol_start, timing_offset, sample_shift);
@@ -2365,7 +2241,7 @@ mod tests {
         decoder.tracking_state = Some(TrackingState {
             phase_ref: Complex32::new(1.0, 0.0),
             phase_rate: 0.0,
-            timing_offset: -(spc as f32) * TRACKING_TIMING_LIMIT_CHIP,
+            timing_offset: -(spc as f32) * tracking::TRACKING_TIMING_LIMIT_CHIP,
             timing_rate: 0.0,
             phase_gate_enabled: false,
         });
@@ -2414,7 +2290,7 @@ mod tests {
         let sym_period_sec = sym_samples / config.proc_sample_rate();
         for offset_hz in [5.0f32, 10.0, 15.0, 20.0, 25.0, 30.0] {
             let phase_step_rad = 2.0 * std::f32::consts::PI * offset_hz * sym_period_sec;
-            let margin = TRACKING_PHASE_RATE_LIMIT_RAD / phase_step_rad.max(1e-6);
+            let margin = tracking::TRACKING_PHASE_RATE_LIMIT_RAD / phase_step_rad.max(1e-6);
             println!(
                 "[gain-est] offset={:.1}Hz step={:.4}rad/sym clamp_margin={:.2}x",
                 offset_hz, phase_step_rad, margin

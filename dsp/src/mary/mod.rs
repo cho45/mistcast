@@ -10,6 +10,7 @@ pub mod encoder;
 pub mod modulator;
 pub mod params;
 pub mod sync;
+pub mod tracking;
 
 /// インターリーバ設定モジュール
 ///
