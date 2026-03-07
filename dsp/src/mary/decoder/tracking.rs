@@ -189,4 +189,85 @@ mod tests {
         let err = phase_error_from_diff(diff, decided);
         assert!(err.abs() < std::f32::consts::PI);
     }
+
+    #[test]
+    fn test_update_timing_rate_clamps_to_limit() {
+        let updated = update_timing_rate(0.24, 10.0, 0.25);
+        let updated_neg = update_timing_rate(-0.24, -10.0, 0.25);
+
+        assert_eq!(updated, 0.25);
+        assert_eq!(updated_neg, -0.25);
+    }
+
+    #[test]
+    fn test_update_timing_offset_clamps_to_limit() {
+        let updated = update_timing_offset(1.95, 0.2, 1.0, 2.0);
+        let updated_neg = update_timing_offset(-1.95, -0.2, -1.0, 2.0);
+
+        assert_eq!(updated, 2.0);
+        assert_eq!(updated_neg, -2.0);
+    }
+
+    #[test]
+    fn test_update_phase_rate_clamps_to_limit() {
+        let updated = update_phase_rate(2.55, 10.0);
+        let updated_neg = update_phase_rate(-2.55, -10.0);
+
+        assert_eq!(updated, TRACKING_PHASE_RATE_LIMIT_RAD);
+        assert_eq!(updated_neg, -TRACKING_PHASE_RATE_LIMIT_RAD);
+    }
+
+    #[test]
+    fn test_phase_step_from_phase_error_clamps_to_limit() {
+        let step = phase_step_from_phase_error(100.0, 0.0);
+        let step_neg = phase_step_from_phase_error(-100.0, 0.0);
+
+        assert_eq!(step, TRACKING_PHASE_STEP_CLAMP);
+        assert_eq!(step_neg, -TRACKING_PHASE_STEP_CLAMP);
+    }
+
+    #[test]
+    fn test_phase_gate_pass_count_counts_threshold_hits() {
+        let pass_count = phase_gate_pass_count(1.2, 0.05, 5.0, 1.1, 0.08, 4.0);
+        let zero_count = phase_gate_pass_count(0.1, 0.01, 0.5, 1.1, 0.08, 4.0);
+
+        assert_eq!(pass_count, 2);
+        assert_eq!(zero_count, 0);
+    }
+
+    #[test]
+    fn test_next_phase_gate_enabled_turns_on_with_two_on_threshold_hits() {
+        let enabled = next_phase_gate_enabled(
+            false,
+            TRACKING_PHASE_DQPSK_CONF_ON_MIN + 0.01,
+            TRACKING_PHASE_WALSH_CONF_ON_MIN + 0.01,
+            TRACKING_PHASE_SNR_PROXY_ON_MIN - 0.5,
+        );
+
+        assert!(enabled);
+    }
+
+    #[test]
+    fn test_next_phase_gate_enabled_turns_off_when_off_threshold_hits_drop_below_two() {
+        let enabled = next_phase_gate_enabled(
+            true,
+            TRACKING_PHASE_DQPSK_CONF_OFF_MIN - 0.01,
+            TRACKING_PHASE_WALSH_CONF_OFF_MIN + 0.01,
+            TRACKING_PHASE_SNR_PROXY_OFF_MIN - 0.5,
+        );
+
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn test_next_phase_gate_enabled_stays_on_with_two_off_threshold_hits() {
+        let enabled = next_phase_gate_enabled(
+            true,
+            TRACKING_PHASE_DQPSK_CONF_OFF_MIN + 0.01,
+            TRACKING_PHASE_WALSH_CONF_OFF_MIN + 0.01,
+            TRACKING_PHASE_SNR_PROXY_OFF_MIN - 0.5,
+        );
+
+        assert!(enabled);
+    }
 }
