@@ -131,7 +131,6 @@ pub struct Decoder {
     sync_detector: MarySyncDetector,
 
     // 同期・追従状態
-    state: DecoderState,
     search: SearchState,
     frame_session: Option<FrameSession>,
     viterbi_list_size: usize,
@@ -164,6 +163,14 @@ impl Decoder {
             .expect("frame session must be initialized")
     }
 
+    fn current_state(&self) -> DecoderState {
+        if self.frame_session.is_some() {
+            DecoderState::EqualizedDecoding
+        } else {
+            DecoderState::Searching
+        }
+    }
+
     /// 新しいデコーダを作成する
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let tc = MarySyncDetector::THRESHOLD_COARSE_DEFAULT;
@@ -181,7 +188,6 @@ impl Decoder {
             recovered_data: None,
             sync_detector: MarySyncDetector::new(dsp_config.clone(), tc, tf),
             config: dsp_config.clone(),
-            state: DecoderState::Searching,
             search: SearchState::default(),
             frame_session: None,
             viterbi_list_size: 1,
@@ -250,7 +256,7 @@ impl Decoder {
                 break;
             }
 
-            match self.state {
+            match self.current_state() {
                 DecoderState::Searching => {
                     if !self.handle_searching() {
                         break;
@@ -302,7 +308,6 @@ impl Decoder {
         self.search.last_search_idx = 0;
         self.equalization.set_equalizer_input_offset(0);
         self.equalization.clear_equalized_buffer();
-        self.state = DecoderState::Searching;
         self.frame_session = None;
     }
 
@@ -310,7 +315,6 @@ impl Decoder {
         self.search.last_search_idx = 0;
         self.equalization.set_equalizer_input_offset(0);
         self.equalization.clear_equalized_buffer();
-        self.state = DecoderState::Searching;
         self.frame_session = None;
     }
 
@@ -366,7 +370,6 @@ impl Decoder {
 
         self.frame_session_mut().tracking_state = TrackingState::new();
         self.demodulator.set_prev_phase(Complex32::new(1.0, 0.0));
-        self.state = DecoderState::EqualizedDecoding;
     }
 
     fn feed_unprocessed_samples_to_equalizer(&mut self) -> usize {
@@ -904,7 +907,6 @@ impl Decoder {
         self.demodulator.reset();
         self.fountain_decoder = FountainDecoder::new(params);
         self.recovered_data = None;
-        self.state = DecoderState::Searching;
         self.search = SearchState::default();
         self.frame_session = None;
         self.stats.reset();
@@ -1749,7 +1751,7 @@ mod tests {
     /// フレームを破棄して Searching へ戻るべき。
     ///
     /// 現状は `processed=false` で `handle_decoding()` が早期returnし、
-    /// state が EqualizedDecoding のまま据え置かれるため、以降の再同期へ進めず固着する。
+    /// フレーム状態が残留すると、以降の再同期へ進めず固着する。
     #[test]
     fn test_decoder_should_fallback_to_searching_on_packet_despread_underflow() {
         let mut decoder = make_decoder();
@@ -1757,7 +1759,6 @@ mod tests {
         let expected_symbols = interleaver_config::mary_symbols();
         let packet_samples = expected_symbols * PAYLOAD_SPREAD_FACTOR * spc;
 
-        decoder.state = DecoderState::EqualizedDecoding;
         decoder.config.packets_per_burst = 2;
         decoder.frame_session = Some(FrameSession {
             tracking_state: TrackingState {
@@ -1779,7 +1780,7 @@ mod tests {
         let advanced = decoder.handle_decoding();
         assert!(!advanced, "underflow path should stop current decode step");
         assert_eq!(
-            decoder.state,
+            decoder.current_state(),
             DecoderState::Searching,
             "decoder should fallback to Searching after packet despread underflow"
         );
