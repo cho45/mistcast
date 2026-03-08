@@ -1,84 +1,5 @@
 use crate::utils::{PostFecStats, PreFecStats};
 
-pub fn ratio(num: usize, den: usize) -> f32 {
-    if den == 0 {
-        0.0
-    } else {
-        num as f32 / den as f32
-    }
-}
-
-pub fn quantile(values: &[f32], q: f32) -> Option<f32> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut v = values.to_vec();
-    v.sort_by(f32::total_cmp);
-    let q = q.clamp(0.0, 1.0);
-    let idx = (((v.len() - 1) as f32) * q).round() as usize;
-    v.get(idx).copied()
-}
-
-pub fn quantile_usize(values: &[usize], q: f32) -> Option<f32> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut v = values.to_vec();
-    v.sort_unstable();
-    let q = q.clamp(0.0, 1.0);
-    let idx = (((v.len() - 1) as f32) * q).round() as usize;
-    v.get(idx).map(|&x| x as f32)
-}
-
-pub fn error_weight_hist(weights: &[usize]) -> Option<String> {
-    if weights.is_empty() {
-        return None;
-    }
-    let mut b0 = 0usize;
-    let mut b1 = 0usize;
-    let mut b2 = 0usize;
-    let mut b3_4 = 0usize;
-    let mut b5_8 = 0usize;
-    let mut b9_16 = 0usize;
-    let mut b17_32 = 0usize;
-    let mut b33p = 0usize;
-    for &w in weights {
-        match w {
-            0 => b0 += 1,
-            1 => b1 += 1,
-            2 => b2 += 1,
-            3..=4 => b3_4 += 1,
-            5..=8 => b5_8 += 1,
-            9..=16 => b9_16 += 1,
-            17..=32 => b17_32 += 1,
-            _ => b33p += 1,
-        }
-    }
-    let n = weights.len() as f32;
-    Some(format!(
-        "0:{:.3}|1:{:.3}|2:{:.3}|3-4:{:.3}|5-8:{:.3}|9-16:{:.3}|17-32:{:.3}|33+:{:.3}",
-        b0 as f32 / n,
-        b1 as f32 / n,
-        b2 as f32 / n,
-        b3_4 as f32 / n,
-        b5_8 as f32 / n,
-        b9_16 as f32 / n,
-        b17_32 as f32 / n,
-        b33p as f32 / n,
-    ))
-}
-
-pub struct PhaseStats {
-    pub last_est_snr_db: f32,
-    pub phase_gate_on_symbols: usize,
-    pub phase_gate_off_symbols: usize,
-    pub phase_innovation_reject_symbols: usize,
-    pub phase_err_abs_sum_rad: f64,
-    pub phase_err_abs_count: usize,
-    pub phase_err_abs_ge_0p5_symbols: usize,
-    pub phase_err_abs_ge_1p0_symbols: usize,
-}
-
 /// 評価シミュレーションの集計メトリクス（兼 実行状態）
 #[derive(Default, Clone, Debug)]
 pub struct Metrics {
@@ -540,6 +461,85 @@ impl Metrics {
             self.total_phase_err_abs_count,
         )
     }
+}
+
+pub fn ratio(num: usize, den: usize) -> f32 {
+    if den == 0 {
+        0.0
+    } else {
+        num as f32 / den as f32
+    }
+}
+
+pub fn quantile(values: &[f32], q: f32) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v = values.to_vec();
+    v.sort_by(f32::total_cmp);
+    let q = q.clamp(0.0, 1.0);
+    let idx = (((v.len() - 1) as f32) * q).round() as usize;
+    v.get(idx).copied()
+}
+
+pub fn quantile_usize(values: &[usize], q: f32) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v = values.to_vec();
+    v.sort_unstable();
+    let q = q.clamp(0.0, 1.0);
+    let idx = (((v.len() - 1) as f32) * q).round() as usize;
+    v.get(idx).map(|&x| x as f32)
+}
+
+pub fn error_weight_hist(weights: &[usize]) -> Option<String> {
+    if weights.is_empty() {
+        return None;
+    }
+    let mut b0 = 0usize;
+    let mut b1 = 0usize;
+    let mut b2 = 0usize;
+    let mut b3_4 = 0usize;
+    let mut b5_8 = 0usize;
+    let mut b9_16 = 0usize;
+    let mut b17_32 = 0usize;
+    let mut b33p = 0usize;
+    for &w in weights {
+        match w {
+            0 => b0 += 1,
+            1 => b1 += 1,
+            2 => b2 += 1,
+            3..=4 => b3_4 += 1,
+            5..=8 => b5_8 += 1,
+            9..=16 => b9_16 += 1,
+            17..=32 => b17_32 += 1,
+            _ => b33p += 1,
+        }
+    }
+    let n = weights.len() as f32;
+    Some(format!(
+        "0:{:.3}|1:{:.3}|2:{:.3}|3-4:{:.3}|5-8:{:.3}|9-16:{:.3}|17-32:{:.3}|33+:{:.3}",
+        b0 as f32 / n,
+        b1 as f32 / n,
+        b2 as f32 / n,
+        b3_4 as f32 / n,
+        b5_8 as f32 / n,
+        b9_16 as f32 / n,
+        b17_32 as f32 / n,
+        b33p as f32 / n,
+    ))
+}
+
+pub struct PhaseStats {
+    pub last_est_snr_db: f32,
+    pub phase_gate_on_symbols: usize,
+    pub phase_gate_off_symbols: usize,
+    pub phase_innovation_reject_symbols: usize,
+    pub phase_err_abs_sum_rad: f64,
+    pub phase_err_abs_count: usize,
+    pub phase_err_abs_ge_0p5_symbols: usize,
+    pub phase_err_abs_ge_1p0_symbols: usize,
 }
 
 #[cfg(test)]
