@@ -14,6 +14,8 @@
 //!     h(t) = α/√2·[(1+2/π)·sin(π/(4α)) + (1-2/π)·cos(π/(4α))]
 
 use crate::DspConfig;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use std::arch::wasm32::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_mul};
 
 /// RRCフィルタ係数を計算する
 ///
@@ -117,7 +119,8 @@ impl RrcFilter {
     }
 
     /// 1サンプルを処理する (循環バッファによる畳み込み)
-    pub fn process(&mut self, sample: f32) -> f32 {
+    #[cfg_attr(all(target_arch = "wasm32", target_feature = "simd128"), allow(dead_code))]
+    fn process_scalar_path(&mut self, sample: f32) -> f32 {
         self.buffer[self.pos] = sample;
         let n = self.coeffs.len();
         let mut out = 0.0f32;
@@ -127,6 +130,68 @@ impl RrcFilter {
         }
         self.pos = (self.pos + 1) % n;
         out
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline]
+    fn hsum4(v: std::arch::wasm32::v128) -> f32 {
+        f32x4_extract_lane::<0>(v)
+            + f32x4_extract_lane::<1>(v)
+            + f32x4_extract_lane::<2>(v)
+            + f32x4_extract_lane::<3>(v)
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn process_simd_path(&mut self, sample: f32) -> f32 {
+        self.buffer[self.pos] = sample;
+        let n = self.coeffs.len();
+        let mut sum4 = f32x4(0.0, 0.0, 0.0, 0.0);
+        let mut k = 0usize;
+        while k + 4 <= n {
+            let k0 = k;
+            let k1 = k + 1;
+            let k2 = k + 2;
+            let k3 = k + 3;
+            let i0 = (self.pos + n - k0) % n;
+            let i1 = (self.pos + n - k1) % n;
+            let i2 = (self.pos + n - k2) % n;
+            let i3 = (self.pos + n - k3) % n;
+
+            let x = f32x4(
+                self.buffer[i0],
+                self.buffer[i1],
+                self.buffer[i2],
+                self.buffer[i3],
+            );
+            let h = f32x4(
+                self.coeffs[k0],
+                self.coeffs[k1],
+                self.coeffs[k2],
+                self.coeffs[k3],
+            );
+            sum4 = f32x4_add(sum4, f32x4_mul(h, x));
+            k += 4;
+        }
+
+        let mut out = Self::hsum4(sum4);
+        for kk in k..n {
+            let idx = (self.pos + n - kk) % n;
+            out += self.coeffs[kk] * self.buffer[idx];
+        }
+
+        self.pos = (self.pos + 1) % n;
+        out
+    }
+
+    pub fn process(&mut self, sample: f32) -> f32 {
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            return self.process_simd_path(sample);
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+        {
+            self.process_scalar_path(sample)
+        }
     }
 
     /// サンプル列をまとめて処理する
@@ -239,6 +304,8 @@ impl DecimatingRrcFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    use wasm_bindgen_test::wasm_bindgen_test;
 
     fn test_config() -> DspConfig {
         DspConfig::default_48k()
@@ -469,5 +536,81 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f32::max);
         assert!(max_err < 1e-5, "max_err={}", max_err);
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_rrc_filter_simd_matches_scalar_path() {
+        let config = test_config();
+        let mut scalar = RrcFilter::from_config(&config);
+        let mut simd = RrcFilter::from_config(&config);
+
+        let input: Vec<f32> = (0..2048)
+            .map(|i| {
+                let t = i as f32 / config.sample_rate;
+                0.73 * (2.0 * std::f32::consts::PI * 700.0 * t).sin()
+                    + 0.19 * (2.0 * std::f32::consts::PI * 1900.0 * t).cos()
+                    + 0.08 * (2.0 * std::f32::consts::PI * 3200.0 * t).sin()
+            })
+            .collect();
+
+        for (idx, &x) in input.iter().enumerate() {
+            let y_scalar = scalar.process_scalar_path(x);
+            let y_simd = simd.process_simd_path(x);
+            assert!(
+                (y_scalar - y_simd).abs() < 1e-5,
+                "idx={} scalar={} simd={}",
+                idx,
+                y_scalar,
+                y_simd
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_rrc_filter_simd_tap_remainder_boundaries() {
+        // taps=17 (mod4=1), taps=19 (mod4=3) の端数経路を検証
+        for &taps in &[17usize, 19usize] {
+            let mut scalar = RrcFilter::with_params(taps, 0.3, 8_000.0, 24_000.0);
+            let mut simd = RrcFilter::with_params(taps, 0.3, 8_000.0, 24_000.0);
+            for i in 0..(taps * 8 + 5) {
+                let t = i as f32 / 24_000.0;
+                let x = 0.61 * (2.0 * std::f32::consts::PI * 900.0 * t).sin()
+                    + 0.27 * (2.0 * std::f32::consts::PI * 2100.0 * t).cos();
+                let y_scalar = scalar.process_scalar_path(x);
+                let y_simd = simd.process_simd_path(x);
+                assert!(
+                    (y_scalar - y_simd).abs() < 1e-5,
+                    "taps={} i={} scalar={} simd={}",
+                    taps,
+                    i,
+                    y_scalar,
+                    y_simd
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_rrc_filter_simd_ring_wrap_boundary() {
+        let taps = 17usize;
+        let mut scalar = RrcFilter::with_params(taps, 0.25, 8_000.0, 24_000.0);
+        let mut simd = RrcFilter::with_params(taps, 0.25, 8_000.0, 24_000.0);
+
+        // リングバッファ位置が何度も折り返す長さ
+        for i in 0..(taps * 20) {
+            let x = ((i % 11) as f32 - 5.0) * 0.07;
+            let y_scalar = scalar.process_scalar_path(x);
+            let y_simd = simd.process_simd_path(x);
+            assert!(
+                (y_scalar - y_simd).abs() < 1e-5,
+                "i={} scalar={} simd={}",
+                i,
+                y_scalar,
+                y_simd
+            );
+        }
     }
 }
