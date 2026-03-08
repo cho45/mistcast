@@ -1,4 +1,5 @@
 use crate::utils::{PostFecStats, PreFecStats};
+use serde_json::json;
 
 /// 評価シミュレーションの集計メトリクス（兼 実行状態）
 #[derive(Default, Clone, Debug)]
@@ -71,7 +72,7 @@ pub struct Metrics {
     pub total_post_decode_attempts: usize,
     /// Post-FECデコード結果が送信データと一致した総数
     pub total_post_decode_matched: usize,
-    /// 推定SNRの合計 (平均計算用)
+    /// 推定SNR의合計 (平均計算用)
     pub sum_last_est_snr_db: f64,
     /// 推定SNRのサンプル数
     pub count_last_est_snr_db: usize,
@@ -94,6 +95,249 @@ pub struct Metrics {
     /// LLR消去第2パスによって救済されたパケット総数
     pub total_llr_second_pass_rescued: usize,
 }
+
+pub struct MetricContext<'a> {
+    pub scenario: &'a str,
+    pub phy: &'a str,
+    pub mary_fde_mode: &'a str,
+    pub payload_bits: usize,
+    pub sigma: f32,
+    pub multipath_name: &'a str,
+}
+
+pub struct MetricDef {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub extractor: fn(&MetricContext, &Metrics) -> serde_json::Value,
+}
+
+fn f32_to_json(v: f32) -> serde_json::Value {
+    if v.is_nan() {
+        json!("NaN")
+    } else {
+        json!(v)
+    }
+}
+
+fn opt_f32_to_json(v: Option<f32>) -> serde_json::Value {
+    match v {
+        Some(v) => f32_to_json(v),
+        None => serde_json::Value::Null,
+    }
+}
+
+pub const METRICS_DEFS: &[MetricDef] = &[
+    MetricDef {
+        id: "scenario",
+        description: "評価シナリオ名",
+        extractor: |ctx, _| json!(ctx.scenario),
+    },
+    MetricDef {
+        id: "phy",
+        description: "物理層方式 (dsss, mary)",
+        extractor: |ctx, _| json!(ctx.phy),
+    },
+    MetricDef {
+        id: "mary_fde_mode",
+        description: "Mary FDEモード (on, off, auto)",
+        extractor: |ctx, _| json!(ctx.mary_fde_mode),
+    },
+    MetricDef {
+        id: "total_sim_sec",
+        description: "シミュレーション上の経過時間 [sec]",
+        extractor: |_, m| f32_to_json(m.total_sim_sec),
+    },
+    MetricDef {
+        id: "awgn_snr_db",
+        description: "理論上のAWGN SNR [dB]",
+        extractor: |ctx, m| opt_f32_to_json(m.awgn_snr_db(ctx.sigma)),
+    },
+    MetricDef {
+        id: "p_complete",
+        description: "パケット到達率 (PDR: Packet Delivery Ratio)",
+        extractor: |_, m| f32_to_json(m.p_complete()),
+    },
+    MetricDef {
+        id: "ber",
+        description: "ビットエラーレート (BER)",
+        extractor: |_, m| f32_to_json(m.ber()),
+    },
+    MetricDef {
+        id: "raw_ber",
+        description: "FEC適用前（生）のビットエラーレート",
+        extractor: |_, m| f32_to_json(m.raw_ber()),
+    },
+    MetricDef {
+        id: "goodput_effective_bps",
+        description: "実効スループット (全時間に対する総成功ビット) [bps]",
+        extractor: |ctx, m| f32_to_json(m.goodput_effective_bps(ctx.payload_bits)),
+    },
+    MetricDef {
+        id: "goodput_success_mean_bps",
+        description: "成功パケットごとのスループット平均 [bps]",
+        extractor: |ctx, m| opt_f32_to_json(m.goodput_success_mean_bps(ctx.payload_bits)),
+    },
+    MetricDef {
+        id: "p95_complete_s",
+        description: "95%のパケットが到達するまでの時間 [sec]",
+        extractor: |_, m| opt_f32_to_json(m.p95_completion_sec()),
+    },
+    MetricDef {
+        id: "mean_complete_s",
+        description: "平均パケット到達時間 (MTTD) [sec]",
+        extractor: |_, m| opt_f32_to_json(m.mean_completion_sec()),
+    },
+    MetricDef {
+        id: "avg_proc_ns_sample",
+        description: "サンプルあたりの平均処理時間 [ns/sample]",
+        extractor: |_, m| f32_to_json(m.avg_process_time_per_sample_ns()),
+    },
+    MetricDef {
+        id: "synced_frame_ratio",
+        description: "フレーム同期成功率",
+        extractor: |_, m| f32_to_json(m.synced_frame_ratio()),
+    },
+    MetricDef {
+        id: "crc_pass_ratio",
+        description: "同期フレームにおけるCRC通過率",
+        extractor: |_, m| f32_to_json(m.crc_pass_ratio()),
+    },
+    MetricDef {
+        id: "llr_second_pass_trigger_ratio",
+        description: "LLR消去第2パスのトリガー率",
+        extractor: |_, m| f32_to_json(m.llr_second_pass_trigger_ratio()),
+    },
+    MetricDef {
+        id: "llr_second_pass_rescue_ratio",
+        description: "LLR消去第2パスによる救済成功率",
+        extractor: |_, m| f32_to_json(m.llr_second_pass_rescue_ratio()),
+    },
+    MetricDef {
+        id: "phase_gate_on_ratio",
+        description: "位相ゲート有効率",
+        extractor: |_, m| f32_to_json(m.phase_gate_on_ratio()),
+    },
+    MetricDef {
+        id: "phase_innovation_reject_ratio",
+        description: "位相変化棄却率",
+        extractor: |_, m| f32_to_json(m.phase_innovation_reject_ratio()),
+    },
+    MetricDef {
+        id: "phase_err_abs_mean_rad",
+        description: "平均絶対位相誤差 [rad]",
+        extractor: |_, m| opt_f32_to_json(m.phase_err_abs_mean_rad()),
+    },
+    MetricDef {
+        id: "phase_err_abs_ge_0p5_ratio",
+        description: "0.5 rad以上の位相誤差が発生した割合",
+        extractor: |_, m| f32_to_json(m.phase_err_abs_ge_0p5_ratio()),
+    },
+    MetricDef {
+        id: "phase_err_abs_ge_1p0_ratio",
+        description: "1.0 rad以上の位相誤差が発生した割合",
+        extractor: |_, m| f32_to_json(m.phase_err_abs_ge_1p0_ratio()),
+    },
+    MetricDef {
+        id: "avg_last_est_snr_db",
+        description: "平均推定SNR [dB]",
+        extractor: |_, m| opt_f32_to_json(m.avg_last_est_snr_db()),
+    },
+    MetricDef {
+        id: "multipath",
+        description: "マルチパスプロファイル名",
+        extractor: |ctx, _| json!(ctx.multipath_name),
+    },
+    MetricDef {
+        id: "raw_err_run_mean",
+        description: "生ビットのエラーラン平均長",
+        extractor: |_, m| opt_f32_to_json(m.raw_err_run_mean()),
+    },
+    MetricDef {
+        id: "raw_err_run_max",
+        description: "生ビットの最大エラーラン長",
+        extractor: |_, m| json!(m.raw_err_run_max()),
+    },
+    MetricDef {
+        id: "err_w_cw_mean",
+        description: "コードワードあたりの平均エラービット数",
+        extractor: |_, m| opt_f32_to_json(m.err_w_cw_mean()),
+    },
+    MetricDef {
+        id: "err_w_cw_p50",
+        description: "コードワードエラービット数の中央値",
+        extractor: |_, m| opt_f32_to_json(m.err_w_cw_p50()),
+    },
+    MetricDef {
+        id: "err_w_cw_p90",
+        description: "コードワードエラービット数の90パーセンタイル",
+        extractor: |_, m| opt_f32_to_json(m.err_w_cw_p90()),
+    },
+    MetricDef {
+        id: "err_w_cw_p99",
+        description: "コードワードエラービット数の99パーセンタイル",
+        extractor: |_, m| opt_f32_to_json(m.err_w_cw_p99()),
+    },
+    MetricDef {
+        id: "err_w_cw_max",
+        description: "コードワードあたりの最大エラービット数",
+        extractor: |_, m| json!(m.err_w_cw_max()),
+    },
+    MetricDef {
+        id: "err_w_cw_hist",
+        description: "コードワードエラー重みのヒストグラム概略",
+        extractor: |_, m| json!(m.err_w_cw_hist()),
+    },
+    MetricDef {
+        id: "post_ber",
+        description: "FEC適用後（Viterbi後）のビットエラーレート",
+        extractor: |_, m| f32_to_json(m.post_ber()),
+    },
+    MetricDef {
+        id: "post_decode_match_ratio",
+        description: "Post-FECデコード結果が送信データと一致した割合",
+        extractor: |_, m| f32_to_json(m.post_decode_match_ratio()),
+    },
+    MetricDef {
+        id: "post_err_run_mean",
+        description: "FEC適用後のエラーラン平均長",
+        extractor: |_, m| opt_f32_to_json(m.post_err_run_mean()),
+    },
+    MetricDef {
+        id: "post_err_run_max",
+        description: "FEC適用後の最大エラーラン長",
+        extractor: |_, m| json!(m.post_err_run_max()),
+    },
+    MetricDef {
+        id: "post_err_w_cw_mean",
+        description: "FEC適用後のコードワードあたり平均エラービット数",
+        extractor: |_, m| opt_f32_to_json(m.post_err_w_cw_mean()),
+    },
+    MetricDef {
+        id: "post_err_w_cw_p50",
+        description: "FEC適用後のコードワードエラービット数の中央値",
+        extractor: |_, m| opt_f32_to_json(m.post_err_w_cw_p50()),
+    },
+    MetricDef {
+        id: "post_err_w_cw_p90",
+        description: "FEC適用後のコードワードエラービット数の90パーセンタイル",
+        extractor: |_, m| opt_f32_to_json(m.post_err_w_cw_p90()),
+    },
+    MetricDef {
+        id: "post_err_w_cw_p99",
+        description: "FEC適用後のコードワードエラービット数の99パーセンタイル",
+        extractor: |_, m| opt_f32_to_json(m.post_err_w_cw_p99()),
+    },
+    MetricDef {
+        id: "post_err_w_cw_max",
+        description: "FEC適用後のコードワードあたりの最大エラービット数",
+        extractor: |_, m| json!(m.post_err_w_cw_max()),
+    },
+    MetricDef {
+        id: "post_err_w_cw_hist",
+        description: "FEC適用後のコードワードエラー重みのヒストグラム概略",
+        extractor: |_, m| json!(m.post_err_w_cw_hist()),
+    },
+];
 
 impl Metrics {
     pub fn new(packets_per_frame: usize) -> Self {

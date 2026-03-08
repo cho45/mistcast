@@ -270,6 +270,8 @@ pub struct Cli {
     pub columns: Option<Vec<String>>,
     #[arg(long = "output", value_enum, default_value_t = OutputFormat::Csv)]
     pub output: OutputFormat,
+    #[arg(long = "show-metrics-desc")]
+    pub show_metrics_desc: bool,
 }
 
 impl Cli {

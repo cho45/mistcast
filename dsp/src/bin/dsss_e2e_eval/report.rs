@@ -1,111 +1,13 @@
 use crate::channel::ChannelImpairment;
 use crate::config::{selected_columns, Cli, OutputFormat};
-use crate::metrics::Metrics;
-use serde::{Serialize, Serializer};
-use serde_json::json;
+use crate::metrics::{MetricContext, Metrics, METRICS_DEFS};
 
-mod nan_serde {
-    use super::*;
-    pub fn serialize_f32<S>(v: &f32, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if v.is_nan() {
-            s.serialize_str("NaN")
-        } else {
-            s.serialize_f32(*v)
-        }
+pub fn print_metrics_desc() {
+    println!("{:<30} | {}", "Column Name", "Description");
+    println!("{:-<30}-|-{:-<40}", ":", ":");
+    for def in METRICS_DEFS {
+        println!("{:<30} | {}", def.id, def.description);
     }
-
-    pub fn serialize_opt_f32<S>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match v {
-            Some(v) if v.is_nan() => s.serialize_str("NaN"),
-            Some(v) => s.serialize_f32(*v),
-            None => s.serialize_none(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct ReportRow<'a> {
-    scenario: &'a str,
-    phy: String,
-    mary_fde_mode: String,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    total_sim_sec: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    awgn_snr_db: f32,
-
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    p_complete: f32, // パケット到達率 (PDR)
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    ber: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    raw_ber: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    goodput_effective_bps: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    goodput_success_mean_bps: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    p95_complete_s: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    mean_complete_s: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    avg_proc_ns_sample: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    synced_frame_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    crc_pass_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    llr_second_pass_trigger_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    llr_second_pass_rescue_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    phase_gate_on_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    phase_innovation_reject_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    phase_err_abs_mean_rad: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    phase_err_abs_ge_0p5_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    phase_err_abs_ge_1p0_ratio: f32,
-    #[serde(serialize_with = "nan_serde::serialize_f32")]
-    avg_last_est_snr_db: f32,
-    multipath: String,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    raw_err_run_mean: Option<f32>,
-    raw_err_run_max: Option<usize>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    err_w_cw_mean: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    err_w_cw_p50: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    err_w_cw_p90: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    err_w_cw_p99: Option<f32>,
-    err_w_cw_max: Option<usize>,
-    err_w_cw_hist: Option<String>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_ber: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_decode_match_ratio: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_err_run_mean: Option<f32>,
-    post_err_run_max: Option<usize>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_err_w_cw_mean: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_err_w_cw_p50: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_err_w_cw_p90: Option<f32>,
-    #[serde(serialize_with = "nan_serde::serialize_opt_f32")]
-    post_err_w_cw_p99: Option<f32>,
-    post_err_w_cw_max: Option<usize>,
-    post_err_w_cw_hist: Option<String>,
 }
 
 pub fn print_header(cli: &Cli) {
@@ -132,65 +34,53 @@ pub fn print_header(cli: &Cli) {
     }
 }
 
+fn value_to_string(val: &serde_json::Value) -> String {
+    if val.is_null() {
+        "-".to_string()
+    } else if val.is_string() {
+        val.as_str().unwrap().to_string()
+    } else if val.is_f64() {
+        let f = val.as_f64().unwrap();
+        if f.abs() < 1e-3 && f != 0.0 {
+            format!("{:.2e}", f)
+        } else {
+            format!("{:.4}", f)
+        }
+    } else {
+        val.to_string()
+    }
+}
+
 pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics) {
-    let row = ReportRow {
+    let phy_str = format!("{:?}", cli.phy).to_lowercase();
+    let fde_str = format!("{:?}", cli.mary_fde_mode).to_lowercase();
+    let ctx = MetricContext {
         scenario,
-        phy: format!("{:?}", cli.phy).to_lowercase(),
-        mary_fde_mode: format!("{:?}", cli.mary_fde_mode).to_lowercase(),
-        total_sim_sec: m.total_sim_sec,
-        awgn_snr_db: m.awgn_snr_db(imp.sigma).unwrap_or(f32::NAN),
-        p_complete: m.p_complete(),
-        ber: m.ber(),
-        raw_ber: m.raw_ber(),
-        goodput_effective_bps: m.goodput_effective_bps(cli.payload_bytes * 8),
-        goodput_success_mean_bps: m
-            .goodput_success_mean_bps(cli.payload_bytes * 8)
-            .unwrap_or(f32::NAN),
-        p95_complete_s: m.p95_completion_sec().unwrap_or(f32::NAN),
-        mean_complete_s: m.mean_completion_sec().unwrap_or(f32::NAN),
-        avg_proc_ns_sample: m.avg_process_time_per_sample_ns(),
-        synced_frame_ratio: m.synced_frame_ratio(),
-        crc_pass_ratio: m.crc_pass_ratio(),
-        llr_second_pass_trigger_ratio: m.llr_second_pass_trigger_ratio(),
-        llr_second_pass_rescue_ratio: m.llr_second_pass_rescue_ratio(),
-        phase_gate_on_ratio: m.phase_gate_on_ratio(),
-        phase_innovation_reject_ratio: m.phase_innovation_reject_ratio(),
-        phase_err_abs_mean_rad: m.phase_err_abs_mean_rad().unwrap_or(f32::NAN),
-        phase_err_abs_ge_0p5_ratio: m.phase_err_abs_ge_0p5_ratio(),
-        phase_err_abs_ge_1p0_ratio: m.phase_err_abs_ge_1p0_ratio(),
-        avg_last_est_snr_db: m.avg_last_est_snr_db().unwrap_or(f32::NAN),
-        multipath: imp.multipath.name.clone(),
-        raw_err_run_mean: m.raw_err_run_mean(),
-        raw_err_run_max: m.raw_err_run_max(),
-        err_w_cw_mean: m.err_w_cw_mean(),
-        err_w_cw_p50: m.err_w_cw_p50(),
-        err_w_cw_p90: m.err_w_cw_p90(),
-        err_w_cw_p99: m.err_w_cw_p99(),
-        err_w_cw_max: m.err_w_cw_max(),
-        err_w_cw_hist: m.err_w_cw_hist(),
-        post_ber: Some(m.post_ber()),
-        post_decode_match_ratio: Some(m.post_decode_match_ratio()),
-        post_err_run_mean: m.post_err_run_mean(),
-        post_err_run_max: m.post_err_run_max(),
-        post_err_w_cw_mean: m.post_err_w_cw_mean(),
-        post_err_w_cw_p50: m.post_err_w_cw_p50(),
-        post_err_w_cw_p90: m.post_err_w_cw_p90(),
-        post_err_w_cw_p99: m.post_err_w_cw_p99(),
-        post_err_w_cw_max: m.post_err_w_cw_max(),
-        post_err_w_cw_hist: m.post_err_w_cw_hist(),
+        phy: &phy_str,
+        mary_fde_mode: &fde_str,
+        payload_bits: cli.payload_bytes * 8,
+        sigma: imp.sigma,
+        multipath_name: &imp.multipath.name,
     };
+
+    let cols = selected_columns(cli);
+    let mut row_data = serde_json::Map::new();
+
+    for col_id in &cols {
+        if let Some(def) = METRICS_DEFS.iter().find(|d| d.id == *col_id) {
+            row_data.insert(col_id.to_string(), (def.extractor)(&ctx, m));
+        }
+    }
 
     match cli.output {
         OutputFormat::Csv => {
-            let cols = selected_columns(cli);
             let mut writer = csv::WriterBuilder::new()
                 .has_headers(false)
                 .from_writer(Vec::new());
 
-            let json_val = serde_json::to_value(&row).unwrap();
             let mut values = Vec::new();
-            for col in cols {
-                let val = &json_val[col];
+            for col in &cols {
+                let val = row_data.get(*col).unwrap_or(&serde_json::Value::Null);
                 if val.is_null() {
                     values.push("".to_string());
                 } else if val.is_string() {
@@ -204,40 +94,16 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
             print!("{}", csv_output);
         }
         OutputFormat::Json => {
-            let cols = selected_columns(cli);
-            let json_val = serde_json::to_value(&row).unwrap();
-            let mut filtered = serde_json::Map::new();
-            for col in cols {
-                if let Some(val) = json_val.get(col) {
-                    filtered.insert(col.to_string(), val.clone());
-                }
-            }
-            println!("{}", serde_json::to_string(&json!(filtered)).unwrap());
+            println!("{}", serde_json::to_string(&row_data).unwrap());
         }
         OutputFormat::Table => {
-            let cols = selected_columns(cli);
-            let json_val = serde_json::to_value(&row).unwrap();
             let mut parts = vec![format!("{:<30}", scenario)];
-            for col in cols {
-                if col == "scenario" {
+            for col in &cols {
+                if *col == "scenario" {
                     continue;
                 }
-                let val = &json_val[col];
-                let s = if val.is_null() {
-                    "-".to_string()
-                } else if val.is_string() {
-                    val.as_str().unwrap().to_string()
-                } else if val.is_f64() {
-                    let f = val.as_f64().unwrap();
-                    if f.abs() < 1e-3 && f != 0.0 {
-                        format!("{:.2e}", f)
-                    } else {
-                        format!("{:.4}", f)
-                    }
-                } else {
-                    val.to_string()
-                };
-                parts.push(format!("{:<15}", s));
+                let val = row_data.get(*col).unwrap_or(&serde_json::Value::Null);
+                parts.push(format!("{:<15}", value_to_string(val)));
             }
             println!("| {} |", parts.join(" | "));
         }

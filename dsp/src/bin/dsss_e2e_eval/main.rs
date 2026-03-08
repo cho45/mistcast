@@ -120,6 +120,11 @@ fn run_sweep_all(cli: &Cli) {
 fn main() {
     let cli = parse_cli();
 
+    if cli.show_metrics_desc {
+        report::print_metrics_desc();
+        return;
+    }
+
     match cli.mode {
         EvalMode::Point => run_point(&cli),
         EvalMode::SweepAwgn => run_sweep_awgn(&cli),
