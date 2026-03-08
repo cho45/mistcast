@@ -233,20 +233,22 @@ $ cargo run --release --bin dsss_e2e_eval -- \
         --phy mary \
         --mode sweep-awgn \
         --packets-per-frame 3 \
-        --sweep-awgn '0.0,0.40,0.45,0.50,0.55,0.60,0.65,0.70' \
-        --columns 'scenario,synced_frame_ratio,crc_pass_ratio,goodput_effective_bps,goodput_success_mean_bps' \
+        --sweep-awgn '0.0,0.1,0.2,0.3,0.4,0.5,0.7,0.8,0.9' \
+        --columns 'scenario,ebn0_db,packet_accept_ratio,synced_frame_ratio,crc_pass_ratio,raw_ber,goodput_effective_bps,goodput_success_mean_bps' \
         --output table
 ```
-| scenario                       | synced_frame_ratio | crc_pass_ratio  | goodput_effective_bps | goodput_success_mean_bps |
-| :----------------------------- | :-------------- | :-------------- | :-------------- | :-------------- |
-| sweep_awgn(sigma=0.000)        | 1.0000          | 1.0000          | 1001.5680       | 1113.8733       |
-| sweep_awgn(sigma=0.400)        | 1.0000          | 0.9576          | 908.2015        | 1038.2769       |
-| sweep_awgn(sigma=0.450)        | 1.0000          | 0.9106          | 840.2986        | 994.6066        |
-| sweep_awgn(sigma=0.500)        | 1.0000          | 0.8495          | 772.3957        | 926.5545        |
-| sweep_awgn(sigma=0.550)        | 1.0000          | 0.6822          | 619.6141        | 785.7986        |
-| sweep_awgn(sigma=0.600)        | 1.0000          | 0.3685          | 331.0267        | 439.4499        |
-| sweep_awgn(sigma=0.650)        | 1.0000          | 0.1280          | 110.3422        | 239.3120        |
-| sweep_awgn(sigma=0.700)        | 1.0000          | 0.0264          | 16.9757         | 45.7726         |
+
+| scenario                       | ebn0_db         | packet_accept_ratio | synced_frame_ratio | crc_pass_ratio  | raw_ber         | goodput_effective_bps | goodput_success_mean_bps |
+| :----------------------------- | :-------------- | :-------------- | :-------------- | :-------------- | :-------------- | :-------------- | :-------------- |
+| sweep_awgn(sigma=0.000)        | -               | 1.0000          | 1.0000          | 1.0000          | 0.0017          | 1001.5680       | 1113.8733       |
+| sweep_awgn(sigma=0.100)        | 28.5846         | 0.9810          | 1.0000          | 0.9894          | 0.0024          | 984.5923        | 1098.2413       |
+| sweep_awgn(sigma=0.200)        | 22.5640         | 0.9873          | 1.0000          | 0.9915          | 0.0011          | 984.5923        | 1098.3921       |
+| sweep_awgn(sigma=0.300)        | 19.0422         | 0.9177          | 1.0000          | 0.9710          | 0.0035          | 916.6894        | 1047.2908       |
+| sweep_awgn(sigma=0.400)        | 16.5434         | 0.9051          | 1.0000          | 0.9576          | 0.0096          | 908.2015        | 1038.2769       |
+| sweep_awgn(sigma=0.500)        | 14.6052         | 0.7743          | 1.0000          | 0.8495          | 0.0358          | 772.3957        | 926.5545        |
+| sweep_awgn(sigma=0.700)        | 11.6827         | 0.0232          | 1.0000          | 0.0264          | 0.1836          | 16.9757         | 45.7726         |
+| sweep_awgn(sigma=0.800)        | 10.5228         | 0.0000          | 1.0000          | 0.0000          | 0.3213          | 0.0000          | -               |
+| sweep_awgn(sigma=0.900)        | 9.4998          | 0.0000          | 1.0000          | 0.0000          | 0.3793          | 0.0000          | -               |
 
 #### DSSS
 
@@ -255,22 +257,22 @@ $ cargo run --release --bin dsss_e2e_eval -- \
         --phy dsss \
         --mode sweep-awgn \
         --packets-per-frame 1 \
-        --sweep-awgn '0.0,0.40,0.45,0.50,0.55,0.60,0.65,0.70' \
-        --columns 'scenario,synced_frame_ratio,crc_pass_ratio,goodput_effective_bps,goodput_success_mean_bps' \
+        --sweep-awgn '0.0,0.1,0.2,0.3,0.4,0.5,0.7,0.8,0.9' \
+        --columns 'scenario,ebn0_db,packet_accept_ratio,synced_frame_ratio,crc_pass_ratio,raw_ber,goodput_effective_bps,goodput_success_mean_bps' \
         --output table
 ```
 
-| scenario                       | synced_frame_ratio | crc_pass_ratio  | goodput_effective_bps | goodput_success_mean_bps |
-| :----------------------------- | :-------------- | :-------------- | :-------------- | :-------------- |
-| sweep_awgn(sigma=0.000)        | 1.0000          | 1.0000          | 365.0326        | 366.1411        |
-| sweep_awgn(sigma=0.400)        | 1.0000          | 0.9942          | 356.5434        | 361.5864        |
-| sweep_awgn(sigma=0.450)        | 1.0000          | 0.9942          | 356.5434        | 361.5864        |
-| sweep_awgn(sigma=0.500)        | 1.0000          | 1.0000          | 365.0326        | 366.1411        |
-| sweep_awgn(sigma=0.550)        | 1.0000          | 1.0000          | 365.0326        | 366.1411        |
-| sweep_awgn(sigma=0.600)        | 1.0000          | 1.0000          | 365.0326        | 366.1411        |
-| sweep_awgn(sigma=0.650)        | 1.0000          | 1.0000          | 365.0326        | 366.1411        |
-| sweep_awgn(sigma=0.700)        | 1.0000          | 0.3684          | 127.3369        | 360.1951        |
-
+| scenario                       | ebn0_db         | packet_accept_ratio | synced_frame_ratio | crc_pass_ratio  | raw_ber         | goodput_effective_bps | goodput_success_mean_bps |
+| :----------------------------- | :-------------- | :-------------- | :-------------- | :-------------- | :-------------- | :-------------- | :-------------- |
+| sweep_awgn(sigma=0.000)        | -               | 1.0000          | 1.0000          | 1.0000          | 0.0294          | 365.0326        | 366.1411        |
+| sweep_awgn(sigma=0.100)        | 33.0981         | 1.0000          | 1.0000          | 1.0000          | 0.0292          | 365.0326        | 366.1411        |
+| sweep_awgn(sigma=0.200)        | 27.0775         | 1.0000          | 1.0000          | 1.0000          | 0.0297          | 365.0326        | 366.1411        |
+| sweep_awgn(sigma=0.300)        | 23.5557         | 1.0000          | 1.0000          | 1.0000          | 0.0317          | 365.0326        | 366.1411        |
+| sweep_awgn(sigma=0.400)        | 21.0569         | 0.9942          | 1.0000          | 0.9942          | 0.0394          | 356.5434        | 361.5864        |
+| sweep_awgn(sigma=0.500)        | 19.1187         | 1.0000          | 1.0000          | 1.0000          | 0.0612          | 365.0326        | 366.1411        |
+| sweep_awgn(sigma=0.700)        | 16.1961         | 0.3663          | 1.0000          | 0.3684          | 0.1545          | 127.3369        | 360.1951        |
+| sweep_awgn(sigma=0.800)        | 15.0363         | 0.3663          | 1.0000          | 0.3684          | 0.2160          | 127.3369        | 360.1951        |
+| sweep_awgn(sigma=0.900)        | 14.0132         | 0.2733          | 0.9826          | 0.2781          | 0.2720          | 93.3804         | 320.0123        |
 
 ## ライセンス
 
