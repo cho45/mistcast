@@ -57,6 +57,8 @@ pub struct MetricContext<'a> {
     pub payload_bits: usize,
     pub sigma: f32,
     pub multipath_name: &'a str,
+    pub sample_rate: f32,
+    pub bit_rate: f32,
 }
 
 #[derive(Debug, Clone)]

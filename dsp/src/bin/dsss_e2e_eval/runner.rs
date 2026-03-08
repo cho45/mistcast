@@ -198,6 +198,41 @@ pub fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
     }
 }
 
+pub fn calculate_info_bit_rate(cli: &Cli) -> f32 {
+    let chip_rate = cli.chip_rate.max(1e-6);
+    // 情報ビットレートの定義: ユーザーデータ（16バイト）が単位時間にどれだけ送られるか。
+    // Eb/N0 の計算においても、通常 Eb は情報ビットあたりのエネルギーを指す。
+    let info_bits_per_packet = (dsp::params::PAYLOAD_SIZE * 8) as f32; // 128 bits
+
+    match cli.phy {
+        Phy::Dsss => {
+            // DSSS SF は M系列の長さ (2^order - 1)
+            let sf = ((1 << cli.mseq_order) - 1) as f32;
+            let bits_per_symbol = 2.0; // DQPSK
+            // DSSS インターリーバは 16x22 = 352 bits
+            let interleaved_bits = 352.0;
+
+            let symbol_rate = chip_rate / sf;
+            let coded_bit_rate = symbol_rate * bits_per_symbol;
+            let code_rate = info_bits_per_packet / interleaved_bits;
+            coded_bit_rate * code_rate
+        }
+        Phy::Mary => {
+            // Mary (Fast) モードでは、1シンボル(6 bits)が 16チップ(Walsh-16)で送られる。
+            // 追加の拡散 (PAYLOAD_SPREAD_FACTOR) は 16 だが、これは Walsh の長さそのもの。
+            let chips_per_symbol = 16.0;
+            let bits_per_symbol = 6.0;
+            // Mary インターリーバは 29x12 = 348 bits
+            let interleaved_bits = 348.0;
+
+            let symbol_rate = chip_rate / chips_per_symbol;
+            let coded_bit_rate = symbol_rate * bits_per_symbol;
+            let code_rate = info_bits_per_packet / interleaved_bits;
+            coded_bit_rate * code_rate
+        }
+    }
+}
+
 pub fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
     let metrics = if matches!(cli.phy, Phy::Mary) {
         run_trial_mary_e2e(imp, cli, cli.seed)
@@ -597,6 +632,26 @@ mod tests {
     use super::*;
     use crate::channel::MultipathProfile;
     use crate::{CirNormArg, EvalMode, OutputFormat, Phy};
+
+    #[test]
+    fn test_calculate_info_bit_rate() {
+        // --- Mary 8000 cps, SF=16, Walsh-16+DQPSK, 128/348 FEC ---
+        let mut cli_mary = dummy_cli(Phy::Mary);
+        cli_mary.chip_rate = 8000.0;
+        let rb_mary = calculate_info_bit_rate(&cli_mary);
+        
+        // 期待値: (8000 / 16) * 6 * (128 / 348) = 1103.448 bps
+        assert!((rb_mary - 1103.448).abs() < 0.01, "Mary bit rate mismatch: expected 1103.448, got {}", rb_mary);
+
+        // --- DSSS 8000 cps, Order=4 (SF=15), DQPSK, 128/352 FEC ---
+        let mut cli_dsss = dummy_cli(Phy::Dsss);
+        cli_dsss.chip_rate = 8000.0;
+        cli_dsss.mseq_order = 4;
+        let rb_dsss = calculate_info_bit_rate(&cli_dsss);
+
+        // 期待値: (8000 / 15) * 2 * (128 / 352) = 387.878 bps
+        assert!((rb_dsss - 387.878).abs() < 0.01, "DSSS bit rate mismatch: expected 387.878, got {}", rb_dsss);
+    }
 
     #[test]
     fn test_make_bytes_determinism() {

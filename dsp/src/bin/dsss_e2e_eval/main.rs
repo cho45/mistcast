@@ -17,7 +17,8 @@ define_metrics! {
     phy,                           "方式 (dsss, mary)",            |ctx, _| ctx.phy.into(), default;
     mary_fde_mode,                 "Mary FDEモード",               |ctx, _| ctx.mary_fde_mode.into(), default;
     total_sim_sec,                 "シミュレーション経過時間 [sec]",|_, m| m.total_sim_sec.into(), default;
-    awgn_snr_db,                   "理論上のAWGN SNR [dB]",        |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
+    ebn0_db,                       "理論上の Eb/N0 [dB]",          |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_ebn0_db(snr, ctx.sample_rate, ctx.bit_rate)).into(), default;
+    snr_wideband_db,               "全帯域(fs)での理論SNR [dB]",   |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
     p_complete,                    "パケット到達率 (PDR)",         |_, m| m.p_complete().into(), default;
     ber,                           "ビットエラーレート (BER)",     |_, m| m.ber().into(), default;
     raw_ber,                       "FEC適用前の生BER",             |_, m| m.raw_ber().into(), default;

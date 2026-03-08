@@ -1,10 +1,9 @@
+use dsp::common::channel::add_awgn;
 use dsp::dsss::decoder::Decoder;
 use dsp::dsss::encoder::{Encoder, EncoderConfig};
 use dsp::dsss::params;
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand_distr::Normal;
 use std::time::{Duration, Instant};
 
 const QUICK_NO_NOISE_BUDGET: Duration = Duration::from_secs(4);
@@ -13,17 +12,6 @@ const MARGIN_SIGMA: f32 = 0.025;
 const QUICK_MAX_FRAMES: usize = 10;
 const QUICK_GAP_SAMPLES: usize = 64;
 const QUICK_CHUNK_SAMPLES: usize = 16384;
-
-/// AWGN (加法性ホワイトガウスノイズ) を付与する
-fn add_awgn<R: Rng + ?Sized>(samples: &mut [f32], sigma: f32, rng: &mut R) {
-    if sigma <= 0.0 {
-        return;
-    }
-    let normal = Normal::new(0.0, sigma).unwrap();
-    for s in samples.iter_mut() {
-        *s += normal.sample(rng);
-    }
-}
 
 /// 指定されたシグマ（ノイズ強度）で E2E 通信テストを行う。
 /// 送信フレームを逐次デコーダへ流し、復号完了時点で即終了する。
@@ -35,7 +23,7 @@ fn test_transmission_quick(sigma: f32, seed: u64, sample_rate: f32) -> bool {
     enc_config.fountain_k = lt_k;
     let mut encoder = Encoder::new(enc_config);
     let mut stream = encoder.encode_stream(data);
-    let mut decoder = Decoder::new(data.len(), lt_k, dsp_config.clone());
+    let mut decoder = Decoder::new(data.len(), lt_k, dsp_config);
     let mut rng = StdRng::seed_from_u64(seed);
     let gap = vec![0.0f32; QUICK_GAP_SAMPLES];
 

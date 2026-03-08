@@ -1,10 +1,9 @@
+use dsp::common::channel::add_awgn;
 use dsp::mary::decoder::Decoder;
 use dsp::mary::encoder::Encoder;
 use dsp::DspConfig;
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand_distr::Normal;
 use std::time::{Duration, Instant};
 
 const QUICK_NO_NOISE_BUDGET: Duration = Duration::from_secs(4);
@@ -12,17 +11,6 @@ const QUICK_MARGIN_BUDGET: Duration = Duration::from_secs(7);
 const MARGIN_SIGMA: f32 = 0.025;
 const QUICK_MAX_PACKETS: usize = 20;
 const QUICK_CHUNK_SAMPLES: usize = 16384;
-
-/// AWGN (加法性ホワイトガウスノイズ) を付与する
-fn add_awgn<R: Rng + ?Sized>(samples: &mut [f32], sigma: f32, rng: &mut R) {
-    if sigma <= 0.0 {
-        return;
-    }
-    let normal = Normal::new(0.0, sigma).unwrap();
-    for s in samples.iter_mut() {
-        *s += normal.sample(rng);
-    }
-}
 
 /// 指定されたシグマ（ノイズ強度）で E2E 通信テストを行う (Mary版)。
 fn test_transmission_quick(sigma: f32, seed: u64, sample_rate: f32) -> bool {
@@ -32,7 +20,7 @@ fn test_transmission_quick(sigma: f32, seed: u64, sample_rate: f32) -> bool {
     let mut encoder = Encoder::new(dsp_config.clone());
     encoder.set_data(data);
 
-    let mut decoder = Decoder::new(data.len(), lt_k, dsp_config.clone());
+    let mut decoder = Decoder::new(data.len(), lt_k, dsp_config);
     let mut rng = StdRng::seed_from_u64(seed);
 
     // Mary版はバースト全体ではなく、1パケット(シンボル)ずつ、または一括で流す
@@ -133,10 +121,7 @@ fn test_mary_awgn_e2e_sigma_margin_sweep() {
     let candidates = [0.01f32, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045];
     let mut best_sigma = 0.0f32;
 
-    println!(
-        "
---- Mary AWGN sigma margin sweep ---"
-    );
+    println!("\n--- Mary AWGN sigma margin sweep ---");
     for sigma in candidates {
         let start = Instant::now();
         let success = success_count_for_sigma(sigma, &seeds, 48000.0);
@@ -153,10 +138,7 @@ fn test_mary_awgn_e2e_sigma_margin_sweep() {
     }
     println!("recommended always-on margin sigma: {best_sigma:.3}");
     println!("configured MARGIN_SIGMA: {MARGIN_SIGMA:.3}");
-    println!(
-        "--------------------------------
-"
-    );
+    println!("--------------------------------\n");
     assert!(
         best_sigma > 0.0,
         "どの候補 sigma でも全seed成功しませんでした。Mary復調性能の劣化が疑われます。"

@@ -1619,34 +1619,8 @@ mod tests {
         let mut i_ch: Vec<f32> = i_resampled.iter().map(|&s| rrc_i.process(s)).collect();
         let mut q_ch: Vec<f32> = q_resampled.iter().map(|&s| rrc_q.process(s)).collect();
 
-        let mut energy_sum = 0.0f32;
-        let mut active_count = 0;
-        for (&i, &q) in i_ch.iter().zip(q_ch.iter()) {
-            let en = i * i + q * q;
-            if en > 0.01 {
-                energy_sum += en;
-                active_count += 1;
-            }
-        }
-        let signal_power = if active_count > 0 {
-            energy_sum / active_count as f32
-        } else {
-            1.0 // Fallback
-        };
-
-        let snr_linear = 10.0_f32.powf(snr_db / 10.0);
-        let noise_power = signal_power / snr_linear;
-        let noise_std = (noise_power / 2.0).sqrt(); // IとQに分けるので 1/2
-
         let mut rng = StdRng::seed_from_u64(seed);
-        let dist = Normal::new(0.0, noise_std).unwrap();
-
-        for i in i_ch.iter_mut() {
-            *i += dist.sample(&mut rng);
-        }
-        for q in q_ch.iter_mut() {
-            *q += dist.sample(&mut rng);
-        }
+        crate::common::channel::add_awgn_snr_iq(&mut i_ch, &mut q_ch, snr_db, &mut rng);
 
         (i_ch, q_ch)
     }
