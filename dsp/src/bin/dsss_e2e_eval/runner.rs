@@ -3,6 +3,7 @@ use crate::metrics::{Metrics, PhaseStats};
 use crate::report::{print_header, print_row};
 use crate::utils::{count_bit_errors_bytes, BerAccumulator};
 use crate::{Cli, EvalMode, MaryFdeMode, Phy};
+use dsp::coding::fountain::{FountainEncoder, FountainParams};
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
 use dsp::mary::decoder::Decoder as MaryDecoder;
 use dsp::mary::encoder::Encoder as MaryEncoder;
@@ -381,55 +382,63 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     };
 
     let mut last_reset_sec = 0.0f32;
+    let fountain_params = FountainParams::new(k, PAYLOAD_SIZE);
+    let mut fountain_encoder = FountainEncoder::new(&payload, fountain_params);
+    let ber_accum = BerAccumulator::new();
+    decoder.llr_callback = Some(ber_accum.llr_callback());
 
     run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
-    {
-        let mut stream = encoder.encode_stream(&payload);
-        loop {
-            if m.total_sim_sec >= cli.total_sim_sec {
-                break;
-            }
-            let Some(frame) = stream.next() else {
-                break;
-            };
-            m.total_frame_attempts += 1;
-            m.total_tx_signal_energy += signal_energy(&frame);
-            m.total_tx_signal_samples += frame.len();
-
-            let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
-            if drop_frame {
-                m.dropped_frames += 1;
-            }
-            let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
-            m.total_sim_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
-
-            process_samples_in_chunks(
-                &rx_frame,
-                chunk,
-                &mut decoder,
-                &mut m,
-                |decoder: &mut DsssDecoder, progress, m: &mut Metrics| {
-                    if progress.complete {
-                        let recovered = decoder.recovered_data();
-                        let errs = count_bit_errors_bytes(&payload, recovered);
-                        m.add_frame_event(
-                            progress.synced_frames,
-                            progress.received_packets,
-                            progress.crc_error_packets,
-                        );
-                        m.add_recovery_event(
-                            m.total_sim_sec - last_reset_sec,
-                            errs,
-                            payload.len() * 8,
-                        );
-
-                        decoder.reset_fountain_decoder();
-                        last_reset_sec = m.total_sim_sec;
-                    }
-                    ControlFlow::Continue
-                },
-            );
+    loop {
+        if m.total_sim_sec >= cli.total_sim_sec {
+            break;
         }
+
+        let packet_count_per_frame = cli.packets_per_frame.max(1);
+        let mut packets = Vec::with_capacity(packet_count_per_frame);
+        for _ in 0..packet_count_per_frame {
+            let fp = fountain_encoder.next_packet();
+            ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
+            packets.push(fp);
+        }
+        let frame = encoder.encode_burst(&packets);
+
+        m.total_frame_attempts += 1;
+        m.total_tx_signal_energy += signal_energy(&frame);
+        m.total_tx_signal_samples += frame.len();
+
+        let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
+        if drop_frame {
+            m.dropped_frames += 1;
+        }
+        let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
+        m.total_sim_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+
+        process_samples_in_chunks(
+            &rx_frame,
+            chunk,
+            &mut decoder,
+            &mut m,
+            |decoder: &mut DsssDecoder, progress, m: &mut Metrics| {
+                if progress.complete {
+                    let recovered = decoder.recovered_data();
+                    let errs = count_bit_errors_bytes(&payload, recovered);
+                    m.add_frame_event(
+                        progress.synced_frames,
+                        progress.received_packets,
+                        progress.crc_error_packets,
+                    );
+                    m.add_recovery_event(
+                        m.total_sim_sec - last_reset_sec,
+                        errs,
+                        payload.len() * 8,
+                    );
+
+                    decoder.reset_fountain_decoder();
+                    last_reset_sec = m.total_sim_sec;
+                }
+                ControlFlow::Continue
+            },
+        );
     }
 
     run_flush(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
@@ -447,6 +456,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         let errs = count_bit_errors_bytes(&payload, recovered);
         m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
     }
+
+    m.set_mary_raw_ber(ber_accum.extract_pre_fec());
+    m.set_mary_post_ber(ber_accum.extract_post_fec());
 
     m
 }
@@ -744,6 +756,9 @@ mod tests {
             m.total_successes * cli.payload_bytes * 8
         );
         assert_eq!(m.ber(), 0.0);
+        assert!(m.raw_ber().is_finite());
+        assert!(m.raw_ber() >= 0.0);
+        assert_eq!(m.post_ber(), 0.0);
 
         // 4. 物理・タイミング
         assert!(m.total_tx_signal_energy > 0.0);

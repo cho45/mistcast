@@ -21,7 +21,7 @@ define_metrics! {
     snr_wideband_db,               "AWGN 仮定での受信全帯域 SNR [dB]",             |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
     packet_accept_ratio,           "受理パケット率 = accepted_packets / 全送信packet数",|_, m| m.packet_accept_ratio().into(), default;
     ber,                           "復元成功 payload に対する事後 BER",             |_, m| m.ber().into(), default;
-    raw_ber,                       "Mary の FEC/後段処理前 BER",                    |_, m| m.raw_ber().into(), default;
+    raw_ber,                       "PHY デコーダの FEC 復号前 codeword BER",        |_, m| m.raw_ber().into(), default;
     goodput_effective_bps,         "総シミュレーション時間あたりの有効 payload bitrate [bps]",|ctx, m| m.goodput_effective_bps(ctx.payload_bits).into(), default;
     goodput_success_mean_bps,      "復元成功イベントごとの payload bitrate の平均 [bps]",|ctx, m| m.goodput_success_mean_bps(ctx.payload_bits).into(), default;
     p95_complete_s,                "復元成功イベントの完了時間 95% 点 [sec]",       |_, m| m.p95_completion_sec().into(), default;
@@ -46,7 +46,7 @@ define_metrics! {
     err_w_cw_p99,                  "codeword あたりエラービット数の 99% 点",        |_, m| m.err_w_cw_p99().into();
     err_w_cw_max,                  "codeword あたり最大エラービット数",             |_, m| m.err_w_cw_max().into();
     err_w_cw_hist,                 "codeword エラー重みヒストグラム",               |_, m| m.err_w_cw_hist().into();
-    post_ber,                      "Mary の後段処理後 BER",                         |_, m| m.post_ber().into();
+    post_ber,                      "PHY デコーダの FEC 復号後 BER",                 |_, m| m.post_ber().into();
     post_decode_match_ratio,       "後段 decode 試行に対する payload 一致率",       |_, m| m.post_decode_match_ratio().into();
     post_err_run_mean,             "後段 BER 系列でのエラーラン平均長",             |_, m| m.post_err_run_mean().into();
     post_err_run_max,              "後段 BER 系列でのエラーラン最大長",             |_, m| m.post_err_run_max().into();

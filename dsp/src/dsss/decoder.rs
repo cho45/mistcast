@@ -59,6 +59,8 @@ pub struct DecodeProgress {
     pub basis_matrix: Vec<u8>,
 }
 
+pub type LlrCallback = Box<dyn Fn(&[f32]) + Send + Sync>;
+
 pub struct Decoder {
     pub config: DspConfig,
     resampler_i: Resampler,
@@ -91,6 +93,7 @@ pub struct Decoder {
     pub stats_sync_time: Duration,
     pub stats_total_samples: usize,
     pub stats_synced_frames: usize,
+    pub llr_callback: Option<LlrCallback>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +113,7 @@ struct DecodedSoftBits {
 
 #[derive(Debug)]
 struct PayloadDecodeAttempt {
+    llrs: Vec<f32>,
     packets: Vec<Packet>,
     crc_errors: usize,
     parse_errors: usize,
@@ -184,6 +188,7 @@ impl Decoder {
             stats_sync_time: Duration::ZERO,
             stats_total_samples: 0,
             stats_synced_frames: 0,
+            llr_callback: None,
         }
     }
 
@@ -539,6 +544,7 @@ impl Decoder {
         let (packets, crc_errors, parse_errors) =
             self.parse_payload_packets(&decoded_soft_bits.llrs, fec_bits_len, p_bits_len);
         Some(PayloadDecodeAttempt {
+            llrs: decoded_soft_bits.llrs,
             packets,
             crc_errors,
             parse_errors,
@@ -573,7 +579,7 @@ impl Decoder {
     }
 
     fn decode_payload_with_timing_retries(
-        &self,
+        &mut self,
         payload_start: usize,
         burst_data_bits_len: usize,
         initial_state: TrackingState,
@@ -597,7 +603,11 @@ impl Decoder {
                 )
             })
             .collect();
-        Self::select_best_payload_attempt(attempts)
+        let best = Self::select_best_payload_attempt(attempts);
+        if let Some(attempt) = best.as_ref() {
+            self.emit_packet_llr_callbacks(&attempt.llrs, fec_bits_len);
+        }
+        best
     }
 
     fn parse_payload_packets(
@@ -627,6 +637,22 @@ impl Decoder {
             }
         }
         (decoded_packets, crc_errors, parse_errors)
+    }
+
+    fn emit_packet_llr_callbacks(&mut self, payload_llrs: &[f32], fec_bits_len: usize) {
+        let Some(callback) = self.llr_callback.as_mut() else {
+            return;
+        };
+        for packet_llrs in payload_llrs.chunks_exact(fec_bits_len) {
+            let mut descrambled_llr = self.interleaver.deinterleave_f32(packet_llrs);
+            let mut scrambler = crate::coding::scrambler::Scrambler::default();
+            for llr in descrambled_llr.iter_mut() {
+                if scrambler.next_bit() == 1 {
+                    *llr = -*llr;
+                }
+            }
+            callback(&descrambled_llr);
+        }
     }
 
     fn progress(&self) -> DecodeProgress {
@@ -979,6 +1005,7 @@ mod tests {
         dsss::encoder::{Encoder, EncoderConfig},
         DspConfig,
     };
+    use std::sync::{Arc, Mutex};
 
     fn encode_packet_bits_to_interleaved_llrs(bits: &[u8], magnitude: f32) -> Vec<f32> {
         let mut fec_bits = fec::encode(bits);
@@ -1342,6 +1369,58 @@ mod tests {
         assert_eq!(packets, vec![valid_packet]);
         assert_eq!(crc_errors, 1);
         assert_eq!(parse_errors, 0);
+    }
+
+    #[test]
+    fn test_decoder_llr_callback_emits_one_codeword_per_packet_in_burst() {
+        let data = vec![0x55u8; 64];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let packets_per_burst = 3;
+
+        let mut config = crate::dsss::params::dsp_config_48k();
+        config.packets_per_burst = packets_per_burst;
+
+        let mut enc_cfg = EncoderConfig::new(config.clone());
+        enc_cfg.fountain_k = k;
+        enc_cfg.packets_per_sync_burst = packets_per_burst;
+        let mut encoder = Encoder::new(enc_cfg);
+
+        let params = FountainParams::new(k, PAYLOAD_SIZE);
+        let mut fountain_encoder = FountainEncoder::new(&data, params);
+        let mut packets = Vec::with_capacity(packets_per_burst);
+        for _ in 0..packets_per_burst {
+            packets.push(fountain_encoder.next_packet());
+        }
+
+        let mut signal = encoder.encode_burst(&packets);
+        signal.extend(encoder.flush());
+        signal.extend(vec![0.0f32; 1024]);
+
+        let callback_lengths = Arc::new(Mutex::new(Vec::new()));
+        let callback_lengths_capture = Arc::clone(&callback_lengths);
+        let mut decoder = Decoder::new(data.len(), k, config);
+        decoder.config.packets_per_burst = packets_per_burst;
+        decoder.llr_callback = Some(Box::new(move |llrs: &[f32]| {
+            callback_lengths_capture.lock().unwrap().push(llrs.len());
+        }));
+
+        for chunk in signal.chunks(2048) {
+            decoder.process_samples(chunk);
+        }
+        let final_progress = decoder.process_samples(&[]);
+
+        assert_eq!(final_progress.synced_frames, 1);
+        assert_eq!(final_progress.received_packets, packets_per_burst);
+        assert_eq!(final_progress.crc_error_packets, 0);
+
+        let observed = callback_lengths.lock().unwrap().clone();
+        let fec_bits_len = decoder.interleaver.rows() * decoder.interleaver.cols();
+        assert_eq!(observed.len(), packets_per_burst);
+        assert!(
+            observed.iter().all(|&len| len == fec_bits_len),
+            "callback must receive one full FEC codeword per packet: {:?}",
+            observed
+        );
     }
 
     #[test]
