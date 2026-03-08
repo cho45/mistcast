@@ -1,23 +1,26 @@
 [
   {
-    "name": "dsss p1 8k 31",
+    "name": "dsss p1 mseq8",
     "phy": "dsss",
     "args": {
-      "sweep_awgn": "1.5,1.7,2.0,2,2,2.4,2.6,2.8,3.0",
+      "sweep_awgn": "1.5,1.7,2.0,2,2,2.4,2.6,2.8,3.0,5.0",
       "packets_per_frame": 1,
       "mseq-order": 8,
-      "preamble-repeat": 4,
-      "chip-rate": 8000
+      "preamble-repeat": 2,
+      "rrc-alpha": 0.5,
+      "carrier-freq": 10000,
+      "chip-rate": 15000
     }
   },
   {
-    "name": "dsss p1 2k 61",
+    "name": "dsss p1 mseq6",
     "phy": "dsss",
     "args": {
-      "sweep_awgn": "1.0,1.1,1.5,2.0,2.2,2.4,2.6,2.8,3.0",
+      "sweep_awgn": "1.0,1.1,1.5,2.0,2.2,2.4,2.6,2.8,3.0,5.0",
       "packets_per_frame": 1,
-      "preamble-repeat": 4,
+      "preamble-repeat": 2,
       "mseq-order": 6,
+      "rrc-alpha": 0.5,
       "chip-rate": 8000
     }
   },
