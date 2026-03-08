@@ -15,6 +15,8 @@
     "test:dsp:wasm:simd": "cd dsp && RUSTFLAGS='-C target-feature=+simd128' wasm-pack test --node",
     "bench:wasm:flavors": "node --expose-gc scripts/bench-simd.js",
     "bench:wasm:flavors:quick": "BENCH_ITERS=3 BENCH_WARMUP_MIN_PAIRS=3 BENCH_WARMUP_MAX_PAIRS=8 BENCH_STABLE_WINDOW=3 BENCH_STABLE_CV=0.05 node --expose-gc scripts/bench-simd.js",
+    "profile:native:dsss": "bash scripts/profile-native.sh",
+    "profile:wasm:node": "bash scripts/profile-wasm-node.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:components": "vitest run src/**/*.component.test.ts",

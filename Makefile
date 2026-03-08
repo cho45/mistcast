@@ -1,6 +1,6 @@
 # 音響通信DSPシステム (outer-kuiper) Makefile
 
-.PHONY: all test test-verbose test-dsp-wasm-simd bench-native-dsp build example clean check build-wasm dev build-all \
+.PHONY: all test test-verbose test-dsp-wasm-simd bench-native-dsp profile-native-dsss profile-wasm-node build example clean check build-wasm dev build-all \
 	phy-baseline phy-baseline-full phy-compare \
 	dsss-e2e-baseline dsss-e2e-baseline-full dsss-e2e-compare
 
@@ -43,6 +43,12 @@ test-dsp-wasm-simd:
 
 bench-native-dsp:
 	cd dsp && cargo bench --bench native_dsp
+
+profile-native-dsss:
+	bash scripts/profile-native.sh
+
+profile-wasm-node:
+	bash scripts/profile-wasm-node.sh
 # 個別モジュールのテスト
 test-mseq:
 	cd dsp && cargo test msequence::tests
