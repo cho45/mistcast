@@ -33,6 +33,9 @@ const lastPacketSeq = ref(-1);
 const lastRankUpSeq = ref(-1);
 const progressPercent = ref(0);
 
+const rxStartTime = ref<number | null>(null);
+const estimatedRemainingMs = ref<number | null>(null);
+
 // 直近のパケット成否履歴 (true: 成功, false: CRCエラー)
 const recentPacketHistory = ref<boolean[]>([]);
 
@@ -79,6 +82,16 @@ const stallProbability = computed(() => {
     return `${n}e${exponent}`;
   }
   return exp;
+});
+
+const formattedEta = computed(() => {
+  if (estimatedRemainingMs.value === null || progressPercent.value >= 1.0) return '';
+  const seconds = Math.ceil(estimatedRemainingMs.value / 1000);
+  if (seconds < 0) return '';
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
 });
 
 const receiverStatus = ref<ReceiverStatus>('idle');
@@ -311,6 +324,8 @@ function resetDecoderProgressState(clearLogs: boolean) {
   lastPacketSeq.value = -1;
   lastRankUpSeq.value = -1;
   progressPercent.value = 0;
+  rxStartTime.value = null;
+  estimatedRemainingMs.value = null;
   recentPacketHistory.value = [];
   fdeSelectedFrames.value = 0;
   rawSelectedFrames.value = 0;
@@ -368,6 +383,19 @@ function makeOnProgressCallback() {
     lastPredMseRaw.value = p.lastPredMseRaw ?? 0;
     lastEstSnrDb.value = p.lastEstSnrDb ?? 0;
     ebn0ApproxDb.value = p.ebn0ApproxDb ?? 0;
+
+    if (prevReceived === 0 && p.received > 0) {
+      rxStartTime.value = performance.now();
+    }
+    if (rxStartTime.value !== null && p.progress > 0 && p.progress < 1.0) {
+      const elapsed = performance.now() - rxStartTime.value;
+      if (elapsed > 1000) {
+        const msPerPercent = elapsed / p.progress;
+        estimatedRemainingMs.value = msPerPercent * (1 - p.progress);
+      }
+    } else if (p.progress >= 1.0) {
+      estimatedRemainingMs.value = null;
+    }
 
     // 直近の履歴を更新 (差分があった場合)
     if (p.received > prevReceived) {
@@ -702,7 +730,10 @@ defineExpose({
 
       <div class="progress-head">
         <span>Progress {{ rankPackets }} / {{ totalNeededPackets || '?' }}</span>
-        <span>{{ (progressPercent * 100).toFixed(1) }}%</span>
+        <div class="progress-head-right">
+          <span v-if="formattedEta" class="eta-text">ETA: {{ formattedEta }}</span>
+          <span>{{ (progressPercent * 100).toFixed(1) }}%</span>
+        </div>
       </div>
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" :style="{ width: `${progressPercent * 100}%` }" />
@@ -1023,6 +1054,18 @@ defineExpose({
   font-weight: 600;
   color: var(--muted);
   margin-bottom: 0.5rem;
+}
+
+.progress-head-right {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.eta-text {
+  font-weight: 500;
+  color: #64748b;
+  font-size: 0.9em;
 }
 
 .progress-bar-bg {
