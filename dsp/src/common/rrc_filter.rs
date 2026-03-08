@@ -74,7 +74,9 @@ fn rrc_at(t: f32, ts: f32, alpha: f32) -> f32 {
 /// 状態を保持するRRCフィルタ (逐次サンプル処理用)
 pub struct RrcFilter {
     coeffs: Vec<f32>,
-    buffer: Vec<f32>,
+    coeffs_rev: Vec<f32>,
+    // 2N バッファに同じ値を二重書きし、常に連続窓を取得できるようにする
+    history: Vec<f32>,
     pos: usize,
 }
 
@@ -100,9 +102,12 @@ impl RrcFilter {
             config.proc_sample_rate(),
         );
         let num_taps = coeffs.len();
+        let mut coeffs_rev = coeffs.clone();
+        coeffs_rev.reverse();
         RrcFilter {
             coeffs,
-            buffer: vec![0.0f32; num_taps],
+            coeffs_rev,
+            history: vec![0.0f32; num_taps * 2],
             pos: 0,
         }
     }
@@ -110,25 +115,38 @@ impl RrcFilter {
     /// カスタムパラメータでフィルタを作成する
     pub fn with_params(num_taps: usize, alpha: f32, chip_rate: f32, sample_rate: f32) -> Self {
         let coeffs = rrc_coeffs(num_taps, alpha, chip_rate, sample_rate);
-        let buffer = vec![0.0f32; num_taps];
+        let mut coeffs_rev = coeffs.clone();
+        coeffs_rev.reverse();
         RrcFilter {
             coeffs,
-            buffer,
+            coeffs_rev,
+            history: vec![0.0f32; num_taps * 2],
             pos: 0,
         }
+    }
+
+    #[inline]
+    fn push_and_window_start(&mut self, sample: f32) -> usize {
+        let n = self.coeffs.len();
+        let write = self.pos;
+        self.history[write] = sample;
+        self.history[write + n] = sample;
+        self.pos += 1;
+        if self.pos >= n {
+            self.pos = 0;
+        }
+        write + 1
     }
 
     /// 1サンプルを処理する (循環バッファによる畳み込み)
     #[cfg_attr(all(target_arch = "wasm32", target_feature = "simd128"), allow(dead_code))]
     fn process_scalar_path(&mut self, sample: f32) -> f32 {
-        self.buffer[self.pos] = sample;
         let n = self.coeffs.len();
+        let start = self.push_and_window_start(sample);
         let mut out = 0.0f32;
         for k in 0..n {
-            let idx = (self.pos + n - k) % n;
-            out += self.coeffs[k] * self.buffer[idx];
+            out += self.coeffs_rev[k] * self.history[start + k];
         }
-        self.pos = (self.pos + 1) % n;
         out
     }
 
@@ -143,31 +161,22 @@ impl RrcFilter {
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     fn process_simd_path(&mut self, sample: f32) -> f32 {
-        self.buffer[self.pos] = sample;
         let n = self.coeffs.len();
+        let start = self.push_and_window_start(sample);
         let mut sum4 = f32x4(0.0, 0.0, 0.0, 0.0);
         let mut k = 0usize;
         while k + 4 <= n {
-            let k0 = k;
-            let k1 = k + 1;
-            let k2 = k + 2;
-            let k3 = k + 3;
-            let i0 = (self.pos + n - k0) % n;
-            let i1 = (self.pos + n - k1) % n;
-            let i2 = (self.pos + n - k2) % n;
-            let i3 = (self.pos + n - k3) % n;
-
             let x = f32x4(
-                self.buffer[i0],
-                self.buffer[i1],
-                self.buffer[i2],
-                self.buffer[i3],
+                self.history[start + k],
+                self.history[start + k + 1],
+                self.history[start + k + 2],
+                self.history[start + k + 3],
             );
             let h = f32x4(
-                self.coeffs[k0],
-                self.coeffs[k1],
-                self.coeffs[k2],
-                self.coeffs[k3],
+                self.coeffs_rev[k],
+                self.coeffs_rev[k + 1],
+                self.coeffs_rev[k + 2],
+                self.coeffs_rev[k + 3],
             );
             sum4 = f32x4_add(sum4, f32x4_mul(h, x));
             k += 4;
@@ -175,11 +184,8 @@ impl RrcFilter {
 
         let mut out = Self::hsum4(sum4);
         for kk in k..n {
-            let idx = (self.pos + n - kk) % n;
-            out += self.coeffs[kk] * self.buffer[idx];
+            out += self.coeffs_rev[kk] * self.history[start + kk];
         }
-
-        self.pos = (self.pos + 1) % n;
         out
     }
 
@@ -215,7 +221,7 @@ impl RrcFilter {
 
     /// フィルタ状態をリセットする
     pub fn reset(&mut self) {
-        self.buffer.iter_mut().for_each(|v| *v = 0.0);
+        self.history.fill(0.0);
         self.pos = 0;
     }
 
