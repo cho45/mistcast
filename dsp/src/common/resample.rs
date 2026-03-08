@@ -2,7 +2,10 @@
 use std::arch::wasm32::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_mul};
 
 #[derive(Clone, Copy)]
-#[cfg_attr(all(target_arch = "wasm32", target_feature = "simd128"), allow(dead_code))]
+#[cfg_attr(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    allow(dead_code)
+)]
 enum ResampleBackend {
     Scalar,
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -18,6 +21,7 @@ pub struct Resampler {
     taps_per_phase: usize,
     coeffs: Vec<f32>,
     history: Vec<f32>,
+    history_start: usize,
 }
 
 impl Resampler {
@@ -68,9 +72,11 @@ impl Resampler {
 
     #[inline]
     fn convolve_scalar(&self, base: usize, coeffs: &[f32]) -> f32 {
+        let start = self.history_start + base;
+        let input = &self.history[start..start + coeffs.len()];
         let mut sum = 0.0f32;
-        for (tap, &h) in coeffs.iter().enumerate() {
-            sum += self.history[base + tap] * h;
+        for (&x, &h) in input.iter().zip(coeffs.iter()) {
+            sum += x * h;
         }
         sum
     }
@@ -87,25 +93,45 @@ impl Resampler {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[inline]
     fn convolve_simd(&self, base: usize, coeffs: &[f32]) -> f32 {
+        let start = self.history_start + base;
+        let input = &self.history[start..start + coeffs.len()];
         let mut sum4 = f32x4(0.0, 0.0, 0.0, 0.0);
         let mut tap = 0usize;
         while tap + 4 <= coeffs.len() {
-            let x = f32x4(
-                self.history[base + tap],
-                self.history[base + tap + 1],
-                self.history[base + tap + 2],
-                self.history[base + tap + 3],
+            let x = f32x4(input[tap], input[tap + 1], input[tap + 2], input[tap + 3]);
+            let h = f32x4(
+                coeffs[tap],
+                coeffs[tap + 1],
+                coeffs[tap + 2],
+                coeffs[tap + 3],
             );
-            let h = f32x4(coeffs[tap], coeffs[tap + 1], coeffs[tap + 2], coeffs[tap + 3]);
             sum4 = f32x4_add(sum4, f32x4_mul(x, h));
             tap += 4;
         }
 
         let mut sum = Self::hsum4(sum4);
         for (i, &h) in coeffs[tap..].iter().enumerate() {
-            sum += self.history[base + tap + i] * h;
+            sum += input[tap + i] * h;
         }
         sum
+    }
+
+    #[inline]
+    fn maybe_compact_history(&mut self) {
+        if self.history_start == 0 {
+            return;
+        }
+
+        let remaining = self.history.len().saturating_sub(self.history_start);
+        let should_compact = self.history_start >= self.taps_per_phase * 2
+            && (self.history_start * 2 >= self.history.len()
+                || self.history_start >= 16_384
+                || remaining < self.taps_per_phase + 8);
+
+        if should_compact {
+            self.history.drain(0..self.history_start);
+            self.history_start = 0;
+        }
     }
 
     /// `cutoff_hz` を指定した場合、リサンプラ内LPFのカットオフを明示できる。
@@ -187,6 +213,7 @@ impl Resampler {
             taps_per_phase,
             coeffs,
             history: vec![0.0; taps_per_phase - 1], // 立ち上がり分の遅延をゼロで埋める
+            history_start: 0,
         }
     }
 
@@ -204,12 +231,19 @@ impl Resampler {
         self.history.extend_from_slice(input);
 
         // 処理に必要な最小の長さはフィルタの全タップ数
-        if self.history.len() < self.taps_per_phase {
+        let available = self.history.len().saturating_sub(self.history_start);
+        if available < self.taps_per_phase {
             return;
         }
 
         // 常に history[base .. base + taps_per_phase] の窓で演算する。
-        let limit = (self.history.len() as isize - self.taps_per_phase as isize + 1).max(0) as f64;
+        let limit = (available as isize - self.taps_per_phase as isize + 1).max(0) as f64;
+
+        // 追加される可能性がある出力数を概算して、pushの再確保を減らす。
+        if self.phase < limit {
+            let est = ((limit - self.phase) / self.step).ceil().max(0.0) as usize;
+            output.reserve(est.saturating_add(1));
+        }
 
         while self.phase < limit {
             let base = self.phase.floor() as usize;
@@ -235,8 +269,9 @@ impl Resampler {
         // 整数サンプル分だけ history を消費
         let consumed = self.phase.floor() as usize;
         if consumed > 0 {
-            self.history.drain(0..consumed);
+            self.history_start = (self.history_start + consumed).min(self.history.len());
             self.phase -= consumed as f64;
+            self.maybe_compact_history();
         }
 
         if self.phase < 0.0 {
@@ -250,6 +285,7 @@ impl Resampler {
 
     pub fn reset(&mut self) {
         self.history = vec![0.0; self.taps_per_phase - 1];
+        self.history_start = 0;
         self.phase = 0.0;
     }
 
@@ -266,7 +302,7 @@ impl Resampler {
     /// 残っている履歴をすべて出力し、内部状態をリセットする。
     /// バーストの最後で呼び出す。
     fn flush_with_backend(&mut self, output: &mut Vec<f32>, backend: ResampleBackend) {
-        if self.history.is_empty() {
+        if self.history.len().saturating_sub(self.history_start) == 0 {
             return;
         }
 
@@ -277,6 +313,7 @@ impl Resampler {
 
         // 状態リセット
         self.history = vec![0.0; self.taps_per_phase - 1];
+        self.history_start = 0;
         self.phase = 0.0;
     }
 
@@ -820,7 +857,8 @@ mod tests {
         let target_rate = 48_000u32;
         let mut scalar =
             Resampler::new_with_cutoff(source_rate, target_rate, Some(20_000.0), Some(73));
-        let mut simd = Resampler::new_with_cutoff(source_rate, target_rate, Some(20_000.0), Some(73));
+        let mut simd =
+            Resampler::new_with_cutoff(source_rate, target_rate, Some(20_000.0), Some(73));
 
         let input: Vec<f32> = (0..4096)
             .map(|i| {
@@ -841,13 +879,7 @@ mod tests {
 
         assert_eq!(out_scalar.len(), out_simd.len());
         for (idx, (&a, &b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "idx={} scalar={} simd={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "idx={} scalar={} simd={}", idx, a, b);
         }
     }
 
@@ -877,13 +909,7 @@ mod tests {
 
         assert_eq!(out_scalar.len(), out_simd.len());
         for (idx, (&a, &b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "idx={} scalar={} simd={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "idx={} scalar={} simd={}", idx, a, b);
         }
     }
 
@@ -956,13 +982,7 @@ mod tests {
 
         assert_eq!(out_scalar.len(), out_simd.len());
         for (idx, (&a, &b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "idx={} scalar={} simd={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "idx={} scalar={} simd={}", idx, a, b);
         }
     }
 }
