@@ -670,8 +670,11 @@ defineExpose({
       <div class="receiver-controls">
         <div class="mode-tabs">
           <button @click="switchInputMode('loopback')" :class="{ active: inputMode === 'loopback' }" :disabled="isTogglingMic">{{ $t('receiver.input_mode.loopback') }}</button>
-          <button @click="switchInputMode('mic')" :class="{ active: inputMode === 'mic' }" :disabled="isTogglingMic">{{ $t('receiver.input_mode.mic') }}</button>
+          <button @click="switchInputMode('mic')" :class="{ active: inputMode === 'mic', 'highlight-mic': inputMode === 'loopback' }" :disabled="isTogglingMic">🎤 {{ $t('receiver.input_mode.mic') }}</button>
         </div>
+      </div>
+      <div class="mic-hint" v-if="inputMode === 'loopback'">
+        <span class="mic-hint-icon">💡</span> {{ $t('receiver.mic_hint') }}
       </div>
       <div class="path-banner">
         <span class="path-label">Path</span>
@@ -845,6 +848,41 @@ defineExpose({
 .mode-tabs button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.mode-tabs button.highlight-mic {
+  color: #854d0e;
+  background: #fef9c3;
+  outline: 1px dashed #facc15;
+  outline-offset: -1px;
+  font-weight: 700;
+  box-shadow: 0 2px 4px rgba(250, 204, 21, 0.15);
+}
+.mode-tabs button.highlight-mic:hover:not(:disabled) {
+  background: #fef08a;
+}
+
+.mic-hint {
+  font-size: 0.8rem;
+  color: #854d0e;
+  background: #fef9c3;
+  border: 1px solid #fde047;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: -0.2rem;
+  animation: fade-in 0.3s ease;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.mic-hint-icon {
+  font-size: 1rem;
 }
 
 .btn-clear {

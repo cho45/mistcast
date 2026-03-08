@@ -55,6 +55,7 @@
       "loopback": "Loopback",
       "mic": "Microphone"
     },
+    "mic_hint": "Select Microphone to try communication with actual sound",
     "status": {
       "idle": "Idle",
       "ready": "Ready",
