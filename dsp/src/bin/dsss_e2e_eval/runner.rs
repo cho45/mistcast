@@ -263,7 +263,7 @@ pub fn run_sweep_awgn(cli: &Cli) {
         base.sigma = sigma;
         let scenario = format!("sweep_awgn(sigma={sigma:.3})");
         let m = evaluate(cli, &base, &scenario);
-        let p = m.p_complete();
+        let p = m.packet_accept_ratio();
         if last_p >= cli.target_p_complete && p < cli.target_p_complete {
             phy_limit = Some(sigma);
         }
@@ -740,7 +740,7 @@ mod tests {
         assert!(m.total_accepted_packets > 0);
         assert_eq!(m.total_crc_error_packets, 0);
         assert_eq!(m.crc_pass_ratio(), 1.0);
-        assert!(m.p_complete() > 0.9);
+        assert!(m.packet_accept_ratio() > 0.9);
 
         // 3. エラー統計 (理想条件)
         assert!(m.total_successes > 0);
@@ -778,7 +778,7 @@ mod tests {
         // Mary は synced_frames == accepted_packets (packets_per_frame=1)
         assert!(m.total_accepted_packets > 0);
         assert_eq!(m.total_crc_error_packets, 0);
-        assert!(m.p_complete() > 0.95);
+        assert!(m.packet_accept_ratio() > 0.95);
         assert_eq!(
             m.total_synced_frames, m.total_accepted_packets,
             "Mary synced vs accepted mismatch"

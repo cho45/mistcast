@@ -222,7 +222,7 @@ impl Metrics {
         self.total_post_decode_matched += matched;
     }
 
-    pub fn p_complete(&self) -> f32 {
+    pub fn packet_accept_ratio(&self) -> f32 {
         let total_packets_sent = self.total_frame_attempts * self.packets_per_frame;
         ratio(self.total_accepted_packets, total_packets_sent)
     }
@@ -578,7 +578,7 @@ mod tests {
         m.total_accepted_packets = 200;
         m.total_crc_error_packets = 40;
 
-        assert_eq!(m.p_complete(), 200.0 / 300.0); // 200 / (100 * 3)
+        assert_eq!(m.packet_accept_ratio(), 200.0 / 300.0); // 200 / (100 * 3)
         assert_eq!(m.synced_frame_ratio(), 80.0 / 100.0);
         assert_eq!(m.crc_pass_ratio(), 200.0 / 240.0); // 200 / (200 + 40)
 

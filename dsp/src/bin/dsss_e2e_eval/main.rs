@@ -19,7 +19,7 @@ define_metrics! {
     total_sim_sec,                 "シミュレーション経過時間 [sec]",|_, m| m.total_sim_sec.into(), default;
     ebn0_db,                       "理論上の Eb/N0 [dB]",          |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_ebn0_db(snr, ctx.sample_rate, ctx.bit_rate)).into(), default;
     snr_wideband_db,               "全帯域(fs)での理論SNR [dB]",   |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
-    p_complete,                    "パケット到達率 (PDR)",         |_, m| m.p_complete().into(), default;
+    packet_accept_ratio,           "受理パケット率 (accepted/全送信)",|_, m| m.packet_accept_ratio().into(), default;
     ber,                           "ビットエラーレート (BER)",     |_, m| m.ber().into(), default;
     raw_ber,                       "FEC適用前の生BER",             |_, m| m.raw_ber().into(), default;
     goodput_effective_bps,         "実効スループット [bps]",       |ctx, m| m.goodput_effective_bps(ctx.payload_bits).into(), default;
@@ -28,7 +28,7 @@ define_metrics! {
     mean_complete_s,               "平均パケット到達時間 [sec]",   |_, m| m.mean_completion_sec().into(), default;
     avg_proc_ns_sample,            "平均処理時間 [ns/sample]",     |_, m| m.avg_process_time_per_sample_ns().into(), default;
     synced_frame_ratio,            "フレーム同期成功率",           |_, m| m.synced_frame_ratio().into(), default;
-    crc_pass_ratio,                "CRC通過率",                    |_, m| m.crc_pass_ratio().into(), default;
+    crc_pass_ratio,                "同期成功内のCRC通過率",        |_, m| m.crc_pass_ratio().into(), default;
     llr_second_pass_trigger_ratio, "LLR消去2ndパス起動率",         |_, m| m.llr_second_pass_trigger_ratio().into(), default;
     llr_second_pass_rescue_ratio,  "LLR消去2ndパス救済率",         |_, m| m.llr_second_pass_rescue_ratio().into(), default;
     phase_gate_on_ratio,           "位相ゲート有効率",             |_, m| m.phase_gate_on_ratio().into(), default;
