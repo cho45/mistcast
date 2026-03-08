@@ -289,3 +289,47 @@ impl BerAccumulator {
         (post_decode_attempts, post_decode_matched)
     }
 }
+
+pub fn parse_positive_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid float: {value}"))?;
+    if parsed > 0.0 {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be > 0: {value}"))
+    }
+}
+
+pub fn parse_nonnegative_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid float: {value}"))?;
+    if parsed >= 0.0 {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be >= 0: {value}"))
+    }
+}
+
+pub fn parse_unit_interval_f32(value: &str) -> Result<f32, String> {
+    let parsed = value
+        .parse::<f32>()
+        .map_err(|_| format!("invalid float: {value}"))?;
+    if (0.0..=1.0).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be in [0,1]: {value}"))
+    }
+}
+
+pub fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid integer: {value}"))?;
+    if parsed > 0 {
+        Ok(parsed)
+    } else {
+        Err(format!("value must be > 0: {value}"))
+    }
+}

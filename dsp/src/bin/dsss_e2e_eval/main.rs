@@ -6,6 +6,9 @@ mod utils;
 
 use crate::channel::{ChannelImpairment, MultipathProfile};
 use crate::runner::run_by_mode;
+use crate::utils::{
+    parse_nonnegative_f32, parse_positive_f32, parse_positive_usize, parse_unit_interval_f32,
+};
 use clap::{builder::PossibleValuesParser, Parser, ValueEnum};
 use dsp::mary::decoder::CirNormalizationMode;
 
@@ -27,11 +30,11 @@ define_metrics! {
     crc_pass_ratio,                "CRC通過率",                    |_, m| m.crc_pass_ratio().into(), default;
     llr_second_pass_trigger_ratio, "LLR消去2ndパス起動率",         |_, m| m.llr_second_pass_trigger_ratio().into(), default;
     llr_second_pass_rescue_ratio,  "LLR消去2ndパス救済率",         |_, m| m.llr_second_pass_rescue_ratio().into(), default;
-    phase_gate_on_ratio,           "位相ゲート有効率",             |_, m| m.phase_gate_on_ratio().into(), default;
-    phase_innovation_reject_ratio, "位相変化棄却率",               |_, m| m.phase_innovation_reject_ratio().into(), default;
+    phase_gate_on_ratio,           "位相ゲート有効率",             |_, m| f32::from(m.phase_gate_on_ratio()).into(), default;
+    phase_innovation_reject_ratio, "位相変化棄却率",               |_, m| f32::from(m.phase_innovation_reject_ratio()).into(), default;
     phase_err_abs_mean_rad,        "平均絶対位相誤差 [rad]",       |_, m| m.phase_err_abs_mean_rad().into(), default;
-    phase_err_abs_ge_0p5_ratio,    "0.5rad以上誤差率",             |_, m| m.phase_err_abs_ge_0p5_ratio().into(), default;
-    phase_err_abs_ge_1p0_ratio,    "1.0rad以上誤差率",             |_, m| m.phase_err_abs_ge_1p0_ratio().into(), default;
+    phase_err_abs_ge_0p5_ratio,    "0.5rad以上誤差率",             |_, m| f32::from(m.phase_err_abs_ge_0p5_ratio()).into(), default;
+    phase_err_abs_ge_1p0_ratio,    "1.0rad以上誤差率",             |_, m| f32::from(m.phase_err_abs_ge_1p0_ratio()).into(), default;
     avg_last_est_snr_db,           "平均推定SNR [dB]",             |_, m| m.avg_last_est_snr_db().into(), default;
     multipath,                     "マルチパスプロファイル",       |ctx, _| ctx.multipath_name.into(), default;
     raw_err_run_mean,              "生エラーラン平均長",           |_, m| m.raw_err_run_mean().into();
@@ -52,101 +55,6 @@ define_metrics! {
     post_err_w_cw_p99,             "Viterbi後CWエラー99%点",       |_, m| m.post_err_w_cw_p99().into();
     post_err_w_cw_max,             "Viterbi後CWあたり最大エラー",  |_, m| m.post_err_w_cw_max().into();
     post_err_w_cw_hist,            "Viterbi後CWエラーヒストグラム",|_, m| m.post_err_w_cw_hist().into();
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Phy {
-    Dsss,
-    Mary,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "kebab-case")]
-pub enum EvalMode {
-    Point,
-    SweepAwgn,
-    SweepPpm,
-    SweepLoss,
-    SweepFading,
-    SweepMultipath,
-    SweepBand,
-    SweepAll,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    Csv,
-    Json,
-    Table,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum MaryFdeMode {
-    On,
-    Off,
-    Auto,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub enum CirNormArg {
-    None,
-    UnitEnergy,
-    Peak,
-}
-
-impl From<CirNormArg> for CirNormalizationMode {
-    fn from(value: CirNormArg) -> Self {
-        match value {
-            CirNormArg::None => CirNormalizationMode::None,
-            CirNormArg::UnitEnergy => CirNormalizationMode::UnitEnergy,
-            CirNormArg::Peak => CirNormalizationMode::Peak,
-        }
-    }
-}
-
-pub fn parse_positive_f32(value: &str) -> Result<f32, String> {
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| format!("invalid float: {value}"))?;
-    if parsed > 0.0 {
-        Ok(parsed)
-    } else {
-        Err(format!("value must be > 0: {value}"))
-    }
-}
-
-pub fn parse_nonnegative_f32(value: &str) -> Result<f32, String> {
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| format!("invalid float: {value}"))?;
-    if parsed >= 0.0 {
-        Ok(parsed)
-    } else {
-        Err(format!("value must be >= 0: {value}"))
-    }
-}
-
-pub fn parse_unit_interval_f32(value: &str) -> Result<f32, String> {
-    let parsed = value
-        .parse::<f32>()
-        .map_err(|_| format!("invalid float: {value}"))?;
-    if (0.0..=1.0).contains(&parsed) {
-        Ok(parsed)
-    } else {
-        Err(format!("value must be in [0,1]: {value}"))
-    }
-}
-
-pub fn parse_positive_usize(value: &str) -> Result<usize, String> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("invalid integer: {value}"))?;
-    if parsed > 0 {
-        Ok(parsed)
-    } else {
-        Err(format!("value must be > 0: {value}"))
-    }
 }
 
 #[derive(Parser, Clone, Debug)]
@@ -253,6 +161,58 @@ pub struct Cli {
     #[arg(long = "show-metrics-desc")]
     pub show_metrics_desc: bool,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Phy {
+    Dsss,
+    Mary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum EvalMode {
+    Point,
+    SweepAwgn,
+    SweepPpm,
+    SweepLoss,
+    SweepFading,
+    SweepMultipath,
+    SweepBand,
+    SweepAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Csv,
+    Json,
+    Table,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum MaryFdeMode {
+    On,
+    Off,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum CirNormArg {
+    None,
+    UnitEnergy,
+    Peak,
+}
+
+impl From<CirNormArg> for CirNormalizationMode {
+    fn from(value: CirNormArg) -> Self {
+        match value {
+            CirNormArg::None => CirNormalizationMode::None,
+            CirNormArg::UnitEnergy => CirNormalizationMode::UnitEnergy,
+            CirNormArg::Peak => CirNormalizationMode::Peak,
+        }
+    }
+}
+
 
 impl Cli {
     pub fn base_impairment(&self) -> ChannelImpairment {
