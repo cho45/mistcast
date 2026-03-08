@@ -13,49 +13,49 @@ use clap::{builder::PossibleValuesParser, Parser, ValueEnum};
 use dsp::mary::decoder::CirNormalizationMode;
 
 define_metrics! {
-    scenario,                      "評価シナリオ名",               |ctx, _| ctx.scenario.into(), default;
-    phy,                           "方式 (dsss, mary)",            |ctx, _| ctx.phy.into(), default;
-    mary_fde_mode,                 "Mary FDEモード",               |ctx, _| ctx.mary_fde_mode.into(), default;
-    total_sim_sec,                 "シミュレーション経過時間 [sec]",|_, m| m.total_sim_sec.into(), default;
-    ebn0_db,                       "理論上の Eb/N0 [dB]",          |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_ebn0_db(snr, ctx.sample_rate, ctx.bit_rate)).into(), default;
-    snr_wideband_db,               "全帯域(fs)での理論SNR [dB]",   |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
-    packet_accept_ratio,           "受理パケット率 (accepted/全送信)",|_, m| m.packet_accept_ratio().into(), default;
-    ber,                           "ビットエラーレート (BER)",     |_, m| m.ber().into(), default;
-    raw_ber,                       "FEC適用前の生BER",             |_, m| m.raw_ber().into(), default;
-    goodput_effective_bps,         "実効スループット [bps]",       |ctx, m| m.goodput_effective_bps(ctx.payload_bits).into(), default;
-    goodput_success_mean_bps,      "平均パケットスループット [bps]",|ctx, m| m.goodput_success_mean_bps(ctx.payload_bits).into(), default;
-    p95_complete_s,                "95%パケット到達時間 [sec]",    |_, m| m.p95_completion_sec().into(), default;
-    mean_complete_s,               "平均パケット到達時間 [sec]",   |_, m| m.mean_completion_sec().into(), default;
-    avg_proc_ns_sample,            "平均処理時間 [ns/sample]",     |_, m| m.avg_process_time_per_sample_ns().into(), default;
-    synced_frame_ratio,            "フレーム同期成功率",           |_, m| m.synced_frame_ratio().into(), default;
-    crc_pass_ratio,                "同期成功内のCRC通過率",        |_, m| m.crc_pass_ratio().into(), default;
-    llr_second_pass_trigger_ratio, "LLR消去2ndパス起動率",         |_, m| m.llr_second_pass_trigger_ratio().into(), default;
-    llr_second_pass_rescue_ratio,  "LLR消去2ndパス救済率",         |_, m| m.llr_second_pass_rescue_ratio().into(), default;
-    phase_gate_on_ratio,           "位相ゲート有効率",             |_, m| m.phase_gate_on_ratio().into(), default;
-    phase_innovation_reject_ratio, "位相変化棄却率",               |_, m| m.phase_innovation_reject_ratio().into(), default;
-    phase_err_abs_mean_rad,        "平均絶対位相誤差 [rad]",       |_, m| m.phase_err_abs_mean_rad().into(), default;
-    phase_err_abs_ge_0p5_ratio,    "0.5rad以上誤差率",             |_, m| m.phase_err_abs_ge_0p5_ratio().into(), default;
-    phase_err_abs_ge_1p0_ratio,    "1.0rad以上誤差率",             |_, m| m.phase_err_abs_ge_1p0_ratio().into(), default;
-    avg_last_est_snr_db,           "平均推定SNR [dB]",             |_, m| m.avg_last_est_snr_db().into(), default;
-    multipath,                     "マルチパスプロファイル",       |ctx, _| ctx.multipath_name.into(), default;
-    raw_err_run_mean,              "生エラーラン平均長",           |_, m| m.raw_err_run_mean().into();
-    raw_err_run_max,               "生エラーラン最大長",           |_, m| m.raw_err_run_max().into();
-    err_w_cw_mean,                 "CWあたり平均エラービット",     |_, m| m.err_w_cw_mean().into();
-    err_w_cw_p50,                  "CWエラービット中央値",         |_, m| m.err_w_cw_p50().into();
-    err_w_cw_p90,                  "CWエラービット90%点",          |_, m| m.err_w_cw_p90().into();
-    err_w_cw_p99,                  "CWエラービット99%点",          |_, m| m.err_w_cw_p99().into();
-    err_w_cw_max,                  "CWあたり最大エラービット",     |_, m| m.err_w_cw_max().into();
-    err_w_cw_hist,                 "CWエラー重みヒストグラム",     |_, m| m.err_w_cw_hist().into();
-    post_ber,                      "Viterbi後BER",                 |_, m| m.post_ber().into();
-    post_decode_match_ratio,       "データ一致率",                 |_, m| m.post_decode_match_ratio().into();
-    post_err_run_mean,             "Viterbi後エラーラン平均長",    |_, m| m.post_err_run_mean().into();
-    post_err_run_max,              "Viterbi後エラーラン最大長",    |_, m| m.post_err_run_max().into();
-    post_err_w_cw_mean,            "Viterbi後CWあたり平均エラー",  |_, m| m.post_err_w_cw_mean().into();
-    post_err_w_cw_p50,             "Viterbi後CWエラー中央値",      |_, m| m.post_err_w_cw_p50().into();
-    post_err_w_cw_p90,             "Viterbi後CWエラー90%点",       |_, m| m.post_err_w_cw_p90().into();
-    post_err_w_cw_p99,             "Viterbi後CWエラー99%点",       |_, m| m.post_err_w_cw_p99().into();
-    post_err_w_cw_max,             "Viterbi後CWあたり最大エラー",  |_, m| m.post_err_w_cw_max().into();
-    post_err_w_cw_hist,            "Viterbi後CWエラーヒストグラム",|_, m| m.post_err_w_cw_hist().into();
+    scenario,                      "評価シナリオ名",                               |ctx, _| ctx.scenario.into(), default;
+    phy,                           "物理方式",                                     |ctx, _| ctx.phy.into(), default;
+    mary_fde_mode,                 "Mary の FDE モード",                           |ctx, _| ctx.mary_fde_mode.into(), default;
+    total_sim_sec,                 "評価に含めた受信サンプルの総時間 [sec]",        |_, m| m.total_sim_sec.into(), default;
+    ebn0_db,                       "AWGN 仮定から換算した理論 Eb/N0 [dB]",         |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_ebn0_db(snr, ctx.sample_rate, ctx.bit_rate)).into(), default;
+    snr_wideband_db,               "AWGN 仮定での受信全帯域 SNR [dB]",             |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
+    packet_accept_ratio,           "受理パケット率 = accepted_packets / 全送信packet数",|_, m| m.packet_accept_ratio().into(), default;
+    ber,                           "復元成功 payload に対する事後 BER",             |_, m| m.ber().into(), default;
+    raw_ber,                       "Mary の FEC/後段処理前 BER",                    |_, m| m.raw_ber().into(), default;
+    goodput_effective_bps,         "総シミュレーション時間あたりの有効 payload bitrate [bps]",|ctx, m| m.goodput_effective_bps(ctx.payload_bits).into(), default;
+    goodput_success_mean_bps,      "復元成功イベントごとの payload bitrate の平均 [bps]",|ctx, m| m.goodput_success_mean_bps(ctx.payload_bits).into(), default;
+    p95_complete_s,                "復元成功イベントの完了時間 95% 点 [sec]",       |_, m| m.p95_completion_sec().into(), default;
+    mean_complete_s,               "復元成功イベントの平均完了時間 [sec]",          |_, m| m.mean_completion_sec().into(), default;
+    avg_proc_ns_sample,            "入力 1 sample あたりの平均処理時間 [ns/sample]",|_, m| m.avg_process_time_per_sample_ns().into(), default;
+    synced_frame_ratio,            "フレーム同期率 = synced_frames / 送信frame数",   |_, m| m.synced_frame_ratio().into(), default;
+    crc_pass_ratio,                "CRC 通過率 = accepted_packets / (accepted + crc_error)",|_, m| m.crc_pass_ratio().into(), default;
+    llr_second_pass_trigger_ratio, "LLR 2nd pass 起動率 = 2nd pass試行 / (accepted + crc_error)",|_, m| m.llr_second_pass_trigger_ratio().into(), default;
+    llr_second_pass_rescue_ratio,  "LLR 2nd pass 救済率 = rescued / 2nd pass試行",  |_, m| m.llr_second_pass_rescue_ratio().into(), default;
+    phase_gate_on_ratio,           "位相更新ゲート ON 比率",                        |_, m| m.phase_gate_on_ratio().into(), default;
+    phase_innovation_reject_ratio, "位相更新候補の棄却比率",                        |_, m| m.phase_innovation_reject_ratio().into(), default;
+    phase_err_abs_mean_rad,        "位相誤差絶対値の平均 [rad]",                    |_, m| m.phase_err_abs_mean_rad().into(), default;
+    phase_err_abs_ge_0p5_ratio,    "|phase error| >= 0.5 rad の比率",               |_, m| m.phase_err_abs_ge_0p5_ratio().into(), default;
+    phase_err_abs_ge_1p0_ratio,    "|phase error| >= 1.0 rad の比率",               |_, m| m.phase_err_abs_ge_1p0_ratio().into(), default;
+    avg_last_est_snr_db,           "受信器内部の推定 SNR の平均 [dB]",              |_, m| m.avg_last_est_snr_db().into(), default;
+    multipath,                     "マルチパスプロファイル名",                      |ctx, _| ctx.multipath_name.into(), default;
+    raw_err_run_mean,              "生 BER 系列でのエラーラン平均長",               |_, m| m.raw_err_run_mean().into();
+    raw_err_run_max,               "生 BER 系列でのエラーラン最大長",               |_, m| m.raw_err_run_max().into();
+    err_w_cw_mean,                 "codeword あたり平均エラービット数",             |_, m| m.err_w_cw_mean().into();
+    err_w_cw_p50,                  "codeword あたりエラービット数の中央値",         |_, m| m.err_w_cw_p50().into();
+    err_w_cw_p90,                  "codeword あたりエラービット数の 90% 点",        |_, m| m.err_w_cw_p90().into();
+    err_w_cw_p99,                  "codeword あたりエラービット数の 99% 点",        |_, m| m.err_w_cw_p99().into();
+    err_w_cw_max,                  "codeword あたり最大エラービット数",             |_, m| m.err_w_cw_max().into();
+    err_w_cw_hist,                 "codeword エラー重みヒストグラム",               |_, m| m.err_w_cw_hist().into();
+    post_ber,                      "Mary の後段処理後 BER",                         |_, m| m.post_ber().into();
+    post_decode_match_ratio,       "後段 decode 試行に対する payload 一致率",       |_, m| m.post_decode_match_ratio().into();
+    post_err_run_mean,             "後段 BER 系列でのエラーラン平均長",             |_, m| m.post_err_run_mean().into();
+    post_err_run_max,              "後段 BER 系列でのエラーラン最大長",             |_, m| m.post_err_run_max().into();
+    post_err_w_cw_mean,            "後段 codeword あたり平均エラービット数",        |_, m| m.post_err_w_cw_mean().into();
+    post_err_w_cw_p50,             "後段 codeword あたりエラービット数の中央値",    |_, m| m.post_err_w_cw_p50().into();
+    post_err_w_cw_p90,             "後段 codeword あたりエラービット数の 90% 点",   |_, m| m.post_err_w_cw_p90().into();
+    post_err_w_cw_p99,             "後段 codeword あたりエラービット数の 99% 点",   |_, m| m.post_err_w_cw_p99().into();
+    post_err_w_cw_max,             "後段 codeword あたり最大エラービット数",        |_, m| m.post_err_w_cw_max().into();
+    post_err_w_cw_hist,            "後段 codeword エラー重みヒストグラム",          |_, m| m.post_err_w_cw_hist().into();
 }
 
 #[derive(Parser, Clone, Debug)]
@@ -73,8 +73,6 @@ pub struct Cli {
     pub chunk_samples: usize,
     #[arg(long, default_value_t = 0xA11CE_u64)]
     pub seed: u64,
-    #[arg(long = "target-p", value_parser = parse_unit_interval_f32, default_value_t = 0.95)]
-    pub target_p_complete: f32,
     #[arg(long, value_parser = parse_nonnegative_f32, default_value_t = 0.0)]
     pub sigma: f32,
     #[arg(long = "cfo-hz", default_value_t = 0.0)]
@@ -263,7 +261,6 @@ mod tests {
             payload_bytes: 16,
             chunk_samples: 1024,
             seed: 123,
-            target_p_complete: 0.95,
             sigma: 0.0,
             cfo_hz: 0.0,
             ppm: 0.0,
@@ -314,7 +311,6 @@ mod tests {
             payload_bytes: 16,
             chunk_samples: 1024,
             seed: 456,
-            target_p_complete: 0.95,
             sigma: 0.0,
             cfo_hz: 0.0,
             ppm: 0.0,

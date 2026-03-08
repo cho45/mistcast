@@ -130,13 +130,3 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
         }
     }
 }
-
-pub fn print_awgn_limit(cli: &Cli, limit_sigma: Option<f32>) {
-    if matches!(cli.output, OutputFormat::Table) {
-        if let Some(s) = limit_sigma {
-            println!("--- Target P_complete AWGN Limit: sigma = {:.4} ---", s);
-        } else {
-            println!("--- Target P_complete AWGN Limit: Not reached ---");
-        }
-    }
-}

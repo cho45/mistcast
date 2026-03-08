@@ -1,6 +1,6 @@
 use crate::channel::{apply_channel, ChannelImpairment, MultipathProfile};
 use crate::metrics::{Metrics, PhaseStats};
-use crate::report::{print_awgn_limit, print_header, print_row};
+use crate::report::{print_header, print_row};
 use crate::utils::{count_bit_errors_bytes, BerAccumulator};
 use crate::{Cli, EvalMode, MaryFdeMode, Phy};
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
@@ -256,20 +256,12 @@ pub fn run_point(cli: &Cli) {
 pub fn run_sweep_awgn(cli: &Cli) {
     print_header(cli);
     let mut base = cli.base_impairment();
-    let mut last_p = 1.0;
-    let mut phy_limit = None;
 
     for &sigma in &cli.sweep_awgn {
         base.sigma = sigma;
         let scenario = format!("sweep_awgn(sigma={sigma:.3})");
-        let m = evaluate(cli, &base, &scenario);
-        let p = m.packet_accept_ratio();
-        if last_p >= cli.target_p_complete && p < cli.target_p_complete {
-            phy_limit = Some(sigma);
-        }
-        last_p = p;
+        evaluate(cli, &base, &scenario);
     }
-    print_awgn_limit(cli, phy_limit);
 }
 
 pub fn run_sweep_ppm(cli: &Cli) {
@@ -679,7 +671,6 @@ mod tests {
             payload_bytes: 50,
             chunk_samples: 1024,
             seed: 789,
-            target_p_complete: 0.95,
             sigma: 0.0,
             cfo_hz: 0.0,
             ppm: 0.0,
