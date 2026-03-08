@@ -1,11 +1,8 @@
-use crate::channel::{apply_channel, ChannelImpairment};
-use crate::config::{Cli, MaryFdeMode};
-use crate::engine::{
-    process_samples_in_chunks, run_flush, run_tail, run_warmup, signal_energy, ControlFlow,
-    SimulationConfig,
-};
+use crate::channel::{apply_channel, ChannelImpairment, MultipathProfile};
 use crate::metrics::{Metrics, PhaseStats};
+use crate::report::{print_awgn_limit, print_header, print_row};
 use crate::utils::{count_bit_errors_bytes, BerAccumulator};
+use crate::{Cli, EvalMode, MaryFdeMode, Phy};
 use dsp::dsss::encoder::{Encoder as DsssEncoder, EncoderConfig as DsssEncoderConfig};
 use dsp::mary::decoder::Decoder as MaryDecoder;
 use dsp::mary::encoder::Encoder as MaryEncoder;
@@ -13,6 +10,171 @@ use dsp::params::PAYLOAD_SIZE;
 use dsp::{dsss::decoder::Decoder as DsssDecoder, DspConfig};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
+// --- Simulation Engine Primitives ---
+
+pub const TX_WARMUP_SAMPLES: usize = 4096;
+pub const TX_TAIL_SAMPLES: usize = 4096;
+
+/// プロセスを継続するか、完了したか
+pub enum ControlFlow {
+    Continue,
+}
+
+/// デコーダが持つべきメソッドを示すマーカートレイト
+pub trait ProcessSamples {
+    type Progress;
+    fn process_samples(&mut self, samples: &[f32]) -> Self::Progress;
+}
+
+impl ProcessSamples for DsssDecoder {
+    type Progress = dsp::dsss::decoder::DecodeProgress;
+    fn process_samples(&mut self, samples: &[f32]) -> Self::Progress {
+        self.process_samples(samples)
+    }
+}
+
+impl ProcessSamples for MaryDecoder {
+    type Progress = dsp::mary::decoder::DecodeProgress;
+    fn process_samples(&mut self, samples: &[f32]) -> Self::Progress {
+        self.process_samples(samples)
+    }
+}
+
+/// チャンク単位でサンプルを処理し、処理時間を計測する
+pub fn process_samples_in_chunks<D, F>(
+    samples: &[f32],
+    chunk_size: usize,
+    decoder: &mut D,
+    state: &mut Metrics,
+    mut on_progress: F,
+) where
+    D: ProcessSamples,
+    F: FnMut(&mut D, &D::Progress, &mut Metrics) -> ControlFlow,
+{
+    for piece in samples.chunks(chunk_size) {
+        let start_time = std::time::Instant::now();
+        let progress = decoder.process_samples(piece);
+        state.total_process_time_ns += start_time.elapsed().as_nanos() as u64;
+
+        on_progress(decoder, &progress, state);
+    }
+}
+
+pub struct SimulationConfig<'a> {
+    pub sample_rate: f32,
+    pub imp: &'a ChannelImpairment,
+    pub rng: &'a mut StdRng,
+    pub chunk_size: usize,
+}
+
+/// ウォームアップ処理を実行する
+pub fn run_warmup<E, D>(
+    encoder: &mut E,
+    decoder: &mut D,
+    state: &mut Metrics,
+    cfg: &mut SimulationConfig,
+) where
+    E: WarmupSignal,
+    D: ProcessSamples,
+{
+    let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
+    state.total_tx_signal_energy += signal_energy(&warmup);
+    state.total_tx_signal_samples += warmup.len();
+    let warmup_rx = apply_channel(&warmup, cfg.imp, cfg.rng, false);
+    process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _, _| {
+        ControlFlow::Continue
+    });
+}
+
+/// フラッシュ処理を実行する
+pub fn run_flush<E, D>(
+    encoder: &mut E,
+    decoder: &mut D,
+    state: &mut Metrics,
+    cfg: &mut SimulationConfig,
+) where
+    E: FlushSignal,
+    D: ProcessSamples,
+{
+    let flush = encoder.flush();
+    if flush.is_empty() {
+        return;
+    }
+    state.total_tx_signal_energy += signal_energy(&flush);
+    state.total_tx_signal_samples += flush.len();
+    let flush_rx = apply_channel(&flush, cfg.imp, cfg.rng, false);
+    state.total_sim_sec += flush_rx.len() as f32 / cfg.sample_rate;
+    process_samples_in_chunks(&flush_rx, cfg.chunk_size, decoder, state, |_, _, _| {
+        ControlFlow::Continue
+    });
+}
+
+/// テール処理を実行する
+pub fn run_tail<E, D>(
+    encoder: &mut E,
+    decoder: &mut D,
+    state: &mut Metrics,
+    cfg: &mut SimulationConfig,
+) where
+    E: WarmupSignal,
+    D: ProcessSamples,
+{
+    let tail = encoder.modulate_silence(TX_TAIL_SAMPLES);
+    if tail.is_empty() {
+        return;
+    }
+    state.total_tx_signal_energy += signal_energy(&tail);
+    state.total_tx_signal_samples += tail.len();
+    let tail_rx = apply_channel(&tail, cfg.imp, cfg.rng, false);
+    process_samples_in_chunks(&tail_rx, cfg.chunk_size, decoder, state, |_, _, _| {
+        ControlFlow::Continue
+    });
+}
+
+pub trait WarmupSignal {
+    fn modulate_silence(&mut self, samples: usize) -> Vec<f32>;
+}
+
+pub trait FlushSignal {
+    fn flush(&mut self) -> Vec<f32>;
+}
+
+impl WarmupSignal for dsp::dsss::encoder::Encoder {
+    fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        dsp::dsss::encoder::Encoder::modulate_silence(self, samples)
+    }
+}
+
+impl FlushSignal for dsp::dsss::encoder::Encoder {
+    fn flush(&mut self) -> Vec<f32> {
+        dsp::dsss::encoder::Encoder::flush(self)
+    }
+}
+
+impl WarmupSignal for dsp::mary::encoder::Encoder {
+    fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        dsp::mary::encoder::Encoder::modulate_silence(self, samples)
+    }
+}
+
+impl FlushSignal for dsp::mary::encoder::Encoder {
+    fn flush(&mut self) -> Vec<f32> {
+        dsp::mary::encoder::Encoder::flush(self)
+    }
+}
+
+pub fn signal_energy(samples: &[f32]) -> f64 {
+    samples
+        .iter()
+        .map(|&x| {
+            let v = x as f64;
+            v * v
+        })
+        .sum()
+}
+
+// --- Scenario Runners ---
 
 pub fn make_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -35,6 +197,126 @@ pub fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
         }
     }
 }
+
+pub fn evaluate(cli: &Cli, imp: &ChannelImpairment, scenario: &str) -> Metrics {
+    let metrics = if matches!(cli.phy, Phy::Mary) {
+        run_trial_mary_e2e(imp, cli, cli.seed)
+    } else {
+        run_trial_dsss_e2e(imp, cli, cli.seed)
+    };
+    print_row(scenario, cli, imp, &metrics);
+    metrics
+}
+
+pub fn run_point(cli: &Cli) {
+    print_header(cli);
+    let base = cli.base_impairment();
+    let scenario = format!(
+        "point(bytes={},sigma={:.3},cfo={:.1},ppm={:.1},loss={:.2},fade={:.2})",
+        cli.payload_bytes, base.sigma, base.cfo_hz, base.ppm, base.frame_loss, base.fading_depth
+    );
+    evaluate(cli, &base, &scenario);
+}
+
+pub fn run_sweep_awgn(cli: &Cli) {
+    print_header(cli);
+    let mut base = cli.base_impairment();
+    let mut last_p = 1.0;
+    let mut phy_limit = None;
+
+    for &sigma in &cli.sweep_awgn {
+        base.sigma = sigma;
+        let scenario = format!("sweep_awgn(sigma={sigma:.3})");
+        let m = evaluate(cli, &base, &scenario);
+        let p = m.p_complete();
+        if last_p >= cli.target_p_complete && p < cli.target_p_complete {
+            phy_limit = Some(sigma);
+        }
+        last_p = p;
+    }
+    print_awgn_limit(cli, phy_limit);
+}
+
+pub fn run_sweep_ppm(cli: &Cli) {
+    print_header(cli);
+    let mut base = cli.base_impairment();
+    for &ppm in &cli.sweep_ppm {
+        base.ppm = ppm;
+        let scenario = format!("sweep_ppm(ppm={ppm:.1})");
+        evaluate(cli, &base, &scenario);
+    }
+}
+
+pub fn run_sweep_loss(cli: &Cli) {
+    print_header(cli);
+    let mut base = cli.base_impairment();
+    for &loss in &cli.sweep_loss {
+        base.frame_loss = loss;
+        let scenario = format!("sweep_loss(loss={loss:.2})");
+        evaluate(cli, &base, &scenario);
+    }
+}
+
+pub fn run_sweep_fading(cli: &Cli) {
+    print_header(cli);
+    let mut base = cli.base_impairment();
+    for &depth in &cli.sweep_fading {
+        base.fading_depth = depth;
+        let scenario = format!("sweep_fading(depth={depth:.2})");
+        evaluate(cli, &base, &scenario);
+    }
+}
+
+pub fn run_sweep_multipath(cli: &Cli) {
+    print_header(cli);
+    let mut base = cli.base_impairment();
+    let profiles = ["none", "mild", "medium", "harsh"];
+    for name in profiles {
+        base.multipath = MultipathProfile::preset(name).unwrap_or_else(MultipathProfile::none);
+        let scenario = format!("sweep_multipath(profile={name})");
+        evaluate(cli, &base, &scenario);
+    }
+}
+
+pub fn run_sweep_band(cli: &Cli) {
+    print_header(cli);
+    let mut current_cli = cli.clone();
+    let base = cli.base_impairment();
+
+    for &chip_rate in &cli.sweep_chip_rate {
+        current_cli.chip_rate = chip_rate;
+        for &carrier_freq in &cli.sweep_carrier_freq {
+            current_cli.carrier_freq = carrier_freq;
+            let scenario = format!("sweep_band(chip={chip_rate:.0},carrier={carrier_freq:.0})");
+            evaluate(&current_cli, &base, &scenario);
+        }
+    }
+}
+
+pub fn run_sweep_all(cli: &Cli) {
+    run_point(cli);
+    run_sweep_awgn(cli);
+    run_sweep_ppm(cli);
+    run_sweep_loss(cli);
+    run_sweep_fading(cli);
+    run_sweep_multipath(cli);
+    run_sweep_band(cli);
+}
+
+pub fn run_by_mode(cli: &Cli) {
+    match cli.mode {
+        EvalMode::Point => run_point(cli),
+        EvalMode::SweepAwgn => run_sweep_awgn(cli),
+        EvalMode::SweepPpm => run_sweep_ppm(cli),
+        EvalMode::SweepLoss => run_sweep_loss(cli),
+        EvalMode::SweepFading => run_sweep_fading(cli),
+        EvalMode::SweepMultipath => run_sweep_multipath(cli),
+        EvalMode::SweepBand => run_sweep_band(cli),
+        EvalMode::SweepAll => run_sweep_all(cli),
+    }
+}
+
+// --- Trial Execution ---
 
 pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metrics {
     let mut tx_cfg = DspConfig::new(cli.sample_rate);
@@ -320,7 +602,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 mod tests {
     use super::*;
     use crate::channel::MultipathProfile;
-    use crate::config::{CirNormArg, EvalMode, OutputFormat, Phy};
+    use crate::{CirNormArg, EvalMode, OutputFormat, Phy};
 
     #[test]
     fn test_make_bytes_determinism() {

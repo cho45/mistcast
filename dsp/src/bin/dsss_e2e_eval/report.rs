@@ -1,6 +1,6 @@
 use crate::channel::ChannelImpairment;
-use crate::config::{selected_columns, Cli, OutputFormat};
-use crate::metrics::{MetricContext, MetricValue, Metrics, METRICS_DEFS};
+use crate::metrics::{MetricContext, MetricValue, Metrics};
+use crate::{selected_columns, Cli, OutputFormat, METRICS_DEFS};
 use serde_json::json;
 
 pub fn print_metrics_desc() {
