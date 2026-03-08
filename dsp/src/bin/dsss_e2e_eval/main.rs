@@ -186,6 +186,7 @@ mod tests {
             mary_llr_erasure_list: 8,
             columns: None,
             output: OutputFormat::Csv,
+            show_metrics_desc: false,
         };
 
         let res = run_trial_dsss_e2e(&cli.base_impairment(), &cli, cli.seed);
@@ -236,6 +237,7 @@ mod tests {
             mary_llr_erasure_list: 8,
             columns: None,
             output: OutputFormat::Csv,
+            show_metrics_desc: false,
         };
 
         let res = run_trial_mary_e2e(&cli.base_impairment(), &cli, cli.seed);

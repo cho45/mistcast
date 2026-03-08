@@ -383,6 +383,7 @@ mod tests {
             mary_llr_erasure_list: 8,
             columns: None,
             output: OutputFormat::Csv,
+            show_metrics_desc: false,
         }
     }
 

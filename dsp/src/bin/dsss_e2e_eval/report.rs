@@ -1,6 +1,7 @@
 use crate::channel::ChannelImpairment;
 use crate::config::{selected_columns, Cli, OutputFormat};
-use crate::metrics::{MetricContext, Metrics, METRICS_DEFS};
+use crate::metrics::{MetricContext, MetricValue, Metrics, METRICS_DEFS};
+use serde_json::json;
 
 pub fn print_metrics_desc() {
     println!("{:<30} | {}", "Column Name", "Description");
@@ -34,20 +35,42 @@ pub fn print_header(cli: &Cli) {
     }
 }
 
-fn value_to_string(val: &serde_json::Value) -> String {
-    if val.is_null() {
-        "-".to_string()
-    } else if val.is_string() {
-        val.as_str().unwrap().to_string()
-    } else if val.is_f64() {
-        let f = val.as_f64().unwrap();
-        if f.abs() < 1e-3 && f != 0.0 {
-            format!("{:.2e}", f)
-        } else {
-            format!("{:.4}", f)
+fn value_to_json(val: &MetricValue) -> serde_json::Value {
+    match val {
+        MetricValue::Float(f) => {
+            if f.is_nan() {
+                json!("NaN")
+            } else {
+                json!(f)
+            }
         }
-    } else {
-        val.to_string()
+        MetricValue::Int(i) => json!(i),
+        MetricValue::Text(s) => json!(s),
+        MetricValue::Null => serde_json::Value::Null,
+    }
+}
+
+fn value_to_string(val: &MetricValue, format: OutputFormat) -> String {
+    match val {
+        MetricValue::Float(f) => {
+            if f.is_nan() {
+                "NaN".to_string()
+            } else if matches!(format, OutputFormat::Table) {
+                if f.abs() < 1e-3 && *f != 0.0 {
+                    format!("{:.2e}", f)
+                } else {
+                    format!("{:.4}", f)
+                }
+            } else {
+                f.to_string()
+            }
+        }
+        MetricValue::Int(i) => i.to_string(),
+        MetricValue::Text(s) => s.clone(),
+        MetricValue::Null => match format {
+            OutputFormat::Table => "-".to_string(),
+            _ => "".to_string(),
+        },
     }
 }
 
@@ -64,11 +87,11 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
     };
 
     let cols = selected_columns(cli);
-    let mut row_data = serde_json::Map::new();
+    let mut row_values = Vec::new();
 
     for col_id in &cols {
         if let Some(def) = METRICS_DEFS.iter().find(|d| d.id == *col_id) {
-            row_data.insert(col_id.to_string(), (def.extractor)(&ctx, m));
+            row_values.push((col_id, (def.extractor)(&ctx, m)));
         }
     }
 
@@ -79,31 +102,27 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
                 .from_writer(Vec::new());
 
             let mut values = Vec::new();
-            for col in &cols {
-                let val = row_data.get(*col).unwrap_or(&serde_json::Value::Null);
-                if val.is_null() {
-                    values.push("".to_string());
-                } else if val.is_string() {
-                    values.push(val.as_str().unwrap().to_string());
-                } else {
-                    values.push(val.to_string());
-                }
+            for (_, val) in &row_values {
+                values.push(value_to_string(val, OutputFormat::Csv));
             }
             writer.write_record(&values).unwrap();
             let csv_output = String::from_utf8(writer.into_inner().unwrap()).unwrap();
             print!("{}", csv_output);
         }
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string(&row_data).unwrap());
+            let mut map = serde_json::Map::new();
+            for (id, val) in &row_values {
+                map.insert(id.to_string(), value_to_json(val));
+            }
+            println!("{}", serde_json::to_string(&map).unwrap());
         }
         OutputFormat::Table => {
             let mut parts = vec![format!("{:<30}", scenario)];
-            for col in &cols {
-                if *col == "scenario" {
+            for (id, val) in &row_values {
+                if **id == "scenario" {
                     continue;
                 }
-                let val = row_data.get(*col).unwrap_or(&serde_json::Value::Null);
-                parts.push(format!("{:<15}", value_to_string(val)));
+                parts.push(format!("{:<15}", value_to_string(val, OutputFormat::Table)));
             }
             println!("| {} |", parts.join(" | "));
         }

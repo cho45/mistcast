@@ -1,4 +1,5 @@
 use crate::channel::{ChannelImpairment, MultipathProfile};
+use crate::metrics::{get_default_columns, ALL_COLUMNS};
 use clap::{builder::PossibleValuesParser, Parser, ValueEnum};
 use dsp::mary::decoder::CirNormalizationMode;
 
@@ -52,78 +53,6 @@ impl From<CirNormArg> for CirNormalizationMode {
         }
     }
 }
-
-pub const DEFAULT_COLUMNS: &[&str] = &[
-    "scenario",
-    "phy",
-    "mary_fde_mode",
-    "total_sim_sec",
-    "awgn_snr_db",
-    "p_complete",
-    "ber",
-    "raw_ber",
-    "goodput_effective_bps",
-    "goodput_success_mean_bps",
-    "p95_complete_s",
-    "mean_complete_s",
-    "avg_proc_ns_sample",
-    "synced_frame_ratio",
-    "crc_pass_ratio",
-    "llr_second_pass_trigger_ratio",
-    "llr_second_pass_rescue_ratio",
-    "phase_gate_on_ratio",
-    "phase_innovation_reject_ratio",
-    "phase_err_abs_mean_rad",
-    "phase_err_abs_ge_0p5_ratio",
-    "phase_err_abs_ge_1p0_ratio",
-    "avg_last_est_snr_db",
-    "multipath",
-];
-
-pub const ALL_COLUMNS: &[&str] = &[
-    "scenario",
-    "phy",
-    "mary_fde_mode",
-    "total_sim_sec",
-    "awgn_snr_db",
-    "p_complete",
-    "ber",
-    "raw_ber",
-    "goodput_effective_bps",
-    "goodput_success_mean_bps",
-    "p95_complete_s",
-    "mean_complete_s",
-    "avg_proc_ns_sample",
-    "synced_frame_ratio",
-    "crc_pass_ratio",
-    "llr_second_pass_trigger_ratio",
-    "llr_second_pass_rescue_ratio",
-    "phase_gate_on_ratio",
-    "phase_innovation_reject_ratio",
-    "phase_err_abs_mean_rad",
-    "phase_err_abs_ge_0p5_ratio",
-    "phase_err_abs_ge_1p0_ratio",
-    "avg_last_est_snr_db",
-    "multipath",
-    "raw_err_run_mean",
-    "raw_err_run_max",
-    "err_w_cw_mean",
-    "err_w_cw_p50",
-    "err_w_cw_p90",
-    "err_w_cw_p99",
-    "err_w_cw_max",
-    "err_w_cw_hist",
-    "post_ber",
-    "post_decode_match_ratio",
-    "post_err_run_mean",
-    "post_err_run_max",
-    "post_err_w_cw_mean",
-    "post_err_w_cw_p50",
-    "post_err_w_cw_p90",
-    "post_err_w_cw_p99",
-    "post_err_w_cw_max",
-    "post_err_w_cw_hist",
-];
 
 pub fn parse_positive_f32(value: &str) -> Result<f32, String> {
     let parsed = value
@@ -290,7 +219,7 @@ impl Cli {
 pub fn selected_columns(cli: &Cli) -> Vec<&str> {
     match &cli.columns {
         Some(columns) => columns.iter().map(String::as_str).collect(),
-        None => DEFAULT_COLUMNS.to_vec(),
+        None => get_default_columns(),
     }
 }
 
