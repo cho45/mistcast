@@ -1,4 +1,5 @@
 import { createI18n } from 'vue-i18n';
+import { watch } from 'vue';
 import en from './locales/en.json';
 import ja from './locales/ja.json';
 import type { AppLanguage } from './composables/useSettings';
@@ -24,5 +25,10 @@ const i18n = createI18n({
     ja
   }
 });
+
+// Automatically update html lang attribute when locale changes
+watch(() => i18n.global.locale.value, (newLocale) => {
+  document.documentElement.lang = newLocale;
+}, { immediate: true });
 
 export default i18n;
