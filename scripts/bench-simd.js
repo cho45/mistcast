@@ -18,7 +18,7 @@ import initSimd, {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
-const BENCH_ITERS = Math.max(1, Number.parseInt(process.env.BENCH_ITERS ?? "6", 10));
+const BENCH_ITERS = Math.max(1, Number.parseInt(process.env.BENCH_ITERS ?? "30", 10));
 const BENCH_WARMUP_MIN_PAIRS = Math.max(
   1,
   Number.parseInt(process.env.BENCH_WARMUP_MIN_PAIRS ?? "4", 10),
@@ -115,32 +115,30 @@ function buildMarySignal(binding, sampleRate) {
   return allSamples;
 }
 
-function benchOne(flavorBinding, scenario, sampleRate, signal) {
-  const start = performance.now();
-  if (scenario === "dsss") {
-    const decoder = new flavorBinding.WasmDsssDecoder(sampleRate, 1);
-    decoder.process_samples(signal);
-  } else {
-    const decoder = new flavorBinding.WasmMaryDecoder(sampleRate, 3);
-    decoder.process_samples(signal);
+function benchOne(flavorBinding, signal) {
+  if (typeof global.gc === "function") {
+    global.gc();
   }
+  const start = performance.now();
+  flavorBinding.decoder.reset();
+  flavorBinding.decoder.process_samples(signal);
   return performance.now() - start;
 }
 
-function runAlternatingPair(bindingsByFlavor, scenarioKind, sampleRate, signal, pairIndex) {
+function runAlternatingPair(bindingsByFlavor, signal, pairIndex) {
   const order = pairIndex % 2 === 0 ? ["base", "simd"] : ["simd", "base"];
   const result = {};
   for (const flavor of order) {
-    result[flavor] = benchOne(bindingsByFlavor[flavor], scenarioKind, sampleRate, signal);
+    result[flavor] = benchOne(bindingsByFlavor[flavor], signal);
   }
   return result;
 }
 
-function warmupUntilStable(bindingsByFlavor, scenarioKind, sampleRate, signal) {
+function warmupUntilStable(bindingsByFlavor, signal) {
   const warm = { base: [], simd: [] };
   let pairs = 0;
   for (; pairs < BENCH_WARMUP_MAX_PAIRS; pairs++) {
-    const r = runAlternatingPair(bindingsByFlavor, scenarioKind, sampleRate, signal, pairs);
+    const r = runAlternatingPair(bindingsByFlavor, signal, pairs);
     warm.base.push(r.base);
     warm.simd.push(r.simd);
 
@@ -164,6 +162,11 @@ function warmupUntilStable(bindingsByFlavor, scenarioKind, sampleRate, signal) {
 
 async function main() {
   await initBindings();
+  if (typeof global.gc !== "function") {
+    console.warn(
+      "[bench] global.gc が無効です。より安定した計測には `node --expose-gc` で実行してください。",
+    );
+  }
 
   const sampleRate = 48_000;
   const signalBase = BINDINGS[0];
@@ -194,16 +197,18 @@ async function main() {
   };
 
   for (const scenario of scenarios) {
-    const warmupMeta = warmupUntilStable(
-      bindingsByFlavor,
-      scenario.kind,
-      sampleRate,
-      scenario.signal,
-    );
+    for (const binding of Object.values(bindingsByFlavor)) {
+      binding.decoder =
+        scenario.kind === "dsss"
+          ? new binding.WasmDsssDecoder(sampleRate, 1)
+          : new binding.WasmMaryDecoder(sampleRate, 3);
+    }
+
+    const warmupMeta = warmupUntilStable(bindingsByFlavor, scenario.signal);
 
     const timesByFlavor = { base: [], simd: [] };
     for (let i = 0; i < BENCH_ITERS; i++) {
-      const r = runAlternatingPair(bindingsByFlavor, scenario.kind, sampleRate, scenario.signal, i);
+      const r = runAlternatingPair(bindingsByFlavor, scenario.signal, i);
       timesByFlavor.base.push(r.base);
       timesByFlavor.simd.push(r.simd);
     }
