@@ -9,8 +9,11 @@ pub fn count_bit_errors_bytes(tx: &[u8], rx: Option<&[u8]>) -> usize {
     };
     let mut errs = 0usize;
     for (idx, &b) in tx.iter().enumerate() {
-        let rb = *rx.get(idx).unwrap_or(&0u8);
-        errs += (b ^ rb).count_ones() as usize;
+        if let Some(&rb) = rx.get(idx) {
+            errs += (b ^ rb).count_ones() as usize;
+        } else {
+            errs += 8;
+        }
     }
     errs
 }
@@ -188,6 +191,7 @@ impl BerAccumulator {
         let pdm = Arc::clone(&self.post_decode_matched);
 
         Box::new(move |llrs: &[f32]| {
+            *pda.lock().unwrap() += 1;
             let decoded_bits = fec::decode_soft(llrs);
             let p_bits_len = PACKET_BYTES * 8;
             if decoded_bits.len() < p_bits_len {
@@ -197,7 +201,6 @@ impl BerAccumulator {
             if decoded_bytes.len() < 3 {
                 return;
             }
-            *pda.lock().unwrap() += 1;
             let seq = u16::from_be_bytes([decoded_bytes[1], decoded_bytes[2]]);
             let expected_raw = match efb.lock().unwrap().get(&seq) {
                 Some(bits) => bits.clone(),
@@ -331,5 +334,75 @@ pub fn parse_positive_usize(value: &str) -> Result<usize, String> {
         Ok(parsed)
     } else {
         Err(format!("value must be > 0: {value}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsp::coding::fountain::FountainPacket;
+    use dsp::params::PAYLOAD_SIZE;
+
+    #[test]
+    fn test_count_bit_errors_bytes_edge_cases() {
+        assert_eq!(count_bit_errors_bytes(&[], Some(&[])), 0);
+        assert_eq!(count_bit_errors_bytes(&[0x00], Some(&[0x00, 0xFF])), 0);
+        assert_eq!(count_bit_errors_bytes(&[0x00, 0x00], Some(&[0x00])), 8);
+        assert_eq!(count_bit_errors_bytes(&[0x00, 0x00], None), 16);
+    }
+
+    #[test]
+    fn test_bit_errors_and_runs_boundary_conditions() {
+        let (errs, _, runs, _, _) = bit_errors_and_runs_from_llr(&[0, 0], &[-1.0, 1.0]);
+        assert_eq!(errs, 1);
+        assert_eq!(runs, 1);
+        let (errs, _, runs, _, _) = bit_errors_and_runs_from_llr(&[0, 0], &[1.0, -1.0]);
+        assert_eq!(errs, 1);
+        assert_eq!(runs, 1);
+        let (errs, comp, runs, run_bits, run_max) = bit_errors_and_runs_from_llr(&[0, 0, 0], &[-1.0, -1.0, -1.0]);
+        assert_eq!(errs, 3);
+        assert_eq!(comp, 3);
+        assert_eq!(runs, 1);
+        assert_eq!(run_bits, 3);
+        assert_eq!(run_max, 3);
+        let (errs, _, runs, _, _) = bit_errors_and_runs_from_llr(&[0, 0, 0, 0], &[-1.0, 1.0, -1.0, 1.0]);
+        assert_eq!(errs, 2);
+        assert_eq!(runs, 2);
+        let (errs0, _, _, _, _) = bit_errors_and_runs_from_llr(&[0], &[0.0]);
+        let (errs1, _, _, _, _) = bit_errors_and_runs_from_llr(&[1], &[0.0]);
+        assert_eq!(errs0, 1);
+        assert_eq!(errs1, 1);
+    }
+
+    #[test]
+    fn test_ber_accumulator_robustness() {
+        let accum = BerAccumulator::new();
+        let k = 1;
+        let data = vec![0u8; PAYLOAD_SIZE];
+        accum.register_packet(10, &FountainPacket { seq: 10, data: data.clone(), coefficients: vec![] }, k);
+        let cb = accum.llr_callback();
+        cb(&[1.0; 10]); 
+        assert_eq!(accum.extract_decode_stats().0, 1);
+        assert_eq!(accum.extract_pre_fec().codeword_count, 0);
+        let pkt = Packet::new(10, k, &data);
+        let bits = fec::bytes_to_bits(&pkt.serialize());
+        let fec_encoded = fec::encode(&bits);
+        let mut llrs: Vec<f32> = fec_encoded.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
+        cb(&llrs);
+        llrs[0] *= -1.0;
+        cb(&llrs);
+        let pre = accum.extract_pre_fec();
+        assert_eq!(pre.codeword_count, 2);
+        assert_eq!(pre.bit_errors, 1);
+        assert_eq!(pre.codeword_error_weights, vec![0, 1]);
+        let (att, mat) = accum.extract_decode_stats();
+        assert_eq!(att, 3);
+        assert_eq!(mat, 2);
+        let p_wrap = Packet::new(0xFFFF, k, &data);
+        let bits_wrap = fec::bytes_to_bits(&p_wrap.serialize());
+        let fec_wrap = fec::encode(&bits_wrap);
+        accum.register_packet(0xFFFF, &FountainPacket { seq: 0xFFFF, data: data.clone(), coefficients: vec![] }, k);
+        cb(&fec_wrap.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect::<Vec<_>>());
+        assert_eq!(accum.extract_pre_fec().codeword_count, 3);
     }
 }
