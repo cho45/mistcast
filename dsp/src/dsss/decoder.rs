@@ -108,6 +108,13 @@ struct DecodedSoftBits {
     llrs: Vec<f32>,
 }
 
+#[derive(Debug)]
+struct PayloadDecodeAttempt {
+    packets: Vec<Packet>,
+    crc_errors: usize,
+    parse_errors: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SymbolSoftDecision {
     decided: Complex32,
@@ -254,6 +261,7 @@ impl Decoder {
 
                 if let Some(s) = sync_opt {
                     self.stats_synced_frames += 1;
+                    self.last_search_idx = next_search_idx + 1;
                     self.current_sync = Some(s.clone());
                     s
                 } else {
@@ -270,9 +278,12 @@ impl Decoder {
 
             let start = sync.peak_sample_idx;
             let data_end_sample = start + total_symbols * sf * spc;
+            let decode_guard_samples = spc * 2 + 1;
+            let decode_ready_end = data_end_sample + decode_guard_samples;
+            let next_search_after_candidate = data_end_sample.min(self.sample_buffer_i.len());
 
             // データが溜まるのを待つ (start は既に SYNC_WORD の開始点付近)
-            if self.sample_buffer_i.len() < data_end_sample {
+            if self.sample_buffer_i.len() < decode_ready_end {
                 // タイムアウト監視
                 if start + symbol_len < self.sample_buffer_i.len().saturating_sub(max_buffer_len) {
                     self.current_sync = None;
@@ -308,7 +319,7 @@ impl Decoder {
             let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
             let p_bits_len = PACKET_BYTES * 8;
-            let Some((decoded_packets, crc_errors, parse_errors)) = self
+            let Some(attempt) = self
                 .decode_payload_with_timing_retries(
                     payload_start,
                     burst_data_bits_len,
@@ -318,18 +329,22 @@ impl Decoder {
                     p_bits_len,
                 )
             else {
-                // デコードに失敗した場合も、同じ場所を繰り返さないよう進める。
-                self.last_search_idx = (start + symbol_len).min(self.sample_buffer_i.len());
+                // 同じ候補フレームの payload 上を再探索するとゾンビ同期が連鎖する。
+                // 失敗した候補はフレーム末尾までまとめてスキップする。
+                self.last_search_idx = next_search_after_candidate;
                 self.current_sync = None;
                 continue;
             };
+            let decoded_packets = attempt.packets;
+            let crc_errors = attempt.crc_errors;
+            let parse_errors = attempt.parse_errors;
             self.crc_error_packets += crc_errors;
             self.parse_error_packets += parse_errors;
 
-            if decoded_packets.is_empty() {
-                // 同期語一致後に payload が全滅したら境界ずれを疑う
-                self.last_search_idx =
-                    (start + (symbol_len / 2).max(spc)).min(self.sample_buffer_i.len());
+            if decoded_packets.is_empty() || crc_errors > 0 {
+                // payload が全滅した候補は境界ずれとして破棄する。
+                // payload 内の擬似ピークを拾わないよう、候補フレーム全体を飛ばす。
+                self.last_search_idx = next_search_after_candidate;
                 self.current_sync = None;
                 continue;
             }
@@ -400,12 +415,16 @@ impl Decoder {
                 + timing_offset
                 + sample_shift;
 
-            let i_idx = p.round() as i32;
-            if i_idx < 0 || i_idx >= self.sample_buffer_i.len() as i32 {
+            let i0 = p.floor() as i32;
+            let frac = p - i0 as f32;
+            let i1 = i0 + 1;
+            if i0 < 0 || i1 >= self.sample_buffer_i.len() as i32 {
                 return None;
             }
-            let si = self.sample_buffer_i[i_idx as usize];
-            let sq = self.sample_buffer_q[i_idx as usize];
+            let w0 = 1.0 - frac;
+            let w1 = frac;
+            let si = self.sample_buffer_i[i0 as usize] * w0 + self.sample_buffer_i[i1 as usize] * w1;
+            let sq = self.sample_buffer_q[i0 as usize] * w0 + self.sample_buffer_q[i1 as usize] * w1;
             sum_i += si * pn_val;
             sum_q += sq * pn_val;
         }
@@ -501,6 +520,58 @@ impl Decoder {
         Some(DecodedSoftBits { llrs })
     }
 
+    fn try_decode_payload_once(
+        &self,
+        payload_start: usize,
+        burst_data_bits_len: usize,
+        timing_bias: f32,
+        mut initial_state: TrackingState,
+        pn: &[f32],
+        fec_bits_len: usize,
+        p_bits_len: usize,
+    ) -> Option<PayloadDecodeAttempt> {
+        let spc = self.config.proc_samples_per_chip().max(1) as f32;
+        let timing_limit = spc * TRACKING_TIMING_LIMIT_CHIP;
+        initial_state.timing_offset =
+            (initial_state.timing_offset + timing_bias).clamp(-timing_limit, timing_limit);
+        let decoded_soft_bits =
+            self.decode_bits_with_tracking(payload_start, burst_data_bits_len, initial_state, pn)?;
+        let (packets, crc_errors, parse_errors) =
+            self.parse_payload_packets(&decoded_soft_bits.llrs, fec_bits_len, p_bits_len);
+        Some(PayloadDecodeAttempt {
+            packets,
+            crc_errors,
+            parse_errors,
+        })
+    }
+
+    fn is_better_payload_attempt(
+        candidate: &PayloadDecodeAttempt,
+        best: &PayloadDecodeAttempt,
+    ) -> bool {
+        candidate.packets.len() > best.packets.len()
+            || (candidate.packets.len() == best.packets.len()
+                && (candidate.crc_errors < best.crc_errors
+                    || (candidate.crc_errors == best.crc_errors
+                        && candidate.parse_errors < best.parse_errors)))
+    }
+
+    fn select_best_payload_attempt(
+        attempts: impl IntoIterator<Item = PayloadDecodeAttempt>,
+    ) -> Option<PayloadDecodeAttempt> {
+        let mut best: Option<PayloadDecodeAttempt> = None;
+        for candidate in attempts {
+            let replace = match best.as_ref() {
+                None => true,
+                Some(current) => Self::is_better_payload_attempt(&candidate, current),
+            };
+            if replace {
+                best = Some(candidate);
+            }
+        }
+        best
+    }
+
     fn decode_payload_with_timing_retries(
         &self,
         payload_start: usize,
@@ -509,37 +580,24 @@ impl Decoder {
         pn: &[f32],
         fec_bits_len: usize,
         p_bits_len: usize,
-    ) -> Option<(Vec<Packet>, usize, usize)> {
+    ) -> Option<PayloadDecodeAttempt> {
         let spc = self.config.proc_samples_per_chip().max(1) as f32;
-        let timing_limit = spc * TRACKING_TIMING_LIMIT_CHIP;
         let timing_biases = [-0.75f32 * spc, 0.0, 0.75f32 * spc];
-
-        let mut best: Option<(Vec<Packet>, usize, usize)> = None;
-        for bias in timing_biases {
-            let mut st = initial_state;
-            st.timing_offset = (st.timing_offset + bias).clamp(-timing_limit, timing_limit);
-            let Some(decoded_soft_bits) =
-                self.decode_bits_with_tracking(payload_start, burst_data_bits_len, st, pn)
-            else {
-                continue;
-            };
-            let candidate =
-                self.parse_payload_packets(&decoded_soft_bits.llrs, fec_bits_len, p_bits_len);
-            let replace = match &best {
-                None => true,
-                Some((best_packets, best_crc, best_parse)) => {
-                    candidate.0.len() > best_packets.len()
-                        || (candidate.0.len() == best_packets.len()
-                            && (candidate.1 < *best_crc
-                                || (candidate.1 == *best_crc && candidate.2 < *best_parse)))
-                }
-            };
-            if replace {
-                best = Some(candidate);
-            }
-        }
-
-        best
+        let attempts: Vec<_> = timing_biases
+            .into_iter()
+            .filter_map(|timing_bias| {
+                self.try_decode_payload_once(
+                    payload_start,
+                    burst_data_bits_len,
+                    timing_bias,
+                    initial_state,
+                    pn,
+                    fec_bits_len,
+                    p_bits_len,
+                )
+            })
+            .collect();
+        Self::select_best_payload_attempt(attempts)
     }
 
     fn parse_payload_packets(
@@ -915,11 +973,24 @@ impl Drop for Decoder {
 mod tests {
     use super::*;
     use crate::coding::fountain::{FountainEncoder, FountainParams};
+    use crate::coding::scrambler::Scrambler;
     use crate::params::FIXED_K;
     use crate::{
         dsss::encoder::{Encoder, EncoderConfig},
         DspConfig,
     };
+
+    fn encode_packet_bits_to_interleaved_llrs(bits: &[u8], magnitude: f32) -> Vec<f32> {
+        let mut fec_bits = fec::encode(bits);
+        let mut scrambler = Scrambler::default();
+        scrambler.process_bits(&mut fec_bits);
+        let interleaver = BlockInterleaver::new(16, fec_bits.len().div_ceil(16));
+        interleaver
+            .interleave(&fec_bits)
+            .into_iter()
+            .map(|bit| if bit == 0 { magnitude } else { -magnitude })
+            .collect()
+    }
 
     #[test]
     fn test_decoder_silence_input_does_not_complete() {
@@ -1056,6 +1127,22 @@ mod tests {
         decoder.recovered_data().map(|v| v.to_vec())
     }
 
+    fn append_processed_samples(decoder: &mut Decoder, samples: &[f32]) {
+        let mut i_mixed = Vec::with_capacity(samples.len());
+        let mut q_mixed = Vec::with_capacity(samples.len());
+        decoder.mix_real_to_iq(samples, &mut i_mixed, &mut q_mixed);
+
+        let mut i_resampled = Vec::new();
+        let mut q_resampled = Vec::new();
+        decoder.resampler_i.process(&i_mixed, &mut i_resampled);
+        decoder.resampler_q.process(&q_mixed, &mut q_resampled);
+
+        let i_filtered = decoder.rrc_filter_i.process_block(&i_resampled);
+        let q_filtered = decoder.rrc_filter_q.process_block(&q_resampled);
+        decoder.sample_buffer_i.extend_from_slice(&i_filtered);
+        decoder.sample_buffer_q.extend_from_slice(&q_filtered);
+    }
+
     fn apply_clock_drift_ppm(input: &[f32], ppm: f32) -> Vec<f32> {
         if input.is_empty() || ppm.abs() < 1.0 {
             return input.to_vec();
@@ -1112,6 +1199,163 @@ mod tests {
         let recovered = decode_signal(data, k, rx_cfg, &signal)
             .expect("decoder should recover under mild carrier offset");
         assert_eq!(&recovered[..data.len()], data);
+    }
+
+    #[test]
+    fn test_decoder_direct_first_frame_payload_decode_has_no_crc_errors() {
+        let data = vec![0xAAu8; 160];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let signal = build_test_signal(&data, k, 1, 64);
+        let mut decoder = Decoder::new(data.len(), k, crate::dsss::params::dsp_config_48k());
+        decoder.config.packets_per_burst = 1;
+        append_processed_samples(&mut decoder, &signal);
+
+        let spc = decoder.config.proc_samples_per_chip();
+        let sf = decoder.config.spread_factor();
+        let sync_bits_len = decoder.config.sync_word_bits;
+        let fec_bits_len = decoder.interleaver.rows() * decoder.interleaver.cols();
+        let burst_data_bits_len = fec_bits_len * decoder.config.packets_per_burst.max(1);
+        let p_bits_len = PACKET_BYTES * 8;
+
+        let (sync_opt, _) = decoder
+            .sync_detector
+            .detect(&decoder.sample_buffer_i, &decoder.sample_buffer_q, 0);
+        let sync = sync_opt.expect("sync should be detected on ideal first frame");
+        let payload_start = sync.peak_sample_idx + sync_bits_len * sf * spc;
+
+        let initial_ref = Complex32::new(sync.peak_iq.0, sync.peak_iq.1);
+        let initial_ref_norm = initial_ref.norm().max(1e-6);
+        let tracking = TrackingState {
+            phase_ref: initial_ref / initial_ref_norm,
+            prev_symbol: initial_ref / initial_ref_norm,
+            phase_rate: 0.0,
+            timing_offset: 0.0,
+            timing_rate: 0.0,
+            noise_var: 0.2,
+        };
+
+        let mut mseq = crate::common::msequence::MSequence::new(decoder.config.mseq_order);
+        let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
+
+        let attempt = decoder
+            .decode_payload_with_timing_retries(
+                payload_start,
+                burst_data_bits_len,
+                tracking,
+                &pn,
+                fec_bits_len,
+                p_bits_len,
+            )
+            .expect("payload decode attempt should be produced");
+
+        assert_eq!(attempt.crc_errors, 0, "ideal first frame should have no crc errors");
+        assert_eq!(attempt.parse_errors, 0, "ideal first frame should have no parse errors");
+        assert_eq!(attempt.packets.len(), 1, "ideal first frame should decode one packet");
+    }
+
+    #[test]
+    fn test_decoder_direct_isolated_frames_have_no_crc_errors() {
+        let data = vec![0xAAu8; 160];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let config = crate::dsss::params::dsp_config_48k();
+        let mut enc_cfg = EncoderConfig::new(config.clone());
+        enc_cfg.fountain_k = k;
+        enc_cfg.packets_per_sync_burst = 1;
+        let params = FountainParams::new(k, PAYLOAD_SIZE);
+        let mut fountain_encoder = FountainEncoder::new(&data, params);
+
+        for frame_idx in 0..20 {
+            let packet = fountain_encoder.next_packet();
+            let mut encoder = Encoder::new(enc_cfg.clone());
+            let mut signal = encoder.encode_burst(&[packet]);
+            signal.extend(encoder.modulate_silence(64));
+            signal.extend(encoder.flush());
+            signal.extend(vec![0.0f32; 1024]);
+
+            let mut decoder = Decoder::new(data.len(), k, config.clone());
+            decoder.config.packets_per_burst = 1;
+            append_processed_samples(&mut decoder, &signal);
+
+            let spc = decoder.config.proc_samples_per_chip();
+            let sf = decoder.config.spread_factor();
+            let sync_bits_len = decoder.config.sync_word_bits;
+            let fec_bits_len = decoder.interleaver.rows() * decoder.interleaver.cols();
+            let burst_data_bits_len = fec_bits_len * decoder.config.packets_per_burst.max(1);
+            let p_bits_len = PACKET_BYTES * 8;
+
+            let (sync_opt, _) = decoder
+                .sync_detector
+                .detect(&decoder.sample_buffer_i, &decoder.sample_buffer_q, 0);
+            let sync = sync_opt.expect("sync should be detected on isolated ideal frame");
+            let payload_start = sync.peak_sample_idx + sync_bits_len * sf * spc;
+
+            let initial_ref = Complex32::new(sync.peak_iq.0, sync.peak_iq.1);
+            let initial_ref_norm = initial_ref.norm().max(1e-6);
+            let mut mseq = crate::common::msequence::MSequence::new(decoder.config.mseq_order);
+            let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
+
+            let tracking = TrackingState {
+                phase_ref: initial_ref / initial_ref_norm,
+                prev_symbol: initial_ref / initial_ref_norm,
+                phase_rate: 0.0,
+                timing_offset: 0.0,
+                timing_rate: 0.0,
+                noise_var: 0.2,
+            };
+            let attempt = decoder
+                .decode_payload_with_timing_retries(
+                    payload_start,
+                    burst_data_bits_len,
+                    tracking,
+                    &pn,
+                    fec_bits_len,
+                    p_bits_len,
+                )
+                .unwrap_or_else(|| panic!("frame {} should produce payload decode attempt", frame_idx));
+
+            assert_eq!(
+                attempt.crc_errors, 0,
+                "isolated ideal frame {} should have no crc errors",
+                frame_idx
+            );
+            assert_eq!(
+                attempt.parse_errors, 0,
+                "isolated ideal frame {} should have no parse errors",
+                frame_idx
+            );
+            assert_eq!(
+                attempt.packets.len(), 1,
+                "isolated ideal frame {} should decode one packet",
+                frame_idx
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_payload_packets_counts_crc_errors() {
+        let dsp_config = crate::dsss::params::dsp_config_48k();
+        let decoder = Decoder::new(32, FIXED_K, dsp_config);
+        let fec_bits_len = decoder.interleaver.rows() * decoder.interleaver.cols();
+        let p_bits_len = PACKET_BYTES * 8;
+
+        let valid_packet = Packet::new(7, 3, &[0x5a; crate::params::PAYLOAD_SIZE]);
+        let valid_bits = fec::bytes_to_bits(&valid_packet.serialize());
+
+        let mut crc_mismatch_bits = valid_bits.clone();
+        crc_mismatch_bits[0] ^= 1;
+
+        let mut payload_llrs = encode_packet_bits_to_interleaved_llrs(&valid_bits, 8.0);
+        payload_llrs.extend(encode_packet_bits_to_interleaved_llrs(
+            &crc_mismatch_bits,
+            8.0,
+        ));
+
+        let (packets, crc_errors, parse_errors) =
+            decoder.parse_payload_packets(&payload_llrs, fec_bits_len, p_bits_len);
+
+        assert_eq!(packets, vec![valid_packet]);
+        assert_eq!(crc_errors, 1);
+        assert_eq!(parse_errors, 0);
     }
 
     #[test]
@@ -1331,6 +1575,85 @@ mod tests {
             seen_ranks.len() <= 6,
             "Regression detected: took {} iterations, expected <= 6",
             seen_ranks.len()
+        );
+    }
+
+    #[test]
+    fn test_decoder_does_not_overcount_syncs_continuous_frames() {
+        // dsss_e2e_eval と同じ定義で synced_frame_ratio を評価する。
+        let data = vec![0xAAu8; 160];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let num_frames = 20;
+        let signal = build_test_signal(&data, k, num_frames, 64);
+
+        let mut decoder = Decoder::new(data.len(), k, crate::dsss::params::dsp_config_48k());
+        decoder.config.packets_per_burst = 1;
+
+        let mut total_synced_frames = 0usize;
+        let mut total_accepted_packets = 0usize;
+        let mut total_crc_error_packets = 0usize;
+        for chunk in signal.chunks(2048) {
+            let progress = decoder.process_samples(chunk);
+            if progress.complete {
+                total_synced_frames += progress.synced_frames;
+                total_accepted_packets += progress.received_packets;
+                total_crc_error_packets += progress.crc_error_packets;
+                decoder.reset_fountain_decoder();
+            }
+        }
+        let final_progress = decoder.process_samples(&[]);
+        total_synced_frames += final_progress.synced_frames;
+        total_accepted_packets += final_progress.received_packets;
+        total_crc_error_packets += final_progress.crc_error_packets;
+
+        let synced_frame_ratio = total_synced_frames as f32 / num_frames as f32;
+        assert_eq!(total_accepted_packets, num_frames);
+        assert_eq!(total_crc_error_packets, 0);
+        assert!(
+            (synced_frame_ratio - 1.0).abs() < 1e-6,
+            "synced_frame_ratio mismatch: {}",
+            synced_frame_ratio
+        );
+    }
+
+    #[test]
+    fn test_decoder_ideal_continuous_frames_do_not_accumulate_crc_errors() {
+        let data = vec![0xAAu8; 160];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let num_frames = 20;
+        let signal = build_test_signal(&data, k, num_frames, 64);
+
+        let mut decoder = Decoder::new(data.len(), k, crate::dsss::params::dsp_config_48k());
+        decoder.config.packets_per_burst = 1;
+
+        let mut total_accepted_packets = 0usize;
+        let mut total_crc_error_packets = 0usize;
+        let mut total_parse_error_packets = 0usize;
+        for chunk in signal.chunks(2048) {
+            let progress = decoder.process_samples(chunk);
+            if progress.complete {
+                total_accepted_packets += progress.received_packets;
+                total_crc_error_packets += progress.crc_error_packets;
+                total_parse_error_packets += progress.parse_error_packets;
+                decoder.reset_fountain_decoder();
+            }
+        }
+        let final_progress = decoder.process_samples(&[]);
+        total_accepted_packets += final_progress.received_packets;
+        total_crc_error_packets += final_progress.crc_error_packets;
+        total_parse_error_packets += final_progress.parse_error_packets;
+
+        assert_eq!(
+            total_accepted_packets, num_frames,
+            "ideal continuous frames should accept every packet"
+        );
+        assert_eq!(
+            total_crc_error_packets, 0,
+            "ideal continuous frames should not accumulate crc errors"
+        );
+        assert_eq!(
+            total_parse_error_packets, 0,
+            "ideal continuous frames should not accumulate parse errors"
         );
     }
 }
