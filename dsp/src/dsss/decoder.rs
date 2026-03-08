@@ -1016,6 +1016,42 @@ mod tests {
         DspConfig,
     };
     use std::sync::{Arc, Mutex};
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn scalar_mix_reference(
+        decoder: &mut Decoder,
+        samples: &[f32],
+        i_out: &mut Vec<f32>,
+        q_out: &mut Vec<f32>,
+    ) {
+        i_out.clear();
+        q_out.clear();
+        i_out.reserve(samples.len());
+        q_out.reserve(samples.len());
+        for &sample in samples {
+            let s = decoder.agc_scale(sample);
+            let lo = decoder.lo_nco.step();
+            i_out.push(s * lo.re);
+            q_out.push(s * lo.im);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn assert_vec_close(actual: &[f32], expected: &[f32], eps: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= eps,
+                "idx={} actual={} expected={} eps={}",
+                idx,
+                a,
+                e,
+                eps
+            );
+        }
+    }
 
     fn encode_packet_bits_to_interleaved_llrs(bits: &[u8], magnitude: f32) -> Vec<f32> {
         let mut fec_bits = fec::encode(bits);
@@ -1125,6 +1161,70 @@ mod tests {
         assert!(!progress.complete);
         assert_eq!(progress.received_packets, 0);
         assert!(decoder.recovered_data().is_none());
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_mix_real_to_iq_simd_matches_scalar_reference() {
+        let config = crate::dsss::params::dsp_config_48k();
+        let mut simd_decoder = Decoder::new(32, FIXED_K, config.clone());
+        let mut scalar_decoder = Decoder::new(32, FIXED_K, config);
+
+        let samples = vec![
+            0.03, -0.11, 0.17, -0.23, 0.29, -0.31, 0.37, -0.41, 0.47, -0.53, 0.59, -0.61, 0.67,
+        ];
+
+        let mut simd_i = Vec::new();
+        let mut simd_q = Vec::new();
+        simd_decoder.mix_real_to_iq(&samples, &mut simd_i, &mut simd_q);
+
+        let mut expected_i = Vec::new();
+        let mut expected_q = Vec::new();
+        scalar_mix_reference(
+            &mut scalar_decoder,
+            &samples,
+            &mut expected_i,
+            &mut expected_q,
+        );
+
+        assert_vec_close(&simd_i, &expected_i, 1e-6);
+        assert_vec_close(&simd_q, &expected_q, 1e-6);
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_mix_real_to_iq_simd_matches_scalar_across_calls() {
+        let config = crate::dsss::params::dsp_config_48k();
+        let mut simd_decoder = Decoder::new(32, FIXED_K, config.clone());
+        let mut scalar_decoder = Decoder::new(32, FIXED_K, config);
+
+        let first = vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+        let second = vec![0.12, 0.24, -0.36, 0.48, -0.6, 0.72, -0.84, 0.96, -0.08];
+
+        let mut simd_i = Vec::new();
+        let mut simd_q = Vec::new();
+        let mut expected_i = Vec::new();
+        let mut expected_q = Vec::new();
+
+        simd_decoder.mix_real_to_iq(&first, &mut simd_i, &mut simd_q);
+        scalar_mix_reference(
+            &mut scalar_decoder,
+            &first,
+            &mut expected_i,
+            &mut expected_q,
+        );
+        assert_vec_close(&simd_i, &expected_i, 1e-6);
+        assert_vec_close(&simd_q, &expected_q, 1e-6);
+
+        simd_decoder.mix_real_to_iq(&second, &mut simd_i, &mut simd_q);
+        scalar_mix_reference(
+            &mut scalar_decoder,
+            &second,
+            &mut expected_i,
+            &mut expected_q,
+        );
+        assert_vec_close(&simd_i, &expected_i, 1e-6);
+        assert_vec_close(&simd_q, &expected_q, 1e-6);
     }
 
     fn build_test_signal(data: &[u8], k: usize, frames: usize, gap_samples: usize) -> Vec<f32> {

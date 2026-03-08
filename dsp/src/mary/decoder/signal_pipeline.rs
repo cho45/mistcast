@@ -198,6 +198,37 @@ impl SignalPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    use crate::common::nco::Nco;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn scalar_mix_reference(samples: &[f32], nco: &mut Nco) -> (Vec<f32>, Vec<f32>) {
+        let mut i_out = Vec::with_capacity(samples.len());
+        let mut q_out = Vec::with_capacity(samples.len());
+        for &s in samples {
+            let lo = nco.step();
+            i_out.push(s * lo.re * 2.0);
+            q_out.push(s * lo.im * 2.0);
+        }
+        (i_out, q_out)
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn assert_vec_close(actual: &[f32], expected: &[f32], eps: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (a - e).abs() <= eps,
+                "idx={} actual={} expected={} eps={}",
+                idx,
+                a,
+                e,
+                eps
+            );
+        }
+    }
 
     #[test]
     fn test_signal_pipeline_creation() {
@@ -317,5 +348,42 @@ mod tests {
         pipeline.mix_real_to_iq_zero_alloc(&[1.0]);
         assert!((pipeline.mix_buffer_i[0] - 2.0).abs() < 1e-6);
         assert!(pipeline.mix_buffer_q[0].abs() < 1e-6);
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_mix_real_to_iq_zero_alloc_simd_matches_scalar_reference() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+        let mut ref_nco = Nco::new(-config.carrier_freq, config.sample_rate);
+        let samples = vec![
+            0.25, -0.5, 0.125, 0.75, -0.8, 0.33, -0.22, 0.9, -0.4, 0.1, 0.0, -1.0, 0.6,
+        ];
+
+        pipeline.mix_real_to_iq_zero_alloc(&samples);
+        let (expected_i, expected_q) = scalar_mix_reference(&samples, &mut ref_nco);
+
+        assert_vec_close(&pipeline.mix_buffer_i, &expected_i, 1e-6);
+        assert_vec_close(&pipeline.mix_buffer_q, &expected_q, 1e-6);
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_mix_real_to_iq_zero_alloc_simd_matches_scalar_across_calls() {
+        let config = DspConfig::default_48k();
+        let mut pipeline = SignalPipeline::new(&config);
+        let mut ref_nco = Nco::new(-config.carrier_freq, config.sample_rate);
+
+        let first = vec![0.1, -0.3, 0.5, -0.7, 0.9, -0.2, 0.4, -0.6];
+        pipeline.mix_real_to_iq_zero_alloc(&first);
+        let (expected_i_first, expected_q_first) = scalar_mix_reference(&first, &mut ref_nco);
+        assert_vec_close(&pipeline.mix_buffer_i, &expected_i_first, 1e-6);
+        assert_vec_close(&pipeline.mix_buffer_q, &expected_q_first, 1e-6);
+
+        let second = vec![0.11, 0.22, -0.33, -0.44, 0.55, 0.66, -0.77, 0.88, -0.99];
+        pipeline.mix_real_to_iq_zero_alloc(&second);
+        let (expected_i_second, expected_q_second) = scalar_mix_reference(&second, &mut ref_nco);
+        assert_vec_close(&pipeline.mix_buffer_i, &expected_i_second, 1e-6);
+        assert_vec_close(&pipeline.mix_buffer_q, &expected_q_second, 1e-6);
     }
 }
