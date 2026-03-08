@@ -30,11 +30,11 @@ define_metrics! {
     crc_pass_ratio,                "CRC通過率",                    |_, m| m.crc_pass_ratio().into(), default;
     llr_second_pass_trigger_ratio, "LLR消去2ndパス起動率",         |_, m| m.llr_second_pass_trigger_ratio().into(), default;
     llr_second_pass_rescue_ratio,  "LLR消去2ndパス救済率",         |_, m| m.llr_second_pass_rescue_ratio().into(), default;
-    phase_gate_on_ratio,           "位相ゲート有効率",             |_, m| f32::from(m.phase_gate_on_ratio()).into(), default;
-    phase_innovation_reject_ratio, "位相変化棄却率",               |_, m| f32::from(m.phase_innovation_reject_ratio()).into(), default;
+    phase_gate_on_ratio,           "位相ゲート有効率",             |_, m| m.phase_gate_on_ratio().into(), default;
+    phase_innovation_reject_ratio, "位相変化棄却率",               |_, m| m.phase_innovation_reject_ratio().into(), default;
     phase_err_abs_mean_rad,        "平均絶対位相誤差 [rad]",       |_, m| m.phase_err_abs_mean_rad().into(), default;
-    phase_err_abs_ge_0p5_ratio,    "0.5rad以上誤差率",             |_, m| f32::from(m.phase_err_abs_ge_0p5_ratio()).into(), default;
-    phase_err_abs_ge_1p0_ratio,    "1.0rad以上誤差率",             |_, m| f32::from(m.phase_err_abs_ge_1p0_ratio()).into(), default;
+    phase_err_abs_ge_0p5_ratio,    "0.5rad以上誤差率",             |_, m| m.phase_err_abs_ge_0p5_ratio().into(), default;
+    phase_err_abs_ge_1p0_ratio,    "1.0rad以上誤差率",             |_, m| m.phase_err_abs_ge_1p0_ratio().into(), default;
     avg_last_est_snr_db,           "平均推定SNR [dB]",             |_, m| m.avg_last_est_snr_db().into(), default;
     multipath,                     "マルチパスプロファイル",       |ctx, _| ctx.multipath_name.into(), default;
     raw_err_run_mean,              "生エラーラン平均長",           |_, m| m.raw_err_run_mean().into();
@@ -212,7 +212,6 @@ impl From<CirNormArg> for CirNormalizationMode {
         }
     }
 }
-
 
 impl Cli {
     pub fn base_impairment(&self) -> ChannelImpairment {

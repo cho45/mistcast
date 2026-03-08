@@ -319,16 +319,14 @@ impl Decoder {
             let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
 
             let p_bits_len = PACKET_BYTES * 8;
-            let Some(attempt) = self
-                .decode_payload_with_timing_retries(
-                    payload_start,
-                    burst_data_bits_len,
-                    best_tracking_after_sync,
-                    &pn,
-                    fec_bits_len,
-                    p_bits_len,
-                )
-            else {
+            let Some(attempt) = self.decode_payload_with_timing_retries(
+                payload_start,
+                burst_data_bits_len,
+                best_tracking_after_sync,
+                &pn,
+                fec_bits_len,
+                p_bits_len,
+            ) else {
                 // 同じ候補フレームの payload 上を再探索するとゾンビ同期が連鎖する。
                 // 失敗した候補はフレーム末尾までまとめてスキップする。
                 self.last_search_idx = next_search_after_candidate;
@@ -423,8 +421,10 @@ impl Decoder {
             }
             let w0 = 1.0 - frac;
             let w1 = frac;
-            let si = self.sample_buffer_i[i0 as usize] * w0 + self.sample_buffer_i[i1 as usize] * w1;
-            let sq = self.sample_buffer_q[i0 as usize] * w0 + self.sample_buffer_q[i1 as usize] * w1;
+            let si =
+                self.sample_buffer_i[i0 as usize] * w0 + self.sample_buffer_i[i1 as usize] * w1;
+            let sq =
+                self.sample_buffer_q[i0 as usize] * w0 + self.sample_buffer_q[i1 as usize] * w1;
             sum_i += si * pn_val;
             sum_q += sq * pn_val;
         }
@@ -520,6 +520,7 @@ impl Decoder {
         Some(DecodedSoftBits { llrs })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_decode_payload_once(
         &self,
         payload_start: usize,
@@ -1143,36 +1144,7 @@ mod tests {
         decoder.sample_buffer_q.extend_from_slice(&q_filtered);
     }
 
-    fn apply_clock_drift_ppm(input: &[f32], ppm: f32) -> Vec<f32> {
-        if input.is_empty() || ppm.abs() < 1.0 {
-            return input.to_vec();
-        }
-
-        let out_len = input.len();
-        let mut out = Vec::with_capacity(out_len);
-
-        let mut time = 0.0f32;
-        let time_step = 1.0 + ppm / 1_000_000.0;
-
-        for _ in 0..out_len {
-            let i0 = time.floor() as usize;
-            let frac = (time - i0 as f32).clamp(0.0, 1.0);
-
-            if i0 + 1 < input.len() {
-                let a = input[i0];
-                let b = input[i0 + 1];
-                out.push(a + (b - a) * frac);
-            } else if i0 < input.len() {
-                out.push(input[i0]);
-            } else {
-                out.push(input[input.len() - 1]);
-            }
-
-            time += time_step;
-        }
-
-        out
-    }
+    use crate::common::channel::apply_clock_drift_ppm;
 
     #[test]
     fn test_decoder_tracking_tolerates_clock_drift_ppm() {
@@ -1217,9 +1189,10 @@ mod tests {
         let burst_data_bits_len = fec_bits_len * decoder.config.packets_per_burst.max(1);
         let p_bits_len = PACKET_BYTES * 8;
 
-        let (sync_opt, _) = decoder
-            .sync_detector
-            .detect(&decoder.sample_buffer_i, &decoder.sample_buffer_q, 0);
+        let (sync_opt, _) =
+            decoder
+                .sync_detector
+                .detect(&decoder.sample_buffer_i, &decoder.sample_buffer_q, 0);
         let sync = sync_opt.expect("sync should be detected on ideal first frame");
         let payload_start = sync.peak_sample_idx + sync_bits_len * sf * spc;
 
@@ -1248,9 +1221,19 @@ mod tests {
             )
             .expect("payload decode attempt should be produced");
 
-        assert_eq!(attempt.crc_errors, 0, "ideal first frame should have no crc errors");
-        assert_eq!(attempt.parse_errors, 0, "ideal first frame should have no parse errors");
-        assert_eq!(attempt.packets.len(), 1, "ideal first frame should decode one packet");
+        assert_eq!(
+            attempt.crc_errors, 0,
+            "ideal first frame should have no crc errors"
+        );
+        assert_eq!(
+            attempt.parse_errors, 0,
+            "ideal first frame should have no parse errors"
+        );
+        assert_eq!(
+            attempt.packets.len(),
+            1,
+            "ideal first frame should decode one packet"
+        );
     }
 
     #[test]
@@ -1283,9 +1266,10 @@ mod tests {
             let burst_data_bits_len = fec_bits_len * decoder.config.packets_per_burst.max(1);
             let p_bits_len = PACKET_BYTES * 8;
 
-            let (sync_opt, _) = decoder
-                .sync_detector
-                .detect(&decoder.sample_buffer_i, &decoder.sample_buffer_q, 0);
+            let (sync_opt, _) =
+                decoder
+                    .sync_detector
+                    .detect(&decoder.sample_buffer_i, &decoder.sample_buffer_q, 0);
             let sync = sync_opt.expect("sync should be detected on isolated ideal frame");
             let payload_start = sync.peak_sample_idx + sync_bits_len * sf * spc;
 
@@ -1311,7 +1295,9 @@ mod tests {
                     fec_bits_len,
                     p_bits_len,
                 )
-                .unwrap_or_else(|| panic!("frame {} should produce payload decode attempt", frame_idx));
+                .unwrap_or_else(|| {
+                    panic!("frame {} should produce payload decode attempt", frame_idx)
+                });
 
             assert_eq!(
                 attempt.crc_errors, 0,
@@ -1324,7 +1310,8 @@ mod tests {
                 frame_idx
             );
             assert_eq!(
-                attempt.packets.len(), 1,
+                attempt.packets.len(),
+                1,
                 "isolated ideal frame {} should decode one packet",
                 frame_idx
             );

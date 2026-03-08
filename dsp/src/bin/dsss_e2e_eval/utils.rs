@@ -344,6 +344,82 @@ mod tests {
     use dsp::params::PAYLOAD_SIZE;
 
     #[test]
+    fn test_count_bit_errors_bytes() {
+        // Equal length
+        assert_eq!(
+            count_bit_errors_bytes(&[0b10101010], Some(&[0b10101010])),
+            0
+        );
+        assert_eq!(
+            count_bit_errors_bytes(&[0b10101010], Some(&[0b01010101])),
+            8
+        );
+        assert_eq!(
+            count_bit_errors_bytes(&[0xFF, 0x00], Some(&[0xFE, 0x01])),
+            2
+        );
+
+        // Different length
+        assert_eq!(count_bit_errors_bytes(&[0x00, 0x00], Some(&[0x00])), 8); // 2nd byte missing -> 8 errors
+        assert_eq!(count_bit_errors_bytes(&[0x00], Some(&[0x00, 0xFF])), 0); // extra byte ignored
+
+        // None case
+        assert_eq!(count_bit_errors_bytes(&[0x00, 0x00, 0x00], None), 24);
+    }
+
+    #[test]
+    fn test_bit_errors_and_runs_from_llr() {
+        // expected: 0 -> LLR > 0 is correct
+        // expected: 1 -> LLR <= 0 is correct
+        let expected = vec![0, 1, 0, 1];
+        let llrs = vec![1.0, -1.0, -0.5, 0.5];
+        // index 2: exp 0, llr -0.5 (bit 1) -> error
+        // index 3: exp 1, llr 0.5 (bit 0) -> error
+        // 2 errors, 1 run (index 2-3)
+        let (errs, comp, runs, run_bits, run_max) = bit_errors_and_runs_from_llr(&expected, &llrs);
+        assert_eq!(errs, 2);
+        assert_eq!(comp, 4);
+        assert_eq!(runs, 1);
+        assert_eq!(run_bits, 2);
+        assert_eq!(run_max, 2);
+
+        // Multiple runs
+        let expected2 = vec![0, 0, 0, 0, 0];
+        let llrs2 = vec![-1.0, 1.0, -1.0, -1.0, 1.0];
+        // errors at: 0, 2, 3
+        // runs: [0], [2, 3] -> 2 runs
+        let (errs, _, runs, run_bits, run_max) = bit_errors_and_runs_from_llr(&expected2, &llrs2);
+        assert_eq!(errs, 3);
+        assert_eq!(runs, 2);
+        assert_eq!(run_bits, 3);
+        assert_eq!(run_max, 2);
+
+        // LLR 0.0 is always an error for both expected 0 and 1
+        assert_eq!(bit_errors_and_runs_from_llr(&[0], &[0.0]).0, 1);
+        assert_eq!(bit_errors_and_runs_from_llr(&[1], &[0.0]).0, 1);
+    }
+
+    #[test]
+    fn test_bit_errors_and_runs_from_bits() {
+        let expected = vec![0, 1, 0, 1, 1, 0];
+        let observed = vec![0, 0, 0, 1, 0, 1];
+        // errors at index: 1, 4, 5
+        // runs: [1], [4, 5] -> 2 runs
+        let (errs, comp, runs, run_bits, run_max) =
+            bit_errors_and_runs_from_bits(&expected, &observed);
+        assert_eq!(errs, 3);
+        assert_eq!(comp, 6);
+        assert_eq!(runs, 2);
+        assert_eq!(run_bits, 3);
+        assert_eq!(run_max, 2);
+
+        // Different length
+        let (errs, comp, _, _, _) = bit_errors_and_runs_from_bits(&[0, 0, 0], &[1, 1]);
+        assert_eq!(errs, 2);
+        assert_eq!(comp, 2); // compares min length
+    }
+
+    #[test]
     fn test_count_bit_errors_bytes_edge_cases() {
         assert_eq!(count_bit_errors_bytes(&[], Some(&[])), 0);
         assert_eq!(count_bit_errors_bytes(&[0x00], Some(&[0x00, 0xFF])), 0);
@@ -359,13 +435,15 @@ mod tests {
         let (errs, _, runs, _, _) = bit_errors_and_runs_from_llr(&[0, 0], &[1.0, -1.0]);
         assert_eq!(errs, 1);
         assert_eq!(runs, 1);
-        let (errs, comp, runs, run_bits, run_max) = bit_errors_and_runs_from_llr(&[0, 0, 0], &[-1.0, -1.0, -1.0]);
+        let (errs, comp, runs, run_bits, run_max) =
+            bit_errors_and_runs_from_llr(&[0, 0, 0], &[-1.0, -1.0, -1.0]);
         assert_eq!(errs, 3);
         assert_eq!(comp, 3);
         assert_eq!(runs, 1);
         assert_eq!(run_bits, 3);
         assert_eq!(run_max, 3);
-        let (errs, _, runs, _, _) = bit_errors_and_runs_from_llr(&[0, 0, 0, 0], &[-1.0, 1.0, -1.0, 1.0]);
+        let (errs, _, runs, _, _) =
+            bit_errors_and_runs_from_llr(&[0, 0, 0, 0], &[-1.0, 1.0, -1.0, 1.0]);
         assert_eq!(errs, 2);
         assert_eq!(runs, 2);
         let (errs0, _, _, _, _) = bit_errors_and_runs_from_llr(&[0], &[0.0]);
@@ -379,15 +457,26 @@ mod tests {
         let accum = BerAccumulator::new();
         let k = 1;
         let data = vec![0u8; PAYLOAD_SIZE];
-        accum.register_packet(10, &FountainPacket { seq: 10, data: data.clone(), coefficients: vec![] }, k);
+        accum.register_packet(
+            10,
+            &FountainPacket {
+                seq: 10,
+                data: data.clone(),
+                coefficients: vec![],
+            },
+            k,
+        );
         let cb = accum.llr_callback();
-        cb(&[1.0; 10]); 
+        cb(&[1.0; 10]);
         assert_eq!(accum.extract_decode_stats().0, 1);
         assert_eq!(accum.extract_pre_fec().codeword_count, 0);
         let pkt = Packet::new(10, k, &data);
         let bits = fec::bytes_to_bits(&pkt.serialize());
         let fec_encoded = fec::encode(&bits);
-        let mut llrs: Vec<f32> = fec_encoded.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect();
+        let mut llrs: Vec<f32> = fec_encoded
+            .iter()
+            .map(|&b| if b == 0 { 1.0 } else { -1.0 })
+            .collect();
         cb(&llrs);
         llrs[0] *= -1.0;
         cb(&llrs);
@@ -401,8 +490,19 @@ mod tests {
         let p_wrap = Packet::new(0xFFFF, k, &data);
         let bits_wrap = fec::bytes_to_bits(&p_wrap.serialize());
         let fec_wrap = fec::encode(&bits_wrap);
-        accum.register_packet(0xFFFF, &FountainPacket { seq: 0xFFFF, data: data.clone(), coefficients: vec![] }, k);
-        cb(&fec_wrap.iter().map(|&b| if b == 0 { 1.0 } else { -1.0 }).collect::<Vec<_>>());
+        accum.register_packet(
+            0xFFFF,
+            &FountainPacket {
+                seq: 0xFFFF,
+                data: data.clone(),
+                coefficients: vec![],
+            },
+            k,
+        );
+        cb(&fec_wrap
+            .iter()
+            .map(|&b| if b == 0 { 1.0 } else { -1.0 })
+            .collect::<Vec<_>>());
         assert_eq!(accum.extract_pre_fec().codeword_count, 3);
     }
 }

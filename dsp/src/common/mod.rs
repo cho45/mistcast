@@ -1,3 +1,4 @@
+pub mod channel;
 pub mod crc;
 pub mod decimator;
 pub mod equalization;

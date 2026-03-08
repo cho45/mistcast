@@ -1557,30 +1557,7 @@ mod tests {
         );
     }
 
-    fn apply_clock_drift_ppm(input: &[f32], ppm: f32) -> Vec<f32> {
-        if input.is_empty() || ppm.abs() < 1.0 {
-            return input.to_vec();
-        }
-        let out_len = input.len();
-        let mut out = Vec::with_capacity(out_len);
-        let mut time = 0.0f32;
-        let time_step = 1.0 + ppm / 1_000_000.0;
-        for _ in 0..out_len {
-            let i0 = time.floor() as usize;
-            let frac = (time - i0 as f32).clamp(0.0, 1.0);
-            if i0 + 1 < input.len() {
-                let a = input[i0];
-                let b = input[i0 + 1];
-                out.push(a + (b - a) * frac);
-            } else if i0 < input.len() {
-                out.push(input[i0]);
-            } else {
-                out.push(input[input.len() - 1]);
-            }
-            time += time_step;
-        }
-        out
-    }
+    use crate::common::channel::apply_clock_drift_ppm;
 
     #[test]
     fn test_decoder_incremental_chunk_processing() {

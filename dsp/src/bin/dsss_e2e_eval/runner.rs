@@ -410,12 +410,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
     let final_progress = decoder.process_samples(&[]);
     m.add_frame_event(
-        final_progress
-            .synced_frames,
-        final_progress
-            .received_packets,
-        final_progress
-            .crc_error_packets
+        final_progress.synced_frames,
+        final_progress.received_packets,
+        final_progress.crc_error_packets,
     );
 
     let recovered = decoder.recovered_data();
@@ -578,12 +575,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
     let final_progress = decoder.process_samples(&[]);
     m.add_frame_event(
-        final_progress
-             .synced_frames,
-         final_progress
-             .received_packets,
-         final_progress
-             .crc_error_packets
+        final_progress.synced_frames,
+        final_progress.received_packets,
+        final_progress.crc_error_packets,
     );
 
     let recovered = decoder.recovered_data();
@@ -699,7 +693,10 @@ mod tests {
             m.total_bit_errors, 0,
             "DSSS must have 0 bit errors in AWGN(0)"
         );
-        assert_eq!(m.total_bits_compared, m.total_successes * cli.payload_bytes * 8);
+        assert_eq!(
+            m.total_bits_compared,
+            m.total_successes * cli.payload_bytes * 8
+        );
         assert_eq!(m.ber(), 0.0);
 
         // 4. 物理・タイミング
@@ -755,7 +752,11 @@ mod tests {
         assert!(m.total_phase_gate_on_symbols > 0);
         assert_eq!(m.total_phase_gate_off_symbols, 0);
         assert_eq!(m.phase_gate_on_ratio(), 1.0);
-        assert!(m.phase_err_abs_mean_rad().unwrap() < 0.1, "Phase error mean should be near 0 in ideal conditions {}", m.phase_err_abs_mean_rad().unwrap());
+        assert!(
+            m.phase_err_abs_mean_rad().unwrap() < 0.1,
+            "Phase error mean should be near 0 in ideal conditions {}",
+            m.phase_err_abs_mean_rad().unwrap()
+        );
         assert_eq!(m.phase_err_abs_ge_0p5_ratio(), 0.0);
 
         // SNR

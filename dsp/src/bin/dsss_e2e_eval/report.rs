@@ -4,7 +4,7 @@ use crate::{selected_columns, Cli, OutputFormat, METRICS_DEFS};
 use serde_json::json;
 
 pub fn print_metrics_desc() {
-    println!("{:<30} | {}", "Column Name", "Description");
+    println!("{:<30} | Description", "Column Name");
     println!("{:-<30}-|-{:-<40}", ":", ":");
     for def in METRICS_DEFS {
         println!("{:<30} | {}", def.id, def.description);
