@@ -313,7 +313,7 @@ impl Decoder {
 
             let best_tracking_after_sync = TrackingState {
                 phase_ref: initial_ref / initial_ref_norm,
-                prev_symbol: initial_ref / initial_ref_norm,
+                prev_symbol: Complex32::new(1.0, 0.0),
                 phase_rate: 0.0,
                 timing_offset: 0.0,
                 timing_rate: 0.0,
@@ -346,8 +346,16 @@ impl Decoder {
 
             if decoded_packets.is_empty() || crc_errors > 0 {
                 // payload が全滅した候補は境界ずれとして破棄する。
-                // payload 内の擬似ピークを拾わないよう、候補フレーム全体を飛ばす。
-                self.last_search_idx = next_search_after_candidate;
+                if self.fountain_decoder.received_count() == 0 && self.crc_error_packets < 20 {
+                    // 起動直後だけ同期長ぶん先へ寄せて再探索し、誤同期固定化を崩す。
+                    let startup_search_step =
+                        (self.config.preamble_repeat + self.config.sync_word_bits) * symbol_len;
+                    self.last_search_idx =
+                        start.saturating_add(startup_search_step.max(symbol_len));
+                } else {
+                    // payload 内の擬似ピークを拾わないよう、候補フレーム全体を飛ばす。
+                    self.last_search_idx = next_search_after_candidate;
+                }
                 self.current_sync = None;
                 continue;
             }
@@ -816,6 +824,8 @@ impl Decoder {
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
         self.lo_nco.reset();
+        self.agc_peak_fast = 0.5;
+        self.agc_peak_slow = 0.5;
         self.recovered_data = None;
         self.last_search_idx = 0;
         self.current_sync = None;
@@ -1152,6 +1162,58 @@ mod tests {
             }
         }
         decoder.recovered_data().map(|v| v.to_vec())
+    }
+
+    fn run_decode_window_after_midstream_reset(
+        signal: &[f32],
+        reset_offset: usize,
+        window_samples_after_reset: usize,
+        chunk_size: usize,
+    ) -> (usize, usize, bool, usize) {
+        let data_len = 160usize;
+        let k = data_len.div_ceil(crate::params::PAYLOAD_SIZE);
+        let mut decoder = Decoder::new(data_len, k, crate::dsss::params::dsp_config_48k());
+        decoder.config.packets_per_burst = 1;
+
+        for chunk in signal[..reset_offset.min(signal.len())].chunks(chunk_size) {
+            let _ = decoder.process_samples(chunk);
+        }
+        decoder.reset();
+
+        let end = (reset_offset + window_samples_after_reset).min(signal.len());
+        let mut max_received = 0usize;
+        let mut max_crc = 0usize;
+        let mut max_synced = 0usize;
+        let mut complete = false;
+        for chunk in signal[reset_offset..end].chunks(chunk_size) {
+            let p = decoder.process_samples(chunk);
+            max_received = max_received.max(p.received_packets);
+            max_crc = max_crc.max(p.crc_error_packets);
+            max_synced = max_synced.max(p.synced_frames);
+            if p.complete {
+                complete = true;
+                break;
+            }
+        }
+        (max_received, max_crc, complete, max_synced)
+    }
+
+    fn build_runtime_like_continuous_signal(data: &[u8], k: usize, frames: usize) -> Vec<f32> {
+        let mut enc_cfg = EncoderConfig::new(crate::dsss::params::dsp_config_48k());
+        enc_cfg.fountain_k = k;
+        enc_cfg.packets_per_sync_burst = 1;
+        let mut encoder = Encoder::new(enc_cfg);
+        let params = FountainParams::new(k, PAYLOAD_SIZE);
+        let mut fountain_encoder = FountainEncoder::new(data, params);
+
+        let mut signal = Vec::new();
+        for _ in 0..frames {
+            let packet = fountain_encoder.next_packet();
+            signal.extend(encoder.encode_burst(&[packet]));
+        }
+        // 実運用では送信継続中だが、テスト終端でデコード窓を確保するため末尾に余白を足す
+        signal.extend(vec![0.0f32; 8192]);
+        signal
     }
 
     fn append_processed_samples(decoder: &mut Decoder, samples: &[f32]) {
@@ -1761,6 +1823,92 @@ mod tests {
         assert_eq!(
             final_progress.received_packets, packets_per_burst,
             "completed burst should count every packet in the frame"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual reproduction: mid-stream sweep is expensive"]
+    fn test_repro_reset_midstream_can_fall_into_crc_only_window() {
+        // 仮説2の再現 (loopback/ideal channel):
+        // 連続送信中に reset した後、受理0のままCRCのみ増える窓があるか探索する。
+        let data = vec![0xA5u8; 160];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let signal = build_runtime_like_continuous_signal(&data, k, 120);
+
+        let mut found_crc_only_offset = None;
+        let window_after_reset = 96_000;
+        let search_end = signal.len().saturating_sub(window_after_reset);
+        for offset in (4096..search_end).step_by(4096).take(80) {
+            let (max_received, max_crc, complete, _max_synced) =
+                run_decode_window_after_midstream_reset(&signal, offset, window_after_reset, 4096);
+            if !complete && max_received == 0 && max_crc >= 4 {
+                found_crc_only_offset = Some((offset, max_crc));
+                break;
+            }
+        }
+
+        assert!(
+            found_crc_only_offset.is_some(),
+            "mid-stream reset reproduction was not observed in current sweep"
+        );
+    }
+
+    #[test]
+    fn test_reset_midstream_at_chunk_boundary_should_recover_loopback() {
+        // RED:
+        // loopback(理想チャネル)では、chunk境界(4096)で reset しても復帰できるべき。
+        let data = vec![0xA5u8; 160];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let signal = build_runtime_like_continuous_signal(&data, k, 120);
+
+        let (max_received, max_crc, complete, max_synced) =
+            run_decode_window_after_midstream_reset(&signal, 4096, 96_000, 4096);
+
+        assert!(
+            max_received > 0,
+            "decoder should recover packets even when reset occurs at chunk boundary: received={}, crc={}, complete={}, synced={}",
+            max_received,
+            max_crc,
+            complete,
+            max_synced
+        );
+        assert!(
+            max_crc < max_received.saturating_mul(4).saturating_add(8),
+            "decoder should avoid crc-dominant lock after reset: received={}, crc={}, complete={}, synced={}",
+            max_received,
+            max_crc,
+            complete,
+            max_synced
+        );
+    }
+
+    #[test]
+    fn test_reset_restores_agc_state_to_default() {
+        // RED:
+        // reset() 後は AGC peak が new 時の初期値へ戻るべき。
+        let mut decoder = Decoder::new(32, FIXED_K, crate::dsss::params::dsp_config_48k());
+
+        // AGC状態を偏らせる
+        let hot_signal = vec![4.0f32; 16_384];
+        let _ = decoder.process_samples(&hot_signal);
+        let before_fast = decoder.agc_peak_fast;
+        let before_slow = decoder.agc_peak_slow;
+        assert!(before_fast > 1.0);
+        assert!(before_slow > 1.0);
+
+        decoder.reset();
+
+        // 期待仕様: reset後に初期値へ復帰する
+        assert!(
+            (decoder.agc_peak_fast - 0.5).abs() < 1e-6,
+            "agc_peak_fast must be reset to default: before={}, after={}",
+            before_fast, decoder.agc_peak_fast
+        );
+        assert!(
+            (decoder.agc_peak_slow - 0.5).abs() < 1e-6,
+            "agc_peak_slow must be reset to default: before={}, after={}",
+            before_slow,
+            decoder.agc_peak_slow
         );
     }
 }
