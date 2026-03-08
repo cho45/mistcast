@@ -16,7 +16,7 @@ pub struct Resampler {
     phase: f64,
     num_phases: usize,
     taps_per_phase: usize,
-    coeffs: Vec<Vec<f32>>,
+    coeffs: Vec<f32>,
     history: Vec<f32>,
 }
 
@@ -58,6 +58,12 @@ impl Resampler {
         {
             ResampleBackend::Scalar
         }
+    }
+
+    #[inline]
+    fn phase_coeffs(&self, phase: usize) -> &[f32] {
+        let start = phase * self.taps_per_phase;
+        &self.coeffs[start..start + self.taps_per_phase]
     }
 
     #[inline]
@@ -131,13 +137,15 @@ impl Resampler {
             .max(1.0);
         let default_taps = Self::design_taps_per_phase(source_rate, target_rate, cutoff_hz);
         let taps_per_phase = Self::normalize_taps_per_phase(taps_per_phase.unwrap_or(default_taps));
-        let mut coeffs = vec![vec![0.0; taps_per_phase]; num_phases];
+        let mut coeffs = vec![0.0f32; num_phases * taps_per_phase];
         let cutoff = cutoff_hz / source_rate as f64;
         let center = (taps_per_phase - 1) as f64 / 2.0;
 
-        for (p, phase_coeffs) in coeffs.iter_mut().enumerate() {
+        for p in 0..num_phases {
             let frac = p as f64 / num_phases as f64;
             let mut sum = 0.0f64;
+            let phase_start = p * taps_per_phase;
+            let phase_coeffs = &mut coeffs[phase_start..phase_start + taps_per_phase];
 
             for (i, coeff) in phase_coeffs.iter_mut().enumerate() {
                 let x = i as f64 - center - frac;
@@ -212,7 +220,7 @@ impl Resampler {
                 phase_idx = self.num_phases - 1;
             }
 
-            let coeffs = &self.coeffs[phase_idx];
+            let coeffs = self.phase_coeffs(phase_idx);
 
             let sum = match backend {
                 ResampleBackend::Scalar => self.convolve_scalar(base, coeffs),
