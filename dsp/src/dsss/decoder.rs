@@ -381,7 +381,6 @@ impl Decoder {
                 }
                 if let Some(data) = self.fountain_decoder.decode() {
                     self.recovered_data = Some(data);
-                    break;
                 }
             }
             // 受信窓をバースト分前進させる
@@ -1641,6 +1640,48 @@ mod tests {
         assert_eq!(
             total_parse_error_packets, 0,
             "ideal continuous frames should not accumulate parse errors"
+        );
+    }
+
+    #[test]
+    fn test_decoder_counts_all_packets_in_completed_burst() {
+        let data = vec![0xAAu8; 64];
+        let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
+        let packets_per_burst = 6;
+
+        let mut config = crate::dsss::params::dsp_config_48k();
+        config.packets_per_burst = packets_per_burst;
+
+        let mut enc_cfg = EncoderConfig::new(config.clone());
+        enc_cfg.fountain_k = k;
+        enc_cfg.packets_per_sync_burst = packets_per_burst;
+        let mut encoder = Encoder::new(enc_cfg);
+        let mut decoder = Decoder::new(data.len(), k, config);
+        decoder.config.packets_per_burst = packets_per_burst;
+
+        let params = FountainParams::new(k, PAYLOAD_SIZE);
+        let mut fountain_encoder = FountainEncoder::new(&data, params);
+        let mut packets = Vec::with_capacity(packets_per_burst);
+        for _ in 0..packets_per_burst {
+            packets.push(fountain_encoder.next_packet());
+        }
+
+        let mut signal = encoder.encode_burst(&packets);
+        signal.extend(encoder.flush());
+        signal.extend(vec![0.0f32; 1024]);
+
+        for chunk in signal.chunks(2048) {
+            decoder.process_samples(chunk);
+        }
+        let final_progress = decoder.process_samples(&[]);
+
+        assert!(final_progress.complete);
+        assert_eq!(final_progress.synced_frames, 1);
+        assert_eq!(final_progress.crc_error_packets, 0);
+        assert_eq!(final_progress.parse_error_packets, 0);
+        assert_eq!(
+            final_progress.received_packets, packets_per_burst,
+            "completed burst should count every packet in the frame"
         );
     }
 }
