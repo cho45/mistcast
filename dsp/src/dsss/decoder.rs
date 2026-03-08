@@ -2002,7 +2002,8 @@ mod tests {
         assert!(
             (decoder.agc_peak_fast - 0.5).abs() < 1e-6,
             "agc_peak_fast must be reset to default: before={}, after={}",
-            before_fast, decoder.agc_peak_fast
+            before_fast,
+            decoder.agc_peak_fast
         );
         assert!(
             (decoder.agc_peak_slow - 0.5).abs() < 1e-6,

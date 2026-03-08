@@ -210,7 +210,7 @@ pub fn calculate_info_bit_rate(cli: &Cli) -> f32 {
             // DSSS SF は M系列の長さ (2^order - 1)
             let sf = ((1 << cli.mseq_order) - 1) as f32;
             let bits_per_symbol = 2.0; // DQPSK
-            // DSSS インターリーバは 16x22 = 352 bits
+                                       // DSSS インターリーバは 16x22 = 352 bits
             let interleaved_bits = 352.0;
 
             let symbol_rate = chip_rate / sf;
@@ -427,11 +427,7 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                         progress.received_packets,
                         progress.crc_error_packets,
                     );
-                    m.add_recovery_event(
-                        m.total_sim_sec - last_reset_sec,
-                        errs,
-                        payload.len() * 8,
-                    );
+                    m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
 
                     decoder.reset_fountain_decoder();
                     last_reset_sec = m.total_sim_sec;
@@ -643,9 +639,13 @@ mod tests {
         let mut cli_mary = dummy_cli(Phy::Mary);
         cli_mary.chip_rate = 8000.0;
         let rb_mary = calculate_info_bit_rate(&cli_mary);
-        
+
         // 期待値: (8000 / 16) * 6 * (128 / 348) = 1103.448 bps
-        assert!((rb_mary - 1103.448).abs() < 0.01, "Mary bit rate mismatch: expected 1103.448, got {}", rb_mary);
+        assert!(
+            (rb_mary - 1103.448).abs() < 0.01,
+            "Mary bit rate mismatch: expected 1103.448, got {}",
+            rb_mary
+        );
 
         // --- DSSS 8000 cps, Order=4 (SF=15), DQPSK, 128/352 FEC ---
         let mut cli_dsss = dummy_cli(Phy::Dsss);
@@ -654,7 +654,11 @@ mod tests {
         let rb_dsss = calculate_info_bit_rate(&cli_dsss);
 
         // 期待値: (8000 / 15) * 2 * (128 / 352) = 387.878 bps
-        assert!((rb_dsss - 387.878).abs() < 0.01, "DSSS bit rate mismatch: expected 387.878, got {}", rb_dsss);
+        assert!(
+            (rb_dsss - 387.878).abs() < 0.01,
+            "DSSS bit rate mismatch: expected 387.878, got {}",
+            rb_dsss
+        );
     }
 
     #[test]

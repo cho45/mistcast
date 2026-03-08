@@ -181,7 +181,6 @@ pub fn snr_db_to_ebn0_db(snr_db: f32, bandwidth: f32, rb: f32) -> f32 {
     snr_db + 10.0 * (bandwidth / rb).log10()
 }
 #[cfg(test)]
-
 mod tests {
     use super::*;
     use rand::SeedableRng;
@@ -238,7 +237,7 @@ mod tests {
 
         for &s in &samples {
             // 元が 1.0 なので、結果は 1.0 - depth (0.5) から 1.0 の範囲にあるはず
-            assert!(s >= 0.5 && s <= 1.0, "Fading value out of range: {}", s);
+            assert!((0.5..=1.0).contains(&s), "Fading value out of range: {}", s);
         }
     }
 
@@ -322,7 +321,7 @@ mod tests {
     fn test_ebn0_snr_conversion() {
         let bandwidth = 48000.0;
         let rb = 1200.0; // 1/40 bit rate
-        // bandwidth/rb = 40. 10*log10(40) = 16.02 dB
+                         // bandwidth/rb = 40. 10*log10(40) = 16.02 dB
 
         let ebn0 = 10.0;
         let snr = ebn0_db_to_snr_db(ebn0, bandwidth, rb);
@@ -332,5 +331,4 @@ mod tests {
         let ebn0_back = snr_db_to_ebn0_db(snr, bandwidth, rb);
         assert!((ebn0_back - ebn0).abs() < 1e-5);
     }
-
 }

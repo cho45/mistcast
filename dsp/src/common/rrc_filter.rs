@@ -139,7 +139,10 @@ impl RrcFilter {
     }
 
     /// 1サンプルを処理する (循環バッファによる畳み込み)
-    #[cfg_attr(all(target_arch = "wasm32", target_feature = "simd128"), allow(dead_code))]
+    #[cfg_attr(
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        allow(dead_code)
+    )]
     fn process_scalar_path(&mut self, sample: f32) -> f32 {
         let n = self.coeffs.len();
         let start = self.push_and_window_start(sample);
