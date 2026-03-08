@@ -24,7 +24,7 @@ make profile-native-dsss
 
 ### 動作
 
-- `dsp/target/release/dsss_e2e_eval` をビルドして実行
+- 既定で `dsp/target/profiling/dsss_e2e_eval` をビルドして実行
 - profiler は自動選択（`samply` → `perf` → なし）
 - 出力先: `dsp/eval/profiles/native/`
 
@@ -42,6 +42,12 @@ PROFILE_TOOL=none npm run profile:native:dsss
 
 ```bash
 TOTAL_SIM_SEC=30 npm run profile:native:dsss
+```
+
+- ビルドプロファイル指定（必要時）:
+
+```bash
+BUILD_PROFILE=release npm run profile:native:dsss
 ```
 
 ## 2. WASM (Node) の e2e プロファイル

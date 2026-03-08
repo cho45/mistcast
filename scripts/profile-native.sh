@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DSP_DIR="$ROOT/dsp"
-BIN="$DSP_DIR/target/release/dsss_e2e_eval"
+BUILD_PROFILE="${BUILD_PROFILE:-profiling}"
+BIN="$DSP_DIR/target/$BUILD_PROFILE/dsss_e2e_eval"
 OUT_DIR="${OUT_DIR:-$ROOT/dsp/eval/profiles/native}"
 PROFILE_TOOL="${PROFILE_TOOL:-auto}" # auto|samply|perf|none
 TOTAL_SIM_SEC="${TOTAL_SIM_SEC:-20}"
@@ -11,8 +12,8 @@ SAMPLY_SAVE_ONLY="${SAMPLY_SAVE_ONLY:-1}"
 
 mkdir -p "$OUT_DIR"
 
-echo "[profile-native] building dsss_e2e_eval (release)"
-cargo build --release --bin dsss_e2e_eval --manifest-path "$DSP_DIR/Cargo.toml" >/dev/null
+echo "[profile-native] building dsss_e2e_eval (profile=$BUILD_PROFILE)"
+cargo build --profile "$BUILD_PROFILE" --bin dsss_e2e_eval --manifest-path "$DSP_DIR/Cargo.toml" >/dev/null
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
