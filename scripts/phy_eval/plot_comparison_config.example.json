@@ -1,0 +1,31 @@
+[
+  {
+    "name": "dsss p1 8k 31",
+    "phy": "dsss",
+    "args": {
+      "sweep_awgn": "1.5,1.7,2.0,2,2,2.4,2.6,2.8,3.0",
+      "packets_per_frame": 1,
+      "mseq-order": 8,
+      "preamble-repeat": 4,
+      "chip-rate": 8000
+    }
+  },
+  {
+    "name": "dsss p1 2k 61",
+    "phy": "dsss",
+    "args": {
+      "sweep_awgn": "1.0,1.1,1.5,2.0,2.2,2.4,2.6,2.8,3.0",
+      "packets_per_frame": 1,
+      "preamble-repeat": 4,
+      "mseq-order": 6,
+      "chip-rate": 8000
+    }
+  },
+  {
+    "name": "dsss default",
+    "phy": "dsss",
+    "args": {
+      "sweep_awgn": "0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0"
+    }
+  }
+]
