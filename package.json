@@ -12,6 +12,7 @@
     "build:wasm:perf": "WASM_FLAVOR=both WASM_NO_OPT=0 node scripts/build-wasm.js",
     "build:wasm:base": "WASM_FLAVOR=base WASM_NO_OPT=1 node scripts/build-wasm.js",
     "build:wasm:simd": "WASM_FLAVOR=simd WASM_NO_OPT=1 node scripts/build-wasm.js",
+    "test:dsp:wasm:simd": "cd dsp && RUSTFLAGS='-C target-feature=+simd128' wasm-pack test --node",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:components": "vitest run src/**/*.component.test.ts",

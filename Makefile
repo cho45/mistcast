@@ -1,6 +1,6 @@
 # 音響通信DSPシステム (outer-kuiper) Makefile
 
-.PHONY: all test test-verbose build example clean check build-wasm dev build-all \
+.PHONY: all test test-verbose test-dsp-wasm-simd build example clean check build-wasm dev build-all \
 	phy-baseline phy-baseline-full phy-compare \
 	dsss-e2e-baseline dsss-e2e-baseline-full dsss-e2e-compare
 
@@ -36,6 +36,10 @@ test:
 test-verbose:
 	cd dsp && cargo test -- --nocapture
 	npm test -- --reporter=verbose
+
+# DSP wasm simd 単体テスト (wasm-bindgen-test)
+test-dsp-wasm-simd:
+	npm run test:dsp:wasm:simd
 # 個別モジュールのテスト
 test-mseq:
 	cd dsp && cargo test msequence::tests

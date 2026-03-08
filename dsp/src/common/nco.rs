@@ -124,6 +124,10 @@ impl Nco {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    use std::arch::wasm32::{v128, v128_store};
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    use wasm_bindgen_test::wasm_bindgen_test;
 
     #[test]
     fn test_nco_frequency() {
@@ -150,5 +154,75 @@ mod tests {
         let c = nco.step();
         assert!((c.re - 1.0).abs() < 1e-6);
         assert!(c.im.abs() < 1e-6);
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn unpack_interleaved_pair(v: v128) -> [Complex<f32>; 2] {
+        let mut lanes = [0.0f32; 4];
+        unsafe {
+            v128_store(lanes.as_mut_ptr() as *mut v128, v);
+        }
+        [
+            Complex::new(lanes[0], lanes[1]),
+            Complex::new(lanes[2], lanes[3]),
+        ]
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn assert_complex_close(a: Complex<f32>, b: Complex<f32>, eps: f32) {
+        assert!(
+            (a.re - b.re).abs() <= eps && (a.im - b.im).abs() <= eps,
+            "a=({:.8},{:.8}) b=({:.8},{:.8}) eps={}",
+            a.re,
+            a.im,
+            b.re,
+            b.im,
+            eps
+        );
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_nco_step8_interleaved_matches_scalar_step_once() {
+        let mut simd = Nco::new(-1234.5, 48_000.0);
+        let mut scalar = Nco::new(-1234.5, 48_000.0);
+
+        let (n0, n1, n2, n3) = simd.step8_interleaved();
+        let simd_vals = [
+            unpack_interleaved_pair(n0),
+            unpack_interleaved_pair(n1),
+            unpack_interleaved_pair(n2),
+            unpack_interleaved_pair(n3),
+        ];
+
+        for i in 0..8 {
+            let expected = scalar.step();
+            let pair = simd_vals[i / 2];
+            let actual = pair[i % 2];
+            assert_complex_close(actual, expected, 1e-6);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_nco_step8_interleaved_matches_scalar_step_over_many_blocks() {
+        let mut simd = Nco::new(789.25, 44_100.0);
+        let mut scalar = Nco::new(789.25, 44_100.0);
+
+        for _ in 0..300 {
+            let (n0, n1, n2, n3) = simd.step8_interleaved();
+            let simd_vals = [
+                unpack_interleaved_pair(n0),
+                unpack_interleaved_pair(n1),
+                unpack_interleaved_pair(n2),
+                unpack_interleaved_pair(n3),
+            ];
+            for i in 0..8 {
+                let expected = scalar.step();
+                let pair = simd_vals[i / 2];
+                let actual = pair[i % 2];
+                assert_complex_close(actual, expected, 2e-5);
+            }
+        }
     }
 }

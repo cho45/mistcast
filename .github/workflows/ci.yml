@@ -56,6 +56,9 @@ jobs:
       - name: Cargo Test
         run: cd dsp && cargo test --locked
 
+      - name: DSP WASM SIMD Unit Test
+        run: npm run test:dsp:wasm:simd
+
       - name: Build WASM
         run: WASM_MODE=normal npm run build:wasm
 
