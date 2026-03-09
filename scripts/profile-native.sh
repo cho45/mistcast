@@ -7,7 +7,9 @@ BUILD_PROFILE="${BUILD_PROFILE:-profiling}"
 BIN="$DSP_DIR/target/$BUILD_PROFILE/dsss_e2e_eval"
 OUT_DIR="${OUT_DIR:-$ROOT/dsp/eval/profiles/native}"
 PROFILE_TOOL="${PROFILE_TOOL:-auto}" # auto|samply|perf|none
-TOTAL_SIM_SEC="${TOTAL_SIM_SEC:-20}"
+PROFILE_PHY="${PROFILE_PHY:-mary}" # mary|dsss
+TOTAL_SIM_SEC="${TOTAL_SIM_SEC:-60}"
+MIN_SAMPLE_COUNT="${MIN_SAMPLE_COUNT:-1500}"
 SAMPLY_SAVE_ONLY="${SAMPLY_SAVE_ONLY:-1}"
 
 mkdir -p "$OUT_DIR"
@@ -18,7 +20,7 @@ cargo build --profile "$BUILD_PROFILE" --bin dsss_e2e_eval --manifest-path "$DSP
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 ARGS=(
-  --phy dsss
+  --phy "$PROFILE_PHY"
   --mode point
   --total-sim-sec "$TOTAL_SIM_SEC"
   --payload-bytes 64
@@ -52,16 +54,26 @@ echo "[profile-native] command: $BIN ${ARGS[*]}"
 
 case "$TOOL" in
   samply)
-    OUT_FILE="$OUT_DIR/dsss_e2e_${TIMESTAMP}.json"
+    OUT_FILE="$OUT_DIR/${PROFILE_PHY}_e2e_${TIMESTAMP}.json"
     SAMPLY_ARGS=(-o "$OUT_FILE")
     if [ "$SAMPLY_SAVE_ONLY" = "1" ]; then
       SAMPLY_ARGS+=(-s)
     fi
     samply record "${SAMPLY_ARGS[@]}" -- "$BIN" "${ARGS[@]}"
+    SAMPLE_COUNT="$(jq '.threads[0].samples.stack | map(select(. != null and . >= 0)) | length' "$OUT_FILE")"
+    if [ "${SAMPLE_COUNT:-0}" -lt "$MIN_SAMPLE_COUNT" ]; then
+      echo "[profile-native] sample count too small: ${SAMPLE_COUNT} (< ${MIN_SAMPLE_COUNT})" >&2
+      echo "[profile-native] hint: increase TOTAL_SIM_SEC (current=${TOTAL_SIM_SEC})" >&2
+      rm -f "$OUT_FILE"
+      exit 1
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      python3 "$ROOT/scripts/profile-native-summary.py" "$OUT_FILE" || true
+    fi
     echo "[profile-native] wrote: $OUT_FILE"
     ;;
   perf)
-    OUT_FILE="$OUT_DIR/dsss_e2e_${TIMESTAMP}.perf.data"
+    OUT_FILE="$OUT_DIR/${PROFILE_PHY}_e2e_${TIMESTAMP}.perf.data"
     PERF_FREQ="${PERF_FREQ:-999}"
     perf record -F "$PERF_FREQ" -g -o "$OUT_FILE" -- "$BIN" "${ARGS[@]}"
     echo "[profile-native] wrote: $OUT_FILE"

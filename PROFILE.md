@@ -25,6 +25,8 @@ make profile-native-dsss
 ### 動作
 
 - 既定で `dsp/target/profiling/dsss_e2e_eval` をビルドして実行
+- 既定 PHY は `mary`（`PROFILE_PHY` で変更可）
+- 既定 `TOTAL_SIM_SEC=60` で、1回計測でもサンプル数を確保しやすくしている
 - profiler は自動選択（`samply` → `perf` → なし）
 - 出力先: `dsp/eval/profiles/native/`
 
@@ -38,10 +40,23 @@ PROFILE_TOOL=perf npm run profile:native:dsss
 PROFILE_TOOL=none npm run profile:native:dsss
 ```
 
+- PHY 指定:
+
+```bash
+PROFILE_PHY=mary npm run profile:native:dsss
+PROFILE_PHY=dsss npm run profile:native:dsss
+```
+
 - 計測時間変更:
 
 ```bash
 TOTAL_SIM_SEC=30 npm run profile:native:dsss
+```
+
+- サンプル数下限（既定 1500）:
+
+```bash
+MIN_SAMPLE_COUNT=1000 npm run profile:native:dsss
 ```
 
 - ビルドプロファイル指定（必要時）:
@@ -96,6 +111,7 @@ BENCH_ITERS=50 BENCH_WARMUP_MIN_PAIRS=8 BENCH_WARMUP_MAX_PAIRS=30 npm run profil
 
 - `scripts/profile-native.sh` は `samply record -o <json>` を実行する。
 - 既定で `--save-only` を付けるため、record 後にローカルサーバは起動しない。
+- record 後に `scripts/profile-native-summary.py` で self 上位の関数名サマリを出力する（`atos` 使用）。
 - 出力ファイルを `samply` で開く:
 
 ```bash
