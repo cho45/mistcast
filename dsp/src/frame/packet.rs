@@ -82,14 +82,21 @@ impl Packet {
 
     /// パケットをバイト列にシリアライズする (CRCを末尾に付加)
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(PACKET_BYTES);
-        let lt_meta = Self::encode_lt_meta(self.lt_seq, self.lt_k as usize);
-        buf.extend_from_slice(&lt_meta);
-        buf.extend_from_slice(&self.payload);
-        let crc = crc::crc16(&buf);
-        buf.push((crc >> 8) as u8);
-        buf.push((crc & 0xFF) as u8);
+        let mut buf = Vec::new();
+        self.serialize_into(&mut buf);
         buf
+    }
+
+    /// パケットをバイト列にシリアライズする (CRCを末尾に付加, 出力バッファ再利用版)
+    pub fn serialize_into(&self, out: &mut Vec<u8>) {
+        out.clear();
+        out.reserve(PACKET_BYTES);
+        let lt_meta = Self::encode_lt_meta(self.lt_seq, self.lt_k as usize);
+        out.extend_from_slice(&lt_meta);
+        out.extend_from_slice(&self.payload);
+        let crc = crc::crc16(out);
+        out.push((crc >> 8) as u8);
+        out.push((crc & 0xFF) as u8);
     }
 
     /// バイト列からパケットをデシリアライズする

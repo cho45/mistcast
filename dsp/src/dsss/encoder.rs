@@ -41,6 +41,7 @@ pub struct Encoder {
     config: EncoderConfig,
     modulator: Modulator,
     interleaver: BlockInterleaver,
+    packet_bytes_buffer: Vec<u8>,
     raw_bits_buffer: Vec<u8>,
     fec_bits_buffer: Vec<u8>,
     padded_bits_buffer: Vec<u8>,
@@ -61,6 +62,7 @@ impl Encoder {
             config,
             modulator,
             interleaver: il,
+            packet_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             raw_bits_buffer: Vec::with_capacity(raw_bits_capacity),
             fec_bits_buffer: Vec::with_capacity(fec_bits_capacity),
             padded_bits_buffer: Vec::with_capacity(interleaved_bits_per_packet),
@@ -72,8 +74,8 @@ impl Encoder {
     fn fill_packet_bits_buffer(&mut self, packet: &FountainPacket) {
         let seq = (packet.seq % (u32::from(LT_SEQ_MAX) + 1)) as u16;
         let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
-        let pkt_bytes = pkt.serialize();
-        fec::bytes_to_bits_into(&pkt_bytes, &mut self.raw_bits_buffer);
+        pkt.serialize_into(&mut self.packet_bytes_buffer);
+        fec::bytes_to_bits_into(&self.packet_bytes_buffer, &mut self.raw_bits_buffer);
         fec::encode_into(&self.raw_bits_buffer, &mut self.fec_bits_buffer);
 
         // インターリーバの全スロットを埋めるようにパディング

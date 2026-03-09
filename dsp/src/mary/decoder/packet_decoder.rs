@@ -41,6 +41,7 @@ pub(crate) struct PacketDecodeBuffers {
     pub packet_llrs_buffer: Vec<f32>,
     pub deinterleave_buffer: Vec<f32>,
     pub erasure_llr_buffer: Vec<f32>,
+    pub llr_abs_scratch: Vec<f32>,
     pub fec_candidates_buffer: Vec<Vec<u8>>,
     pub decoded_bytes_buffer: Vec<u8>,
     pub fec_workspace: fec::FecDecodeWorkspace,
@@ -49,13 +50,16 @@ pub(crate) struct PacketDecodeBuffers {
 impl PacketDecodeBuffers {
     pub fn new() -> Self {
         let cap = interleaver_config::interleaved_bits();
+        let mut fec_workspace = fec::FecDecodeWorkspace::new();
+        fec_workspace.preallocate_for_llr_len(cap, 1);
         Self {
             packet_llrs_buffer: Vec::with_capacity(cap),
             deinterleave_buffer: Vec::with_capacity(cap),
             erasure_llr_buffer: Vec::with_capacity(cap),
+            llr_abs_scratch: Vec::with_capacity(cap),
             fec_candidates_buffer: Vec::new(),
             decoded_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
-            fec_workspace: fec::FecDecodeWorkspace::new(),
+            fec_workspace,
         }
     }
 
@@ -63,6 +67,7 @@ impl PacketDecodeBuffers {
         self.packet_llrs_buffer.clear();
         self.deinterleave_buffer.clear();
         self.erasure_llr_buffer.clear();
+        self.llr_abs_scratch.clear();
         self.fec_candidates_buffer.clear();
         self.decoded_bytes_buffer.clear();
     }
@@ -379,9 +384,10 @@ fn decode_single_llr_candidate(
             .resize(layout.interleaved_bits, 0.0);
         context.buffers.erasure_llr_buffer[..layout.interleaved_bits]
             .copy_from_slice(&context.buffers.deinterleave_buffer[..layout.interleaved_bits]);
-        apply_llr_erasure_quantile(
+        apply_llr_erasure_quantile_with_scratch(
             &mut context.buffers.erasure_llr_buffer[..layout.fec_bits],
             context.options.llr_erasure_quantile,
+            &mut context.buffers.llr_abs_scratch,
         );
         fec::decode_soft_list_into(
             &context.buffers.erasure_llr_buffer[..layout.fec_bits],
@@ -447,8 +453,19 @@ fn decode_packet(
     }
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
+    let mut scratch = Vec::new();
+    apply_llr_erasure_quantile_with_scratch(llrs, quantile, &mut scratch);
+}
+
+#[inline]
+pub(crate) fn apply_llr_erasure_quantile_with_scratch(
+    llrs: &mut [f32],
+    quantile: f32,
+    abs_vals: &mut Vec<f32>,
+) {
     if llrs.is_empty() {
         return;
     }
@@ -461,7 +478,9 @@ pub(crate) fn apply_llr_erasure_quantile(llrs: &mut [f32], quantile: f32) {
         return;
     }
 
-    let mut abs_vals = llrs.iter().map(|v| v.abs()).collect::<Vec<_>>();
+    abs_vals.clear();
+    abs_vals.reserve(llrs.len());
+    abs_vals.extend(llrs.iter().map(|v| v.abs()));
     abs_vals.sort_by(|a, b| a.total_cmp(b));
     let threshold_idx = erase_count.saturating_sub(1).min(abs_vals.len() - 1);
     let threshold = abs_vals[threshold_idx];

@@ -39,8 +39,10 @@ impl EncoderConfig {
 pub struct Encoder {
     config: EncoderConfig,
     modulator: Modulator,
+    interleaver: BlockInterleaver,
     fountain_encoder: Option<FountainEncoder>,
     // ゼロアロケーション用バッファプール
+    packet_bytes_buffer: Vec<u8>,
     raw_bits_buffer: Vec<u8>,
     fec_buffer: Vec<u8>,
     padded_buffer: Vec<u8>,
@@ -71,7 +73,12 @@ impl Encoder {
         Encoder {
             config,
             modulator,
+            interleaver: BlockInterleaver::new(
+                interleaver_config::INTERLEAVER_ROWS,
+                interleaver_config::INTERLEAVER_COLS,
+            ),
             fountain_encoder: None,
+            packet_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             raw_bits_buffer: Vec::with_capacity(PACKET_BYTES * 8),
             fec_buffer: Vec::with_capacity(fec_bits),
             padded_buffer: Vec::with_capacity(interleaved_size),
@@ -101,7 +108,12 @@ impl Encoder {
         Encoder {
             config,
             modulator,
+            interleaver: BlockInterleaver::new(
+                interleaver_config::INTERLEAVER_ROWS,
+                interleaver_config::INTERLEAVER_COLS,
+            ),
             fountain_encoder: None,
+            packet_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             raw_bits_buffer: Vec::with_capacity(PACKET_BYTES * 8),
             fec_buffer: Vec::with_capacity(fec_bits),
             padded_buffer: Vec::with_capacity(interleaved_size),
@@ -145,10 +157,12 @@ impl Encoder {
     }
 
     pub fn encode_burst_into(&mut self, packets: &[FountainPacket], out: &mut Vec<f32>) {
+        let interleaved_size = interleaver_config::interleaved_bits();
         self.burst_bits_buffer.clear();
         for packet in packets {
-            let bits = self.encode_packet_bits(packet);
-            self.burst_bits_buffer.extend_from_slice(&bits);
+            self.fill_packet_bits_buffer(packet);
+            self.burst_bits_buffer
+                .extend_from_slice(&self.interleaved_buffer[..interleaved_size]);
         }
         self.modulator_output.clear();
         self.modulator
@@ -159,29 +173,25 @@ impl Encoder {
 
     /// パケットをエンコードする
     pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
-        let bits = self.encode_packet_bits(packet);
+        self.fill_packet_bits_buffer(packet);
         self.modulator_output.clear();
         self.modulator
-            .encode_frame(&bits, &mut self.modulator_output);
+            .encode_frame(&self.interleaved_buffer, &mut self.modulator_output);
         self.modulator_output.clone()
     }
 
-    /// パケットをビット列にエンコードする（テスト用）
-    pub fn encode_packet_bits(&mut self, packet: &FountainPacket) -> Vec<u8> {
+    fn fill_packet_bits_buffer(&mut self, packet: &FountainPacket) {
         let seq = (packet.seq % (u32::from(u16::MAX) + 1)) as u16;
         let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
-        let pkt_bytes = pkt.serialize();
+        pkt.serialize_into(&mut self.packet_bytes_buffer);
 
         // FECエンコード（バッファ使用）
         self.raw_bits_buffer.clear();
-        fec::bytes_to_bits_into(&pkt_bytes, &mut self.raw_bits_buffer);
+        fec::bytes_to_bits_into(&self.packet_bytes_buffer, &mut self.raw_bits_buffer);
         self.fec_buffer.clear();
         fec::encode_into(&self.raw_bits_buffer, &mut self.fec_buffer);
 
-        // インターリーバのサイズ（interleaver_config使用）
-        let rows = interleaver_config::INTERLEAVER_ROWS; // 29
-        let cols = interleaver_config::INTERLEAVER_COLS; // 12
-        let interleaved_size = rows * cols; // 348 = fec_bits
+        let interleaved_size = interleaver_config::interleaved_bits(); // 348 = fec_bits
 
         // パディング（バッファ使用）
         self.padded_buffer.clear();
@@ -193,17 +203,16 @@ impl Encoder {
         scrambler.process_bits(&mut self.padded_buffer);
 
         // インターリーブ（インプレースAPI使用）
-        let interleaver = BlockInterleaver::new(rows, cols);
         self.interleaved_buffer.resize(interleaved_size, 0);
-        interleaver.interleave_in_place(
+        self.interleaver.interleave_in_place(
             &self.padded_buffer,
             &mut self.interleaved_buffer[..interleaved_size],
         );
+    }
 
-        // Maryシンボル境界（6ビット単位）に揃える
-        // 348は6で割り切れるのでパディング不要
-        self.interleaved_buffer.resize(interleaved_size, 0);
-
+    /// パケットをビット列にエンコードする（テスト用）
+    pub fn encode_packet_bits(&mut self, packet: &FountainPacket) -> Vec<u8> {
+        self.fill_packet_bits_buffer(packet);
         self.interleaved_buffer.clone()
     }
 

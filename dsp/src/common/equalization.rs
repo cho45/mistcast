@@ -371,6 +371,12 @@ impl FrequencyDomainEqualizer {
     pub fn process(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) -> usize {
         let initial_output_len = output.len();
         self.total_input_samples += input.len();
+        let buffered_after = self.buffer.len() + input.len();
+        if buffered_after >= self.fft_size {
+            let blocks = 1 + (buffered_after - self.fft_size) / self.step_size;
+            output.reserve(blocks * self.step_size);
+        }
+        self.buffer.reserve(input.len());
         self.buffer.extend_from_slice(input);
 
         while self.buffer.len() >= self.fft_size {

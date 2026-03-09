@@ -53,15 +53,15 @@ impl SignalPipeline {
             rrc_filter_i: RrcFilter::from_config(config),
             rrc_filter_q: RrcFilter::from_config(config),
             lo_nco,
-            sample_buffer_i: Vec::new(),
-            sample_buffer_q: Vec::new(),
+            sample_buffer_i: Vec::with_capacity(16_384),
+            sample_buffer_q: Vec::with_capacity(16_384),
             // ゼロアロケーションバッファ初期化
-            mix_buffer_i: Vec::with_capacity(4096),
-            mix_buffer_q: Vec::with_capacity(4096),
-            resample_buffer_i: Vec::with_capacity(6144),
-            resample_buffer_q: Vec::with_capacity(6144),
-            rrc_filtered_i: Vec::with_capacity(6144),
-            rrc_filtered_q: Vec::with_capacity(6144),
+            mix_buffer_i: Vec::with_capacity(16_384),
+            mix_buffer_q: Vec::with_capacity(16_384),
+            resample_buffer_i: Vec::with_capacity(16_384),
+            resample_buffer_q: Vec::with_capacity(16_384),
+            rrc_filtered_i: Vec::with_capacity(16_384),
+            rrc_filtered_q: Vec::with_capacity(16_384),
         }
     }
 
@@ -170,6 +170,8 @@ impl SignalPipeline {
             .process_block_in_place(&mut self.rrc_filtered_q);
 
         // 4. 出力バッファに追加
+        self.sample_buffer_i.reserve(self.rrc_filtered_i.len());
+        self.sample_buffer_q.reserve(self.rrc_filtered_q.len());
         self.sample_buffer_i.extend_from_slice(&self.rrc_filtered_i);
         self.sample_buffer_q.extend_from_slice(&self.rrc_filtered_q);
 

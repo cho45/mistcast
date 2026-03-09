@@ -132,6 +132,9 @@ fn packet_seq_from_bits(packet_bits: &[u8]) -> Option<u16> {
 pub struct BerAccumulator {
     expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
     expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+    register_packet_bytes: Arc<Mutex<Vec<u8>>>,
+    register_bits: Arc<Mutex<Vec<u8>>>,
+    register_fec_bits: Arc<Mutex<Vec<u8>>>,
     raw_bit_errors: Arc<Mutex<usize>>,
     raw_bits_compared: Arc<Mutex<usize>>,
     raw_error_runs: Arc<Mutex<usize>>,
@@ -159,6 +162,9 @@ impl BerAccumulator {
         Self {
             expected_fec_bits: Arc::new(Mutex::new(HashMap::new())),
             expected_packet_bits: Arc::new(Mutex::new(HashMap::new())),
+            register_packet_bytes: Arc::new(Mutex::new(Vec::with_capacity(PACKET_BYTES))),
+            register_bits: Arc::new(Mutex::new(Vec::with_capacity(PACKET_BYTES * 8))),
+            register_fec_bits: Arc::new(Mutex::new(Vec::with_capacity((PACKET_BYTES * 8 + 6) * 2))),
             raw_bit_errors: Arc::new(Mutex::new(0)),
             raw_bits_compared: Arc::new(Mutex::new(0)),
             raw_error_runs: Arc::new(Mutex::new(0)),
@@ -184,15 +190,21 @@ impl BerAccumulator {
         k: usize,
     ) {
         let pkt = Packet::new(seq, k, &packet.data);
-        let mut bits = Vec::new();
-        fec::bytes_to_bits_into(&pkt.serialize(), &mut bits);
-        let mut fec_encoded = Vec::new();
+        let mut packet_bytes = self.register_packet_bytes.lock().unwrap();
+        let mut bits = self.register_bits.lock().unwrap();
+        let mut fec_encoded = self.register_fec_bits.lock().unwrap();
+        pkt.serialize_into(&mut packet_bytes);
+        fec::bytes_to_bits_into(&packet_bytes, &mut bits);
         fec::encode_into(&bits, &mut fec_encoded);
-        self.expected_packet_bits.lock().unwrap().insert(seq, bits);
+
+        self.expected_packet_bits
+            .lock()
+            .unwrap()
+            .insert(seq, bits.clone());
         self.expected_fec_bits
             .lock()
             .unwrap()
-            .insert(seq, fec_encoded);
+            .insert(seq, fec_encoded.clone());
     }
 
     /// LLRコールバックを生成

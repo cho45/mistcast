@@ -218,6 +218,8 @@ impl Decoder {
         let scale = 15.0 / sf as f32;
         let tc = SyncDetector::THRESHOLD_COARSE_DEFAULT * scale;
         let tf = SyncDetector::THRESHOLD_FINE_DEFAULT * scale;
+        let mut fec_workspace = fec::FecDecodeWorkspace::new();
+        fec_workspace.preallocate_for_llr_len(fec_bits, 1);
 
         Decoder {
             resampler_i: Resampler::new_with_cutoff(
@@ -249,7 +251,7 @@ impl Decoder {
             deinterleave_buffer: Vec::with_capacity(fec_bits),
             decoded_bits_buffer: Vec::with_capacity(raw_bits),
             decoded_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
-            fec_workspace: fec::FecDecodeWorkspace::new(),
+            fec_workspace,
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
             config: dsp_config,

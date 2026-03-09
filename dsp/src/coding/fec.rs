@@ -245,6 +245,14 @@ impl FecDecodeWorkspace {
         }
     }
 
+    /// 期待するLLR長（coded bits）とリストサイズに対して事前確保する。
+    pub fn preallocate_for_llr_len(&mut self, llr_len: usize, list_size: usize) {
+        assert!(llr_len.is_multiple_of(2), "LLR列は偶数長であること");
+        let list_size = list_size.max(1);
+        let num_symbols = llr_len / 2;
+        self.ensure_capacity(num_symbols, list_size);
+    }
+
     pub fn decode_soft_into(&mut self, llrs: &[f32], out_bits: &mut Vec<u8>) {
         let mut reusable = std::mem::take(&mut self.reusable_candidates);
         self.decode_soft_list_into(llrs, 1, &mut reusable);
