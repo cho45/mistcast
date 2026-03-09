@@ -4,7 +4,7 @@
 
 use crate::coding::fec;
 use crate::coding::fountain::{FountainEncoder, FountainPacket};
-use crate::coding::interleaver::BlockInterleaver;
+use crate::coding::interleaver::AlgebraicInterleaver;
 use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::Packet;
 use crate::mary::interleaver_config;
@@ -19,8 +19,8 @@ use crate::DspConfig;
 pub struct EncoderConfig {
     pub fountain_k: usize,
     pub packets_per_sync_burst: usize,
-    pub il_rows: usize,
-    pub il_cols: usize,
+    pub il_n: usize,
+    pub il_q: usize,
     pub dsp: DspConfig,
 }
 
@@ -29,8 +29,8 @@ impl EncoderConfig {
         EncoderConfig {
             fountain_k: 10,
             packets_per_sync_burst: dsp.packets_per_burst,
-            il_rows: interleaver_config::INTERLEAVER_ROWS,
-            il_cols: interleaver_config::INTERLEAVER_COLS,
+            il_n: interleaver_config::INTERLEAVER_N,
+            il_q: interleaver_config::INTERLEAVER_Q,
             dsp,
         }
     }
@@ -169,9 +169,9 @@ impl Encoder {
         self.fec_buffer.extend_from_slice(&coded);
 
         // インターリーバのサイズ（interleaver_config使用）
-        let rows = interleaver_config::INTERLEAVER_ROWS; // 29
-        let cols = interleaver_config::INTERLEAVER_COLS; // 12
-        let interleaved_size = rows * cols; // 348 = fec_bits
+        let n = interleaver_config::INTERLEAVER_N;
+        let q = interleaver_config::INTERLEAVER_Q;
+        let interleaved_size = n; // 348 = fec_bits
 
         // パディング（バッファ使用）
         self.padded_buffer.clear();
@@ -183,7 +183,7 @@ impl Encoder {
         scrambler.process_bits(&mut self.padded_buffer);
 
         // インターリーブ（インプレースAPI使用）
-        let interleaver = BlockInterleaver::new(rows, cols);
+        let interleaver = AlgebraicInterleaver::new(n, q);
         self.interleaved_buffer.resize(interleaved_size, 0);
         interleaver.interleave_in_place(
             &self.padded_buffer,

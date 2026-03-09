@@ -11,7 +11,7 @@ use super::tracking::{
     TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_STEP_CLAMP,
 };
 use crate::coding::fec;
-use crate::coding::interleaver::BlockInterleaver;
+use crate::coding::interleaver::AlgebraicInterleaver;
 use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::Packet;
 use crate::mary::demodulator::Demodulator;
@@ -75,8 +75,8 @@ pub(crate) struct PacketDecodeRuntime<'a> {
 }
 
 struct DecodeLayout {
-    rows: usize,
-    cols: usize,
+    n: usize,
+    q: usize,
     interleaved_bits: usize,
     fec_bits: usize,
     payload_bits_len: usize,
@@ -282,13 +282,13 @@ fn decode_llrs(
 ) -> Option<Packet> {
     let p_bits_len = crate::frame::packet::PACKET_BYTES * 8;
     let fec_bits = interleaver_config::fec_bits();
-    let rows = interleaver_config::INTERLEAVER_ROWS;
-    let cols = interleaver_config::INTERLEAVER_COLS;
+    let n = interleaver_config::INTERLEAVER_N;
+    let q = interleaver_config::INTERLEAVER_Q;
     let interleaved_bits = interleaver_config::interleaved_bits();
     let packet_chunk_bits = interleaver_config::mary_aligned_bits();
     let layout = DecodeLayout {
-        rows,
-        cols,
+        n,
+        q,
         interleaved_bits,
         fec_bits,
         payload_bits_len: p_bits_len,
@@ -325,7 +325,7 @@ fn decode_single_llr_candidate(
     layout: &DecodeLayout,
     context: &mut DecodeCandidateContext<'_>,
 ) -> Result<Packet, PacketDecodeError> {
-    let interleaver = BlockInterleaver::new(layout.rows, layout.cols);
+    let interleaver = AlgebraicInterleaver::new(layout.n, layout.q);
     context
         .buffers
         .deinterleave_buffer
@@ -466,7 +466,7 @@ pub(crate) fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
 mod tests {
     use super::*;
     use crate::coding::fec;
-    use crate::coding::interleaver::BlockInterleaver;
+    
     use crate::coding::scrambler::Scrambler;
     use crate::frame::packet::{Packet, PACKET_BYTES};
     use crate::mary::demodulator::Demodulator;
@@ -486,8 +486,8 @@ mod tests {
 
     fn decode_layout() -> DecodeLayout {
         DecodeLayout {
-            rows: interleaver_config::INTERLEAVER_ROWS,
-            cols: interleaver_config::INTERLEAVER_COLS,
+            n: interleaver_config::INTERLEAVER_N,
+            q: interleaver_config::INTERLEAVER_Q,
             interleaved_bits: interleaver_config::interleaved_bits(),
             fec_bits: interleaver_config::fec_bits(),
             payload_bits_len: PACKET_BYTES * 8,
@@ -513,9 +513,9 @@ mod tests {
         let mut fec_bits = fec::encode(&bits);
         let mut scrambler = Scrambler::default();
         scrambler.process_bits(&mut fec_bits);
-        let interleaver = BlockInterleaver::new(
-            interleaver_config::INTERLEAVER_ROWS,
-            interleaver_config::INTERLEAVER_COLS,
+        let interleaver = AlgebraicInterleaver::new(
+            interleaver_config::INTERLEAVER_N,
+            interleaver_config::INTERLEAVER_Q,
         );
         interleaver.interleave(&fec_bits)
     }
