@@ -116,6 +116,11 @@ impl Modulator {
     ///
     /// 最後のシンボルを反転させることで同期の曖昧さを排除する。
     pub fn generate_preamble(&mut self, output: &mut Vec<f32>) {
+        self.build_preamble_chips();
+        self.convert_internal_chips_to_samples(output, false);
+    }
+
+    fn build_preamble_chips(&mut self) {
         let sf = self.config.preamble_sf; // DspConfig の設定を使用
         let repeat = self.config.preamble_repeat;
         self.chips_buffer_i.clear();
@@ -138,15 +143,15 @@ impl Modulator {
                 self.chips_buffer_q.push(sign * val.im);
             }
         }
-
-        // Clone to release mutable borrow
-        let chips_i: Vec<f32> = self.chips_buffer_i.clone();
-        let chips_q: Vec<f32> = self.chips_buffer_q.clone();
-        self.chips_to_samples(&chips_i, &chips_q, output);
     }
 
     /// 6ビットずつ変調（4ビットWalsh index + 2ビットDQPSK phase）
     pub fn modulate(&mut self, bits: &[u8], output: &mut Vec<f32>) {
+        self.build_payload_chips(bits);
+        self.convert_internal_chips_to_samples(output, false);
+    }
+
+    fn build_payload_chips(&mut self, bits: &[u8]) {
         let mut phase = self.prev_phase;
         let wdict = &self.wdict;
         Self::bits_to_chips(
@@ -157,10 +162,6 @@ impl Modulator {
             &mut self.chips_buffer_q,
         );
         self.prev_phase = phase;
-        // Clone to release mutable borrow of self.chips_buffer_*
-        let chips_i: Vec<f32> = self.chips_buffer_i.clone();
-        let chips_q: Vec<f32> = self.chips_buffer_q.clone();
-        self.chips_to_samples(&chips_i, &chips_q, output);
     }
 
     fn append_mary_symbol_chips(
@@ -222,11 +223,23 @@ impl Modulator {
 
     /// チップ列をRRC整形 + キャリア変調してサンプル列に変換
     pub fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32], output: &mut Vec<f32>) {
+        self.chips_to_samples_with_mode(chips_i, chips_q, output, false);
+    }
+
+    fn chips_to_samples_with_mode(
+        &mut self,
+        chips_i: &[f32],
+        chips_q: &[f32],
+        output: &mut Vec<f32>,
+        append: bool,
+    ) {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         self.chips_to_resampled_baseband(chips_i, chips_q);
 
         // 3. 出力レートでのキャリア混合 (Mix)
-        output.clear();
+        if !append {
+            output.clear();
+        }
         output.reserve(self.resample_buffer_i.len());
         for (&i_f, &q_f) in self
             .resample_buffer_i
@@ -236,6 +249,20 @@ impl Modulator {
             let lo = self.nco.step();
             output.push(i_f * lo.re - q_f * lo.im);
         }
+    }
+
+    fn convert_internal_chips_to_samples(&mut self, output: &mut Vec<f32>, append: bool) {
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        std::mem::swap(&mut chips_i, &mut self.chips_buffer_i);
+        std::mem::swap(&mut chips_q, &mut self.chips_buffer_q);
+
+        self.chips_to_samples_with_mode(&chips_i, &chips_q, output, append);
+
+        chips_i.clear();
+        chips_q.clear();
+        std::mem::swap(&mut chips_i, &mut self.chips_buffer_i);
+        std::mem::swap(&mut chips_q, &mut self.chips_buffer_q);
     }
 
     fn chips_to_resampled_baseband(&mut self, chips_i: &[f32], chips_q: &[f32]) {
@@ -353,28 +380,45 @@ impl Modulator {
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8], output: &mut Vec<f32>) {
         self.prev_phase = 0; // フレーム開始時にリセット
+        output.clear();
+        output.reserve(self.estimate_frame_samples(bits.len()));
 
-        // プリアンブル生成 (temp buffer 使用)
-        let mut preamble_buf = Vec::new();
-        self.generate_preamble(&mut preamble_buf);
+        // プリアンブル
+        self.build_preamble_chips();
+        self.convert_internal_chips_to_samples(output, true);
 
         // 同期ワード (DBPSK, Walsh[0], sf=SYNC_SPREAD_FACTOR)
-        let sync_bits: Vec<u8> = (0..self.config.sync_word_bits)
-            .rev()
-            .map(|i| ((SYNC_WORD >> i) & 1) as u8)
-            .collect();
+        self.build_sync_word_chips();
+        self.convert_internal_chips_to_samples(output, true);
 
-        // 同期ワード (DBPSK) - chips_buffer を再利用
+        // データ (MaryDQPSK)
+        self.build_payload_chips(bits);
+        self.convert_internal_chips_to_samples(output, true);
+    }
+
+    fn estimate_frame_samples(&self, bits_len: usize) -> usize {
+        let payload_symbols = bits_len.div_ceil(6);
+        let payload_chips = payload_symbols * params::PAYLOAD_SPREAD_FACTOR;
+        let preamble_chips = self.config.preamble_sf * self.config.preamble_repeat;
+        let sync_chips = self.config.sync_word_bits * params::SYNC_SPREAD_FACTOR;
+        let total_chips = preamble_chips + sync_chips + payload_chips;
+        let ratio = self.config.sample_rate / self.config.proc_sample_rate();
+        ((total_chips * INTERNAL_SPC) as f32 * ratio).ceil() as usize + 64
+    }
+
+    fn build_sync_word_chips(&mut self) {
+        // 同期ワード (DBPSK, Walsh[0], sf=SYNC_SPREAD_FACTOR)
         self.chips_buffer_i.clear();
         self.chips_buffer_q.clear();
         let walsh_seq = &self.wdict.w16[0];
         let sf_sync = params::SYNC_SPREAD_FACTOR;
-        let sync_chips_needed = sync_bits.len() * sf_sync;
+        let sync_chips_needed = self.config.sync_word_bits * sf_sync;
         if self.chips_buffer_i.capacity() < sync_chips_needed {
             self.chips_buffer_i.reserve(sync_chips_needed);
             self.chips_buffer_q.reserve(sync_chips_needed);
         }
-        for &bit in &sync_bits {
+        for i in (0..self.config.sync_word_bits).rev() {
+            let bit = ((SYNC_WORD >> i) & 1) as u8;
             let delta = if bit == 0 { 0 } else { 2 };
             self.prev_phase = (self.prev_phase + delta) & 0x03;
             let (si, sq) = phase_to_iq(self.prev_phase);
@@ -384,23 +428,6 @@ impl Modulator {
                 self.chips_buffer_q.push(sq * w_val);
             }
         }
-        let mut sync_samples_buf = Vec::new();
-        // Clone to release mutable borrow
-        let sync_chips_i: Vec<f32> = self.chips_buffer_i.clone();
-        let sync_chips_q: Vec<f32> = self.chips_buffer_q.clone();
-        self.chips_to_samples(&sync_chips_i, &sync_chips_q, &mut sync_samples_buf);
-
-        // データ (MaryDQPSK)
-        let mut data_samples_buf = Vec::new();
-        self.modulate(bits, &mut data_samples_buf);
-
-        // 結合
-        output.clear();
-        let total_len = preamble_buf.len() + sync_samples_buf.len() + data_samples_buf.len() + 100;
-        output.reserve(total_len);
-        output.extend_from_slice(&preamble_buf);
-        output.extend_from_slice(&sync_samples_buf);
-        output.extend_from_slice(&data_samples_buf);
     }
 
     /// 変調器の状態をリセット
