@@ -145,9 +145,207 @@ impl BlockInterleaver {
     }
 }
 
+/// 代数インターリーバー (Algebraic / Prime Interleaver)
+/// 
+/// `i_out = (i_in * q) % N` の数式を用いてマッピングを行う。
+/// N と q は互いに素である必要がある。
+pub struct AlgebraicInterleaver {
+    n: usize,
+    q: usize,
+    q_inv: usize,
+}
+
+impl AlgebraicInterleaver {
+    /// サイズ `n`、ステップ `q` の代数インターリーバを作成する
+    ///
+    /// # パニック
+    /// `n` と `q` が互いに素でない場合、または `n == 0` の場合にパニックする
+    pub fn new(n: usize, q: usize) -> Self {
+        assert!(n > 0, "size must be greater than 0");
+        
+        // 互いに素であることの確認と、モジュラ逆元の計算 (拡張ユークリッドの互除法)
+        let mut t_new = 1isize;
+        let mut t_old = 0isize;
+        let mut r_new = q as isize;
+        let mut r_old = n as isize;
+        
+        while r_new != 0 {
+            let quotient = r_old / r_new;
+            
+            let t_temp = t_old - quotient * t_new;
+            t_old = t_new;
+            t_new = t_temp;
+            
+            let r_temp = r_old - quotient * r_new;
+            r_old = r_new;
+            r_new = r_temp;
+        }
+        
+        assert!(r_old == 1, "n and q must be coprime");
+        
+        let mut q_inv = t_old;
+        if q_inv < 0 {
+            q_inv += n as isize;
+        }
+        
+        AlgebraicInterleaver {
+            n,
+            q,
+            q_inv: q_inv as usize,
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.n
+    }
+    
+    pub fn q(&self) -> usize {
+        self.q
+    }
+
+    /// インターリーブ処理 (送信側)
+    pub fn interleave(&self, bits: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; self.n];
+        for i in 0..self.n {
+            let src_idx = (i * self.q) % self.n;
+            if src_idx < bits.len() {
+                out[i] = bits[src_idx];
+            }
+        }
+        out
+    }
+
+    /// インターリーブ処理 (送信側, インプレース版)
+    pub fn interleave_in_place(&self, input: &[u8], output: &mut [u8]) {
+        assert!(output.len() >= self.n, "output buffer too small");
+        for i in 0..self.n {
+            let src_idx = (i * self.q) % self.n;
+            if src_idx < input.len() {
+                output[i] = input[src_idx];
+            } else {
+                output[i] = 0;
+            }
+        }
+    }
+
+    /// デインターリーブ処理 (受信側)
+    pub fn deinterleave(&self, bits: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; self.n];
+        for i in 0..self.n {
+            let src_idx = (i * self.q_inv) % self.n;
+            if src_idx < bits.len() {
+                out[i] = bits[src_idx];
+            }
+        }
+        out
+    }
+
+    /// デインターリーブ処理 (受信側, インプレース版)
+    pub fn deinterleave_in_place(&self, input: &[u8], output: &mut [u8]) {
+        assert!(output.len() >= self.n, "output buffer too small");
+        for i in 0..self.n {
+            let src_idx = (i * self.q_inv) % self.n;
+            if src_idx < input.len() {
+                output[i] = input[src_idx];
+            } else {
+                output[i] = 0;
+            }
+        }
+    }
+
+    /// デインターリーブ処理 (受信側, f32値)
+    pub fn deinterleave_f32(&self, values: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.n];
+        for i in 0..self.n {
+            let src_idx = (i * self.q_inv) % self.n;
+            if src_idx < values.len() {
+                out[i] = values[src_idx];
+            }
+        }
+        out
+    }
+
+    /// デインターリーブ処理 (受信側, f32値, インプレース版)
+    pub fn deinterleave_f32_in_place(&self, input: &[f32], output: &mut [f32]) {
+        assert!(output.len() >= self.n, "output buffer too small");
+        for i in 0..self.n {
+            let src_idx = (i * self.q_inv) % self.n;
+            if src_idx < input.len() {
+                output[i] = input[src_idx];
+            } else {
+                output[i] = 0.0;
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {}
+
+    pub fn block_size(&self) -> usize {
+        self.n
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_algebraic_roundtrip() {
+        let il = AlgebraicInterleaver::new(348, 55);
+        let input: Vec<u8> = (0..255).chain(0..93).collect();
+        let interleaved = il.interleave(&input);
+        let recovered = il.deinterleave(&interleaved);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn test_algebraic_f32_roundtrip() {
+        let il = AlgebraicInterleaver::new(348, 55);
+        let input: Vec<f32> = (0..348).map(|i| i as f32 * 0.1).collect();
+        
+        // Manual interleave for test setup
+        let mut interleaved = vec![0.0f32; 348];
+        for i in 0..348 {
+            interleaved[i] = input[(i * 55) % 348];
+        }
+        
+        let recovered = il.deinterleave_f32(&interleaved);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn test_algebraic_interleave_in_place() {
+        let il = AlgebraicInterleaver::new(348, 55);
+        let input: Vec<u8> = (0..255).chain(0..93).collect();
+
+        let expected = il.interleave(&input);
+
+        let mut output = vec![0u8; 348];
+        il.interleave_in_place(&input, &mut output);
+
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_algebraic_deinterleave_in_place() {
+        let il = AlgebraicInterleaver::new(348, 55);
+        let input: Vec<u8> = (0..255).chain(0..93).collect();
+
+        let interleaved = il.interleave(&input);
+        let expected = il.deinterleave(&interleaved);
+
+        let mut output = vec![0u8; 348];
+        il.deinterleave_in_place(&interleaved, &mut output);
+
+        assert_eq!(output, expected);
+    }
+    
+    #[test]
+    #[should_panic(expected = "n and q must be coprime")]
+    fn test_algebraic_not_coprime() {
+        // 348 and 12 are not coprime (gcd = 12)
+        AlgebraicInterleaver::new(348, 12);
+    }
 
     #[test]
     fn test_roundtrip() {
