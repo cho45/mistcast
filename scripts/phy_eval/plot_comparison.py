@@ -4,11 +4,51 @@ import json
 import matplotlib.pyplot as plt
 import sys
 import os
-import re
 import math
 
+plt.rcParams["font.family"] = "Noto Sans JP"
+plt.rcParams["axes.unicode_minus"] = False
+
+X_AXIS_METRIC = "cn0_db"
+X_AXIS_LABEL = "C/N0 (dB-Hz)"
+
+def add_cn0_reference(fig):
+    """図の下部に C/N0 の目安テーブルを表示する。"""
+    col_labels = ["C/N0", "状態", "例"]
+    rows = [
+        ["20〜30 dB-Hz", "受信限界", "弱いGNSS"],
+        ["30〜40 dB-Hz", "非常に弱い", "屋内GNSS / LoRa(下限)"],
+        ["40〜55 dB-Hz", "低SNR通信", "GNSS通常 / DSSS / LoRa(一般)"],
+        ["55〜70 dB-Hz", "中品質通信", "衛星通信・放送(低〜中MODCOD)"],
+        ["70〜90 dB-Hz", "高品質通信", "FM(高品位) / 衛星TV(高MODCOD)"],
+        ["80〜100 dB-Hz", "セルラー広帯域", "LTE(帯域・MCS依存)"],
+        ["95〜115 dB-Hz", "超広帯域高速", "Wi-Fi(高MCS)"],
+    ]
+
+    ax = fig.add_axes([0.05, 0.02, 0.90, 0.18])
+    ax.axis("off")
+    ax.text(0.0, 1.05, "C/N0 目安（概算）", ha="left", va="bottom", fontsize=10, transform=ax.transAxes)
+
+    table = ax.table(
+        cellText=rows,
+        colLabels=col_labels,
+        cellLoc="left",
+        colLoc="left",
+        colWidths=[0.22, 0.20, 0.58],
+        loc="upper left",
+        bbox=[0.0, 0.0, 1.0, 1.0],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+
+    for (r, _), cell in table.get_celld().items():
+        cell.set_edgecolor("lightgray")
+        cell.set_linewidth(0.6)
+        if r == 0:
+            cell.set_facecolor("#f1f3f4")
+
 def run_eval(phy, packets_per_frame="3", sweep_awgn="0.2,0.3,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.8,0.85,0.9,0.95,1.0,1.2",
-             columns="scenario,crc_pass_ratio,goodput_effective_bps,goodput_success_mean_bps,ebn0_db,raw_ber",
+             columns="scenario,crc_pass_ratio,goodput_effective_bps,goodput_success_mean_bps,ebn0_db,cn0_db,raw_ber",
              mode="sweep-awgn", **extra_args):
     """指定された PHY で評価を実行し、JSON 結果を返す
 
@@ -20,14 +60,28 @@ def run_eval(phy, packets_per_frame="3", sweep_awgn="0.2,0.3,0.35,0.40,0.45,0.50
         mode: 評価モード
         **extra_args: その他のコマンドライン引数 (例: --some-flag, --key=value)
     """
+    required_columns = [
+        "scenario",
+        X_AXIS_METRIC,
+        "goodput_effective_bps",
+        "goodput_success_mean_bps",
+        "crc_pass_ratio",
+        "raw_ber",
+    ]
+    requested_columns = [col.strip() for col in str(columns).split(",") if col.strip()]
+    for col in required_columns:
+        if col not in requested_columns:
+            requested_columns.append(col)
+    merged_columns = ",".join(requested_columns)
+
     cmd = [
         "cargo", "run", "--release", "--bin", "dsss_e2e_eval", "--",
         "--phy", phy,
         "--mode", mode,
         "--packets-per-frame", str(packets_per_frame),
         "--sweep-awgn", str(sweep_awgn),
-        "--columns", str(columns),
-        "--total-sim-sec", "10",
+        "--columns", merged_columns,
+        "--total-sim-sec", "30",
         "--output", "json"
     ]
 
@@ -128,28 +182,27 @@ def main():
         ('raw_ber', 'Raw BER', axes[1, 1]),
     ]
 
-    # 全データから sigma の最小値・最大値を取得
-    all_sigma_values = []
+    # 全データから x軸メトリクスの最小値・最大値を取得
+    all_x_values = []
     for case_name in case_names:
         for point in results[case_name]:
-            scenario = point.get('scenario', '')
-            match = re.search(r'sigma=([\d.]+)', scenario)
-            if match:
-                sigma = float(match.group(1))
-                all_sigma_values.append(sigma)
+            x_val = point.get(X_AXIS_METRIC)
+            if isinstance(x_val, (int, float)) and math.isfinite(x_val):
+                all_x_values.append(float(x_val))
 
-    if all_sigma_values:
-        sigma_min = min(all_sigma_values)
-        sigma_max = max(all_sigma_values)
-        # dB に変換（ノイズが多いほど dB が大きい）
-        db_min = 20 * math.log10(sigma_min)
-        db_max = 20 * math.log10(sigma_max)
+    if all_x_values:
+        x_min = min(all_x_values)
+        x_max = max(all_x_values)
         # 少し余裕を持たせる
-        db_margin = (db_max - db_min) * 0.05
-        db_min -= db_margin
-        db_max += db_margin
+        if x_min == x_max:
+            x_margin = max(1.0, abs(x_min) * 0.05)
+        else:
+            x_margin = (x_max - x_min) * 0.05
+        x_min -= x_margin
+        x_max += x_margin
     else:
-        db_min, db_max = -20, 0
+        x_min, x_max = 0, 1
+        print(f"Warning: no finite '{X_AXIS_METRIC}' values found; using fallback x-axis range.", file=sys.stderr)
 
     for metric, ylabel, ax in metrics:
         # 各ケースのデータを収集
@@ -157,16 +210,13 @@ def main():
         for case_name in case_names:
             data_points = []
             for point in results[case_name]:
-                scenario = point.get('scenario', '')
-                match = re.search(r'sigma=([\d.]+)', scenario)
-                if match:
-                    sigma = float(match.group(1))
-                    # dB に変換（ノイズが多いほど dB が大きい）
-                    db = 20 * math.log10(sigma)
-                    metric_val = point.get(metric, 0)
-                    data_points.append((db, metric_val))
+                x_val = point.get(X_AXIS_METRIC)
+                metric_val = point.get(metric)
+                if isinstance(x_val, (int, float)) and isinstance(metric_val, (int, float)):
+                    if math.isfinite(x_val) and math.isfinite(metric_val):
+                        data_points.append((float(x_val), float(metric_val)))
 
-            # dB でソート
+            # x軸値でソート
             data_points.sort()
             if data_points:
                 x_vals, y_vals = zip(*data_points)
@@ -178,13 +228,14 @@ def main():
             color = colors[i % len(colors)]
             ax.plot(x_vals, y_vals, marker='o', label=case_name, linewidth=2, markersize=6, color=color)
 
-        ax.set_xlim(db_min, db_max)
-        ax.set_xlabel('Noise Level (dB)', fontsize=11)
+        ax.set_xlim(x_min, x_max)
+        ax.set_xlabel(X_AXIS_LABEL, fontsize=11)
         ax.set_ylabel(ylabel, fontsize=11)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=10)
 
-    plt.tight_layout()
+    add_cn0_reference(fig)
+    plt.tight_layout(rect=[0.02, 0.24, 0.995, 0.92])
 
     # 出力先のディレクトリが存在することを確認
     os.makedirs('docs', exist_ok=True)

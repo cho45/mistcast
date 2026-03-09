@@ -822,7 +822,7 @@ mod tests {
             preamble_repeat: 2,
             packets_per_frame: 1,
             preamble_sf: 127,
-            mary_fde_mode: MaryFdeMode::On,
+            mary_fde_mode: MaryFdeMode::Auto,
             mary_fde_snr_db: 15.0,
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,

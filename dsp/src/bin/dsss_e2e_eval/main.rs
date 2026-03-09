@@ -23,6 +23,7 @@ define_metrics! {
     mary_fde_mode,                 "Mary の FDE モード",                           |ctx, _| ctx.mary_fde_mode.into(), default;
     total_sim_sec,                 "評価に含めた受信サンプルの総時間 [sec]",        |_, m| m.total_sim_sec.into(), default;
     ebn0_db,                       "AWGN 仮定から換算した理論 Eb/N0 [dB]",         |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_ebn0_db(snr, ctx.sample_rate, ctx.bit_rate)).into(), default;
+    cn0_db,                        "AWGN 仮定から換算した理論 C/N0 [dB-Hz]",        |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| snr + 10.0 * ctx.sample_rate.log10()).into(), default;
     snr_wideband_db,               "AWGN 仮定での受信全帯域 SNR [dB]",             |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
     packet_accept_ratio,           "受理パケット率 = accepted_packets / 全送信packet数",|_, m| m.packet_accept_ratio().into(), default;
     ber,                           "復元成功 payload に対する事後 BER",             |_, m| m.ber().into(), default;
@@ -120,7 +121,7 @@ pub struct Cli {
     pub packets_per_frame: usize,
     #[arg(long = "preamble-sf", default_value_t = dsp::params::PREAMBLE_SF)]
     pub preamble_sf: usize,
-    #[arg(long = "mary-fde", value_enum, default_value_t = MaryFdeMode::On)]
+    #[arg(long = "mary-fde", value_enum, default_value_t = MaryFdeMode::Auto)]
     pub mary_fde_mode: MaryFdeMode,
     #[arg(long = "mary-fde-snr-db", default_value_t = 15.0)]
     pub mary_fde_snr_db: f32,
@@ -260,7 +261,59 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{MetricContext, MetricValue, Metrics};
     use crate::runner::{run_trial_dsss_e2e, run_trial_mary_e2e};
+
+    fn metric_float(def_id: &str, ctx: &MetricContext, metrics: &Metrics) -> Option<f32> {
+        let def = METRICS_DEFS.iter().find(|d| d.id == def_id)?;
+        match (def.extractor)(ctx, metrics) {
+            MetricValue::Float(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_cn0_db_formula_and_consistency() {
+        let sigma = 0.2f32;
+        let sample_rate = 48_000.0f32;
+        let bit_rate = 1_000.0f32;
+
+        let mut m = Metrics::new(1);
+        // tx_signal_power = 1000 / 2000 = 0.5
+        m.total_tx_signal_energy = 1000.0;
+        m.total_tx_signal_samples = 2000;
+
+        let ctx = MetricContext {
+            scenario: "test",
+            phy: "dsss",
+            mary_fde_mode: "on",
+            payload_bits: 128,
+            sigma,
+            multipath_name: "none",
+            sample_rate,
+            bit_rate,
+        };
+
+        let snr_db = metric_float("snr_wideband_db", &ctx, &m).expect("snr_wideband_db");
+        let cn0_db = metric_float("cn0_db", &ctx, &m).expect("cn0_db");
+        let ebn0_db = metric_float("ebn0_db", &ctx, &m).expect("ebn0_db");
+
+        let expected_cn0 = snr_db + 10.0 * sample_rate.log10();
+        assert!((cn0_db - expected_cn0).abs() < 1e-4);
+
+        let expected_ebn0 = snr_db + 10.0 * (sample_rate / bit_rate).log10();
+        assert!((ebn0_db - expected_ebn0).abs() < 1e-4);
+
+        // C/N0 = Eb/N0 + 10log10(Rb)
+        let expected_delta = 10.0 * bit_rate.log10();
+        assert!(((cn0_db - ebn0_db) - expected_delta).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_cli_default_mary_fde_mode_is_auto() {
+        let cli = Cli::parse_from(["dsss_e2e_eval"]);
+        assert_eq!(cli.mary_fde_mode, MaryFdeMode::Auto);
+    }
 
     #[test]
     fn test_e2e_dsss_smoke() {
@@ -292,7 +345,7 @@ mod tests {
             preamble_repeat: 2,
             packets_per_frame: 1,
             preamble_sf: 13,
-            mary_fde_mode: MaryFdeMode::On,
+            mary_fde_mode: MaryFdeMode::Auto,
             mary_fde_snr_db: 15.0,
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,
@@ -343,7 +396,7 @@ mod tests {
             preamble_repeat: 2,
             packets_per_frame: 1,
             preamble_sf: 13,
-            mary_fde_mode: MaryFdeMode::On,
+            mary_fde_mode: MaryFdeMode::Auto,
             mary_fde_snr_db: 15.0,
             mary_fde_lambda_scale: 1.0,
             mary_fde_lambda_floor: 0.0,
