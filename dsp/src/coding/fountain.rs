@@ -1,5 +1,6 @@
 //! Fountain coding module backed by non-systematic RLNC over GF(256).
 
+use crate::params::PAYLOAD_SIZE;
 use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
@@ -211,6 +212,33 @@ impl FountainDecoder {
         }
     }
 
+    /// 固定長 payload を直接受け取る高速経路。
+    /// block_size が PAYLOAD_SIZE の場合に、受信ごとの data Vec 確保を避ける。
+    pub fn receive_payload_array_with_outcome(
+        &mut self,
+        seq: u32,
+        coefficients: Vec<u8>,
+        data: [u8; PAYLOAD_SIZE],
+    ) -> ReceiveOutcome {
+        if self.params.block_size != PAYLOAD_SIZE
+            || coefficients.len() != self.params.k
+            || coefficients.iter().all(|&x| x == 0)
+        {
+            return ReceiveOutcome::InvalidPacket;
+        }
+
+        if !self.seen_seq.insert(seq) {
+            return ReceiveOutcome::DuplicateSeq;
+        }
+
+        let rank_up = self.insert_row_array(coefficients, data);
+        if rank_up {
+            ReceiveOutcome::AcceptedRankUp
+        } else {
+            ReceiveOutcome::AcceptedNoRankUp
+        }
+    }
+
     pub fn receive(&mut self, packet: FountainPacket) {
         let _ = self.receive_with_outcome(packet);
     }
@@ -251,6 +279,50 @@ impl FountainDecoder {
         }
 
         self.basis[pivot_col] = Some(BasisRow { coeffs, data });
+        self.current_rank += 1;
+        true
+    }
+
+    fn insert_row_array(&mut self, mut coeffs: Vec<u8>, mut data: [u8; PAYLOAD_SIZE]) -> bool {
+        let k = self.params.k;
+
+        for col in 0..k {
+            if coeffs[col] == 0 {
+                continue;
+            }
+            if let Some(pivot_row) = self.basis[col].as_ref() {
+                let factor = coeffs[col];
+                row_axpy(&mut coeffs, &pivot_row.coeffs, factor);
+                row_axpy(&mut data, &pivot_row.data, factor);
+            }
+        }
+
+        let Some(pivot_col) = coeffs.iter().position(|&c| c != 0) else {
+            return false;
+        };
+
+        let inv = gf_inv(coeffs[pivot_col]);
+        row_scale(&mut coeffs, inv);
+        row_scale(&mut data, inv);
+
+        for other_col in 0..k {
+            if other_col == pivot_col {
+                continue;
+            }
+            if let Some(other_row) = self.basis[other_col].as_mut() {
+                let factor = other_row.coeffs[pivot_col];
+                if factor != 0 {
+                    row_axpy(&mut other_row.coeffs, &coeffs, factor);
+                    row_axpy(&mut other_row.data, &data, factor);
+                }
+            }
+        }
+
+        // rank-up 時のみ永続化のため Vec を確保する。
+        self.basis[pivot_col] = Some(BasisRow {
+            coeffs,
+            data: data.to_vec(),
+        });
         self.current_rank += 1;
         true
     }

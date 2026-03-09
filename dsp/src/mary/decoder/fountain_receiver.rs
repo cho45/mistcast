@@ -4,9 +4,7 @@
 //! 受理結果に応じた統計更新と復号完了判定を担当する。
 
 use super::decoder_stats::DecoderStats;
-use crate::coding::fountain::{
-    reconstruct_packet_coefficients, FountainDecoder, FountainPacket, ReceiveOutcome,
-};
+use crate::coding::fountain::{reconstruct_packet_coefficients, FountainDecoder, ReceiveOutcome};
 use crate::frame::packet::Packet;
 
 pub(crate) struct PacketReceiveResult {
@@ -20,16 +18,11 @@ pub(crate) fn receive_packet(
 ) -> PacketReceiveResult {
     stats.last_packet_seq = Some(packet.lt_seq as u32);
 
-    let fountain_packet = FountainPacket {
-        seq: packet.lt_seq as u32,
-        coefficients: reconstruct_packet_coefficients(
-            packet.lt_seq as u32,
-            fountain_decoder.params().k,
-        ),
-        data: packet.payload.to_vec(),
-    };
-
-    let outcome = fountain_decoder.receive_with_outcome(fountain_packet);
+    let outcome = fountain_decoder.receive_payload_array_with_outcome(
+        packet.lt_seq as u32,
+        reconstruct_packet_coefficients(packet.lt_seq as u32, fountain_decoder.params().k),
+        packet.payload,
+    );
     match outcome {
         ReceiveOutcome::AcceptedRankUp => {
             stats.received_packets += 1;

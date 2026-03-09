@@ -4,7 +4,7 @@
 use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::{
     coding::fec,
-    coding::fountain::{FountainDecoder, FountainPacket, FountainParams, ReceiveOutcome},
+    coding::fountain::{FountainDecoder, FountainParams, ReceiveOutcome},
     coding::interleaver::BlockInterleaver,
     common::nco::Nco,
     common::resample::Resampler,
@@ -445,11 +445,11 @@ impl Decoder {
                     seq,
                     self.fountain_decoder.params().k,
                 );
-                let outcome = self.fountain_decoder.receive_with_outcome(FountainPacket {
+                let outcome = self.fountain_decoder.receive_payload_array_with_outcome(
                     seq,
                     coefficients,
-                    data: packet.payload.to_vec(),
-                });
+                    packet.payload,
+                );
                 match outcome {
                     ReceiveOutcome::AcceptedRankUp => {
                         self.last_packet_seq = Some(seq);
