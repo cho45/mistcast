@@ -20,15 +20,15 @@ pub mod interleaver_config {
     /// テールビット数（畳み込み符号の終了処理）
     pub const TAIL_BITS: usize = 6;
 
-    /// インターリーバ要素数 (348)
-    /// 
-    /// fec_bits と一致するよう設定
-    pub const INTERLEAVER_N: usize = 348;
+    /// インターリーバ行数（12）
+    ///
+    /// 12 × 29 = 348 = fec_bits と一致するよう設定
+    pub const INTERLEAVER_ROWS: usize = 12;
 
-    /// インターリーバステップ数 (55)
-    /// 
-    /// N と互いに素であり、バーストエラー(最大3シンボル)に対する分散距離を最適化
-    pub const INTERLEAVER_Q: usize = 55;
+    /// インターリーバ列数（29）
+    ///
+    /// 12 × 29 = 348 = fec_bits と一致するよう設定
+    pub const INTERLEAVER_COLS: usize = 29;
 
     /// 生ビット数（パケットバイト数 + テールビット）
     #[inline]
@@ -36,7 +36,7 @@ pub mod interleaver_config {
         PACKET_BYTES * 8 + TAIL_BITS
     }
 
-    /// FEC処理後（R=1/2）のビット数
+    /// FECエンコーディング後のビット数（畳み込み符号で2倍）
     #[inline]
     pub const fn fec_bits() -> usize {
         raw_bits() * 2
@@ -44,11 +44,11 @@ pub mod interleaver_config {
 
     /// インターリーバ処理後のビット数
     ///
-    /// INTERLEAVER_N = 348
+    /// INTERLEAVER_ROWS × INTERLEAVER_COLS = 348
     /// fec_bits() と完全一致するため、無駄なパディングが発生しない
     #[inline]
     pub const fn interleaved_bits() -> usize {
-        INTERLEAVER_N
+        INTERLEAVER_ROWS * INTERLEAVER_COLS
     }
 
     /// Maryシンボル境界（6ビット単位）に揃えたビット数
@@ -87,14 +87,14 @@ mod tests {
             "fec_bits should be 348"
         );
         assert_eq!(
-            interleaver_config::INTERLEAVER_N,
-            348,
-            "INTERLEAVER_N should be 348"
+            interleaver_config::INTERLEAVER_ROWS,
+            12,
+            "INTERLEAVER_ROWS should be 12"
         );
         assert_eq!(
-            interleaver_config::INTERLEAVER_Q,
-            55,
-            "INTERLEAVER_Q should be 55"
+            interleaver_config::INTERLEAVER_COLS,
+            29,
+            "INTERLEAVER_COLS should be 29"
         );
         assert_eq!(
             interleaver_config::interleaved_bits(),
@@ -132,7 +132,15 @@ mod tests {
         );
     }
 
-
+    #[test]
+    fn test_interleaver_rows_cols_product() {
+        // 29 × 12 = 348 であることを確認
+        assert_eq!(
+            interleaver_config::INTERLEAVER_ROWS * interleaver_config::INTERLEAVER_COLS,
+            348,
+            "29 × 12 should equal 348"
+        );
+    }
 
     #[test]
     fn test_no_padding_needed() {
