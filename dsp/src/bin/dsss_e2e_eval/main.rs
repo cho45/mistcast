@@ -1,3 +1,4 @@
+mod alloc_profiler;
 mod channel;
 mod metrics;
 mod report;
@@ -159,6 +160,8 @@ pub struct Cli {
     pub output: OutputFormat,
     #[arg(long = "show-metrics-desc")]
     pub show_metrics_desc: bool,
+    #[arg(long = "alloc-profile")]
+    pub alloc_profile: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -296,6 +299,7 @@ mod tests {
             columns: None,
             output: OutputFormat::Csv,
             show_metrics_desc: false,
+            alloc_profile: false,
         };
 
         let res = run_trial_dsss_e2e(&cli.base_impairment(), &cli, cli.seed);
@@ -346,6 +350,7 @@ mod tests {
             columns: None,
             output: OutputFormat::Csv,
             show_metrics_desc: false,
+            alloc_profile: false,
         };
 
         let res = run_trial_mary_e2e(&cli.base_impairment(), &cli, cli.seed);

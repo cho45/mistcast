@@ -11,6 +11,7 @@ PROFILE_PHY="${PROFILE_PHY:-mary}" # mary|dsss
 TOTAL_SIM_SEC="${TOTAL_SIM_SEC:-60}"
 MIN_SAMPLE_COUNT="${MIN_SAMPLE_COUNT:-1500}"
 SAMPLY_SAVE_ONLY="${SAMPLY_SAVE_ONLY:-1}"
+ALLOC_PROFILE="${ALLOC_PROFILE:-1}"
 
 mkdir -p "$OUT_DIR"
 
@@ -30,6 +31,10 @@ ARGS=(
 
 if [ "$#" -gt 0 ]; then
   ARGS+=("$@")
+fi
+
+if [ "$ALLOC_PROFILE" = "1" ]; then
+  ARGS+=(--alloc-profile)
 fi
 
 pick_tool() {

@@ -1,3 +1,4 @@
+use crate::alloc_profiler::{self, Phase};
 use crate::channel::{apply_channel_into, ChannelImpairment, MultipathProfile};
 use crate::metrics::{Metrics, PhaseStats};
 use crate::report::{print_header, print_row};
@@ -67,9 +68,20 @@ pub struct SimulationConfig<'a> {
     pub imp: &'a ChannelImpairment,
     pub rng: &'a mut StdRng,
     pub chunk_size: usize,
+    pub alloc_profile: bool,
     pub tx_buffer: Vec<f32>,
     pub rx_buffer: Vec<f32>,
     pub channel_scratch: Vec<f32>,
+}
+
+#[inline]
+fn with_alloc_phase<T>(enabled: bool, phase: Phase, f: impl FnOnce() -> T) -> T {
+    if enabled {
+        let _guard = alloc_profiler::enter(phase);
+        f()
+    } else {
+        f()
+    }
 }
 
 /// ウォームアップ処理を実行する
@@ -82,19 +94,25 @@ pub fn run_warmup<E, D>(
     E: WarmupSignal,
     D: ProcessSamples,
 {
-    encoder.modulate_silence_into(TX_WARMUP_SAMPLES, &mut cfg.tx_buffer);
+    with_alloc_phase(cfg.alloc_profile, Phase::Tx, || {
+        encoder.modulate_silence_into(TX_WARMUP_SAMPLES, &mut cfg.tx_buffer)
+    });
     state.total_tx_signal_energy += signal_energy(&cfg.tx_buffer);
     state.total_tx_signal_samples += cfg.tx_buffer.len();
-    apply_channel_into(
-        &cfg.tx_buffer,
-        cfg.imp,
-        cfg.rng,
-        false,
-        &mut cfg.rx_buffer,
-        &mut cfg.channel_scratch,
-    );
-    process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
-        ControlFlow::Continue
+    with_alloc_phase(cfg.alloc_profile, Phase::Channel, || {
+        apply_channel_into(
+            &cfg.tx_buffer,
+            cfg.imp,
+            cfg.rng,
+            false,
+            &mut cfg.rx_buffer,
+            &mut cfg.channel_scratch,
+        )
+    });
+    with_alloc_phase(cfg.alloc_profile, Phase::Rx, || {
+        process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
+            ControlFlow::Continue
+        })
     });
 }
 
@@ -108,23 +126,29 @@ pub fn run_flush<E, D>(
     E: FlushSignal,
     D: ProcessSamples,
 {
-    encoder.flush_into(&mut cfg.tx_buffer);
+    with_alloc_phase(cfg.alloc_profile, Phase::Tx, || {
+        encoder.flush_into(&mut cfg.tx_buffer)
+    });
     if cfg.tx_buffer.is_empty() {
         return;
     }
     state.total_tx_signal_energy += signal_energy(&cfg.tx_buffer);
     state.total_tx_signal_samples += cfg.tx_buffer.len();
-    apply_channel_into(
-        &cfg.tx_buffer,
-        cfg.imp,
-        cfg.rng,
-        false,
-        &mut cfg.rx_buffer,
-        &mut cfg.channel_scratch,
-    );
+    with_alloc_phase(cfg.alloc_profile, Phase::Channel, || {
+        apply_channel_into(
+            &cfg.tx_buffer,
+            cfg.imp,
+            cfg.rng,
+            false,
+            &mut cfg.rx_buffer,
+            &mut cfg.channel_scratch,
+        )
+    });
     state.total_sim_sec += cfg.rx_buffer.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
-        ControlFlow::Continue
+    with_alloc_phase(cfg.alloc_profile, Phase::Rx, || {
+        process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
+            ControlFlow::Continue
+        })
     });
 }
 
@@ -138,22 +162,28 @@ pub fn run_tail<E, D>(
     E: WarmupSignal,
     D: ProcessSamples,
 {
-    encoder.modulate_silence_into(TX_TAIL_SAMPLES, &mut cfg.tx_buffer);
+    with_alloc_phase(cfg.alloc_profile, Phase::Tx, || {
+        encoder.modulate_silence_into(TX_TAIL_SAMPLES, &mut cfg.tx_buffer)
+    });
     if cfg.tx_buffer.is_empty() {
         return;
     }
     state.total_tx_signal_energy += signal_energy(&cfg.tx_buffer);
     state.total_tx_signal_samples += cfg.tx_buffer.len();
-    apply_channel_into(
-        &cfg.tx_buffer,
-        cfg.imp,
-        cfg.rng,
-        false,
-        &mut cfg.rx_buffer,
-        &mut cfg.channel_scratch,
-    );
-    process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
-        ControlFlow::Continue
+    with_alloc_phase(cfg.alloc_profile, Phase::Channel, || {
+        apply_channel_into(
+            &cfg.tx_buffer,
+            cfg.imp,
+            cfg.rng,
+            false,
+            &mut cfg.rx_buffer,
+            &mut cfg.channel_scratch,
+        )
+    });
+    with_alloc_phase(cfg.alloc_profile, Phase::Rx, || {
+        process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
+            ControlFlow::Continue
+        })
     });
 }
 
@@ -403,6 +433,7 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         imp,
         rng: &mut rng,
         chunk_size: chunk,
+        alloc_profile: cli.alloc_profile,
         tx_buffer: Vec::new(),
         rx_buffer: Vec::new(),
         channel_scratch: Vec::new(),
@@ -415,6 +446,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     decoder.llr_callback = Some(ber_accum.llr_callback());
     let packet_count_per_frame = cli.packets_per_frame.max(1);
     let mut packets = Vec::with_capacity(packet_count_per_frame);
+    if cli.alloc_profile {
+        alloc_profiler::reset();
+    }
 
     run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
     loop {
@@ -422,13 +456,15 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
             break;
         }
 
-        packets.clear();
-        for _ in 0..packet_count_per_frame {
-            let fp = fountain_encoder.next_packet();
-            ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
-            packets.push(fp);
-        }
-        encoder.encode_burst_into(&packets, &mut sim_cfg.tx_buffer);
+        with_alloc_phase(sim_cfg.alloc_profile, Phase::Tx, || {
+            packets.clear();
+            for _ in 0..packet_count_per_frame {
+                let fp = fountain_encoder.next_packet();
+                ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
+                packets.push(fp);
+            }
+            encoder.encode_burst_into(&packets, &mut sim_cfg.tx_buffer);
+        });
 
         m.total_frame_attempts += 1;
         m.total_tx_signal_energy += signal_energy(&sim_cfg.tx_buffer);
@@ -438,44 +474,54 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         if drop_frame {
             m.dropped_frames += 1;
         }
-        apply_channel_into(
-            &sim_cfg.tx_buffer,
-            imp,
-            sim_cfg.rng,
-            drop_frame,
-            &mut sim_cfg.rx_buffer,
-            &mut sim_cfg.channel_scratch,
-        );
+        with_alloc_phase(sim_cfg.alloc_profile, Phase::Channel, || {
+            apply_channel_into(
+                &sim_cfg.tx_buffer,
+                imp,
+                sim_cfg.rng,
+                drop_frame,
+                &mut sim_cfg.rx_buffer,
+                &mut sim_cfg.channel_scratch,
+            );
+        });
         m.total_sim_sec += sim_cfg.rx_buffer.len() as f32 / tx_cfg.sample_rate;
 
-        process_samples_in_chunks(
-            &sim_cfg.rx_buffer,
-            chunk,
-            &mut decoder,
-            &mut m,
-            |decoder: &mut DsssDecoder, progress, m: &mut Metrics| {
-                if progress.complete {
-                    let recovered = decoder.recovered_data();
-                    let errs = count_bit_errors_bytes(&payload, recovered);
-                    m.add_frame_event(
-                        progress.synced_frames,
-                        progress.received_packets,
-                        progress.crc_error_packets,
-                    );
-                    m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
+        with_alloc_phase(sim_cfg.alloc_profile, Phase::Rx, || {
+            process_samples_in_chunks(
+                &sim_cfg.rx_buffer,
+                chunk,
+                &mut decoder,
+                &mut m,
+                |decoder: &mut DsssDecoder, progress, m: &mut Metrics| {
+                    if progress.complete {
+                        let recovered = decoder.recovered_data();
+                        let errs = count_bit_errors_bytes(&payload, recovered);
+                        m.add_frame_event(
+                            progress.synced_frames,
+                            progress.received_packets,
+                            progress.crc_error_packets,
+                        );
+                        m.add_recovery_event(
+                            m.total_sim_sec - last_reset_sec,
+                            errs,
+                            payload.len() * 8,
+                        );
 
-                    decoder.reset_fountain_decoder();
-                    last_reset_sec = m.total_sim_sec;
-                }
-                ControlFlow::Continue
-            },
-        );
+                        decoder.reset_fountain_decoder();
+                        last_reset_sec = m.total_sim_sec;
+                    }
+                    ControlFlow::Continue
+                },
+            );
+        });
     }
 
     run_flush(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
     run_tail(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
-    let final_progress = decoder.process_samples(&[]);
+    let final_progress = with_alloc_phase(sim_cfg.alloc_profile, Phase::Rx, || {
+        decoder.process_samples(&[])
+    });
     m.add_frame_event(
         final_progress.synced_frames,
         final_progress.received_packets,
@@ -490,6 +536,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
     m.set_mary_raw_ber(ber_accum.extract_pre_fec());
     m.set_mary_post_ber(ber_accum.extract_post_fec());
+    if cli.alloc_profile {
+        alloc_profiler::report_to_stderr("trial=dsss");
+    }
 
     m
 }
@@ -541,6 +590,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         imp,
         rng: &mut rng,
         chunk_size: chunk,
+        alloc_profile: cli.alloc_profile,
         tx_buffer: Vec::new(),
         rx_buffer: Vec::new(),
         channel_scratch: Vec::new(),
@@ -554,6 +604,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     decoder.llr_callback = Some(ber_accum.llr_callback());
     let packet_count_per_frame = cli.packets_per_frame.max(1);
     let mut packets = Vec::with_capacity(packet_count_per_frame);
+    if cli.alloc_profile {
+        alloc_profiler::reset();
+    }
 
     let mut last_reset_sec = 0.0f32;
     let mut last_total_llr_attempts = 0usize;
@@ -568,13 +621,15 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
             break;
         }
 
-        packets.clear();
-        for _ in 0..packet_count_per_frame {
-            let fp = fountain_encoder.next_packet();
-            ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
-            packets.push(fp);
-        }
-        encoder.encode_burst_into(&packets, &mut sim_cfg.tx_buffer);
+        with_alloc_phase(sim_cfg.alloc_profile, Phase::Tx, || {
+            packets.clear();
+            for _ in 0..packet_count_per_frame {
+                let fp = fountain_encoder.next_packet();
+                ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
+                packets.push(fp);
+            }
+            encoder.encode_burst_into(&packets, &mut sim_cfg.tx_buffer);
+        });
 
         m.total_frame_attempts += 1;
         m.total_tx_signal_energy += signal_energy(&sim_cfg.tx_buffer);
@@ -584,77 +639,87 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         if drop_frame {
             m.dropped_frames += 1;
         }
-        apply_channel_into(
-            &sim_cfg.tx_buffer,
-            imp,
-            sim_cfg.rng,
-            drop_frame,
-            &mut sim_cfg.rx_buffer,
-            &mut sim_cfg.channel_scratch,
-        );
+        with_alloc_phase(sim_cfg.alloc_profile, Phase::Channel, || {
+            apply_channel_into(
+                &sim_cfg.tx_buffer,
+                imp,
+                sim_cfg.rng,
+                drop_frame,
+                &mut sim_cfg.rx_buffer,
+                &mut sim_cfg.channel_scratch,
+            );
+        });
         m.total_sim_sec += sim_cfg.rx_buffer.len() as f32 / tx_cfg.sample_rate;
 
-        process_samples_in_chunks(
-            &sim_cfg.rx_buffer,
-            chunk,
-            &mut decoder,
-            &mut m,
-            |decoder: &mut MaryDecoder, progress, m: &mut Metrics| {
-                m.add_mary_phase(PhaseStats {
-                    last_est_snr_db: progress.last_est_snr_db,
-                    phase_gate_on_symbols: progress.phase_gate_on_symbols,
-                    phase_gate_off_symbols: progress.phase_gate_off_symbols,
-                    phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
-                    phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
-                    phase_err_abs_count: progress.phase_err_abs_count,
-                    phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
-                    phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
-                });
+        with_alloc_phase(sim_cfg.alloc_profile, Phase::Rx, || {
+            process_samples_in_chunks(
+                &sim_cfg.rx_buffer,
+                chunk,
+                &mut decoder,
+                &mut m,
+                |decoder: &mut MaryDecoder, progress, m: &mut Metrics| {
+                    m.add_mary_phase(PhaseStats {
+                        last_est_snr_db: progress.last_est_snr_db,
+                        phase_gate_on_symbols: progress.phase_gate_on_symbols,
+                        phase_gate_off_symbols: progress.phase_gate_off_symbols,
+                        phase_innovation_reject_symbols: progress.phase_innovation_reject_symbols,
+                        phase_err_abs_sum_rad: progress.phase_err_abs_sum_rad,
+                        phase_err_abs_count: progress.phase_err_abs_count,
+                        phase_err_abs_ge_0p5_symbols: progress.phase_err_abs_ge_0p5_symbols,
+                        phase_err_abs_ge_1p0_symbols: progress.phase_err_abs_ge_1p0_symbols,
+                    });
 
-                m.add_mary_llr(
-                    progress
-                        .llr_second_pass_attempts
-                        .saturating_sub(last_total_llr_attempts),
-                    progress
-                        .llr_second_pass_rescued
-                        .saturating_sub(last_total_llr_rescued),
-                );
-                last_total_llr_attempts = progress.llr_second_pass_attempts;
-                last_total_llr_rescued = progress.llr_second_pass_rescued;
-
-                let (post_attempts, post_matched) = ber_accum.extract_decode_stats();
-                m.add_mary_decode_stats(
-                    post_attempts.saturating_sub(last_total_post_attempts),
-                    post_matched.saturating_sub(last_total_post_matched),
-                );
-                last_total_post_attempts = post_attempts;
-                last_total_post_matched = post_matched;
-
-                if progress.complete {
-                    let recovered = decoder.recovered_data();
-                    let errs = count_bit_errors_bytes(&payload, recovered);
-                    m.add_frame_event(
-                        progress.synced_frames,
-                        progress.received_packets,
-                        progress.crc_error_packets,
+                    m.add_mary_llr(
+                        progress
+                            .llr_second_pass_attempts
+                            .saturating_sub(last_total_llr_attempts),
+                        progress
+                            .llr_second_pass_rescued
+                            .saturating_sub(last_total_llr_rescued),
                     );
-                    m.add_recovery_event(m.total_sim_sec - last_reset_sec, errs, payload.len() * 8);
+                    last_total_llr_attempts = progress.llr_second_pass_attempts;
+                    last_total_llr_rescued = progress.llr_second_pass_rescued;
 
-                    decoder.reset_fountain_decoder();
-                    last_reset_sec = m.total_sim_sec;
-                    last_total_llr_attempts = 0;
-                    last_total_llr_rescued = 0;
-                    // Note: ber_accum は累積し続ける
-                }
-                ControlFlow::Continue
-            },
-        );
+                    let (post_attempts, post_matched) = ber_accum.extract_decode_stats();
+                    m.add_mary_decode_stats(
+                        post_attempts.saturating_sub(last_total_post_attempts),
+                        post_matched.saturating_sub(last_total_post_matched),
+                    );
+                    last_total_post_attempts = post_attempts;
+                    last_total_post_matched = post_matched;
+
+                    if progress.complete {
+                        let recovered = decoder.recovered_data();
+                        let errs = count_bit_errors_bytes(&payload, recovered);
+                        m.add_frame_event(
+                            progress.synced_frames,
+                            progress.received_packets,
+                            progress.crc_error_packets,
+                        );
+                        m.add_recovery_event(
+                            m.total_sim_sec - last_reset_sec,
+                            errs,
+                            payload.len() * 8,
+                        );
+
+                        decoder.reset_fountain_decoder();
+                        last_reset_sec = m.total_sim_sec;
+                        last_total_llr_attempts = 0;
+                        last_total_llr_rescued = 0;
+                        // Note: ber_accum は累積し続ける
+                    }
+                    ControlFlow::Continue
+                },
+            );
+        });
     }
 
     run_flush(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
     run_tail(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
-    let final_progress = decoder.process_samples(&[]);
+    let final_progress = with_alloc_phase(sim_cfg.alloc_profile, Phase::Rx, || {
+        decoder.process_samples(&[])
+    });
     m.add_frame_event(
         final_progress.synced_frames,
         final_progress.received_packets,
@@ -669,6 +734,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
     m.set_mary_raw_ber(ber_accum.extract_pre_fec());
     m.set_mary_post_ber(ber_accum.extract_post_fec());
+    if cli.alloc_profile {
+        alloc_profiler::report_to_stderr("trial=mary");
+    }
 
     m
 }
@@ -768,6 +836,7 @@ mod tests {
             columns: None,
             output: OutputFormat::Csv,
             show_metrics_desc: false,
+            alloc_profile: false,
         }
     }
 

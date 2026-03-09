@@ -27,6 +27,7 @@ make profile-native-dsss
 - 既定で `dsp/target/profiling/dsss_e2e_eval` をビルドして実行
 - 既定 PHY は `mary`（`PROFILE_PHY` で変更可）
 - 既定 `TOTAL_SIM_SEC=60` で、1回計測でもサンプル数を確保しやすくしている
+- 既定で `--alloc-profile` を有効化し、`tx/channel/rx` phase 別 alloc 集計を stderr に出力
 - profiler は自動選択（`samply` → `perf` → なし）
 - 出力先: `dsp/eval/profiles/native/`
 
@@ -57,6 +58,12 @@ TOTAL_SIM_SEC=30 npm run profile:native:dsss
 
 ```bash
 MIN_SAMPLE_COUNT=1000 npm run profile:native:dsss
+```
+
+- phase 別 alloc 集計を無効化:
+
+```bash
+ALLOC_PROFILE=0 npm run profile:native:dsss
 ```
 
 - ビルドプロファイル指定（必要時）:
