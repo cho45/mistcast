@@ -73,6 +73,9 @@ pub struct Decoder {
     mix_buffer_q: Vec<f32>,
     resample_buffer_i: Vec<f32>,
     resample_buffer_q: Vec<f32>,
+    pn_chips: Vec<f32>,
+    pn_cache_mseq_order: usize,
+    pn_cache_sf: usize,
     sync_detector: SyncDetector,
     interleaver: BlockInterleaver,
     fountain_decoder: FountainDecoder,
@@ -131,6 +134,21 @@ struct SymbolSoftDecision {
 }
 
 impl Decoder {
+    fn build_pn_chips(mseq_order: usize, sf: usize) -> Vec<f32> {
+        let mut mseq = crate::common::msequence::MSequence::new(mseq_order);
+        mseq.generate(sf).into_iter().map(|v| v as f32).collect()
+    }
+
+    fn refresh_pn_cache_if_needed(&mut self) {
+        let sf = self.config.spread_factor();
+        let order = self.config.mseq_order;
+        if self.pn_cache_mseq_order != order || self.pn_cache_sf != sf {
+            self.pn_chips = Self::build_pn_chips(order, sf);
+            self.pn_cache_mseq_order = order;
+            self.pn_cache_sf = sf;
+        }
+    }
+
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let proc_sample_rate = dsp_config.proc_sample_rate();
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
@@ -150,6 +168,7 @@ impl Decoder {
         // 処理利得 (Processing Gain) によりノイズフロアが 1/sf に比例して下がるため、
         // しきい値もそれに合わせて引き下げることで感度を維持する。
         let sf = dsp_config.spread_factor();
+        let pn_chips = Self::build_pn_chips(dsp_config.mseq_order, sf);
         let scale = 15.0 / sf as f32;
         let tc = SyncDetector::THRESHOLD_COARSE_DEFAULT * scale;
         let tf = SyncDetector::THRESHOLD_FINE_DEFAULT * scale;
@@ -175,6 +194,9 @@ impl Decoder {
             mix_buffer_q: Vec::with_capacity(4096),
             resample_buffer_i: Vec::with_capacity(6144),
             resample_buffer_q: Vec::with_capacity(6144),
+            pn_chips,
+            pn_cache_mseq_order: dsp_config.mseq_order,
+            pn_cache_sf: sf,
             sync_detector: SyncDetector::new(dsp_config.clone(), tc, tf),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
@@ -211,6 +233,8 @@ impl Decoder {
         // 処理レート基準でバッファ制限を計算
         let max_buffer_len = 100_000;
         let drain_len = 50_000;
+        self.refresh_pn_cache_if_needed();
+        let pn = std::mem::take(&mut self.pn_chips);
 
         // 1. 高レート混合 (at fs_in)
         let mut i_mixed = std::mem::take(&mut self.mix_buffer_i);
@@ -330,9 +354,6 @@ impl Decoder {
                 noise_var: 0.2,
             };
 
-            let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
-            let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|v| v as f32).collect();
-
             let p_bits_len = PACKET_BYTES * 8;
             let Some(attempt) = self.decode_payload_with_timing_retries(
                 payload_start,
@@ -424,6 +445,7 @@ impl Decoder {
         self.mix_buffer_q = q_mixed;
         self.resample_buffer_i = i_resampled;
         self.resample_buffer_q = q_resampled;
+        self.pn_chips = pn;
 
         self.progress()
     }
@@ -846,6 +868,7 @@ impl Decoder {
         self.mix_buffer_q.clear();
         self.resample_buffer_i.clear();
         self.resample_buffer_q.clear();
+        self.refresh_pn_cache_if_needed();
         self.lo_nco.reset();
         self.agc_peak_fast = 0.5;
         self.agc_peak_slow = 0.5;
