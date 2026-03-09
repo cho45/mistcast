@@ -6,7 +6,7 @@ use crate::coding::fec;
 use crate::coding::fountain::{FountainEncoder, FountainPacket};
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::frame::packet::Packet;
+use crate::frame::packet::{Packet, PACKET_BYTES};
 use crate::mary::interleaver_config;
 use crate::mary::modulator::Modulator;
 use crate::mary::params;
@@ -41,6 +41,7 @@ pub struct Encoder {
     modulator: Modulator,
     fountain_encoder: Option<FountainEncoder>,
     // ゼロアロケーション用バッファプール
+    raw_bits_buffer: Vec<u8>,
     fec_buffer: Vec<u8>,
     padded_buffer: Vec<u8>,
     interleaved_buffer: Vec<u8>,
@@ -71,6 +72,7 @@ impl Encoder {
             config,
             modulator,
             fountain_encoder: None,
+            raw_bits_buffer: Vec::with_capacity(PACKET_BYTES * 8),
             fec_buffer: Vec::with_capacity(fec_bits),
             padded_buffer: Vec::with_capacity(interleaved_size),
             interleaved_buffer: Vec::with_capacity(mary_aligned_size),
@@ -100,6 +102,7 @@ impl Encoder {
             config,
             modulator,
             fountain_encoder: None,
+            raw_bits_buffer: Vec::with_capacity(PACKET_BYTES * 8),
             fec_buffer: Vec::with_capacity(fec_bits),
             padded_buffer: Vec::with_capacity(interleaved_size),
             interleaved_buffer: Vec::with_capacity(mary_aligned_size),
@@ -170,10 +173,10 @@ impl Encoder {
         let pkt_bytes = pkt.serialize();
 
         // FECエンコード（バッファ使用）
+        self.raw_bits_buffer.clear();
+        fec::bytes_to_bits_into(&pkt_bytes, &mut self.raw_bits_buffer);
         self.fec_buffer.clear();
-        let bits = fec::bytes_to_bits(&pkt_bytes);
-        let coded = fec::encode(&bits);
-        self.fec_buffer.extend_from_slice(&coded);
+        fec::encode_into(&self.raw_bits_buffer, &mut self.fec_buffer);
 
         // インターリーバのサイズ（interleaver_config使用）
         let rows = interleaver_config::INTERLEAVER_ROWS; // 29

@@ -184,8 +184,10 @@ impl BerAccumulator {
         k: usize,
     ) {
         let pkt = Packet::new(seq, k, &packet.data);
-        let bits = fec::bytes_to_bits(&pkt.serialize());
-        let fec_encoded = fec::encode(&bits);
+        let mut bits = Vec::new();
+        fec::bytes_to_bits_into(&pkt.serialize(), &mut bits);
+        let mut fec_encoded = Vec::new();
+        fec::encode_into(&bits, &mut fec_encoded);
         self.expected_packet_bits.lock().unwrap().insert(seq, bits);
         self.expected_fec_bits
             .lock()

@@ -51,8 +51,16 @@ fn next_state(state: u8, bit: u8) -> u8 {
 /// ビット列を符号化する。出力は入力の2倍長。
 /// 末尾にtailbits (K-1個のゼロ) を付加してトレリスをフラッシュする。
 pub fn encode(bits: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_into(bits, &mut out);
+    out
+}
+
+/// 畳み込み符号エンコーダ（出力バッファ再利用版）
+pub fn encode_into(bits: &[u8], out: &mut Vec<u8>) {
     let mut state: u8 = 0;
-    let mut out = Vec::with_capacity((bits.len() + CONSTRAINT_LEN - 1) * 2);
+    out.clear();
+    out.reserve((bits.len() + CONSTRAINT_LEN - 1) * 2);
 
     // データビット
     for &bit in bits {
@@ -69,8 +77,6 @@ pub fn encode(bits: &[u8]) -> Vec<u8> {
         out.push(v2);
         state = next_state(state, 0);
     }
-
-    out
 }
 
 /// Viterbiデコーダ (ハード判定)
@@ -410,25 +416,40 @@ fn llr_score(llr: f32, expected: u8) -> f32 {
 
 /// ビット列をバイト列に変換 (MSB first)
 pub fn bits_to_bytes(bits: &[u8]) -> Vec<u8> {
-    bits.chunks(8)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .enumerate()
-                .fold(0u8, |acc, (i, &b)| acc | (b << (7 - i)))
-        })
-        .collect()
+    let mut out = Vec::new();
+    bits_to_bytes_into(bits, &mut out);
+    out
+}
+
+/// ビット列をバイト列に変換 (MSB first, 出力バッファ再利用版)
+pub fn bits_to_bytes_into(bits: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.reserve(bits.len().div_ceil(8));
+    for chunk in bits.chunks(8) {
+        let byte = chunk
+            .iter()
+            .enumerate()
+            .fold(0u8, |acc, (i, &b)| acc | (b << (7 - i)));
+        out.push(byte);
+    }
 }
 
 /// バイト列をビット列に変換 (MSB first)
 pub fn bytes_to_bits(bytes: &[u8]) -> Vec<u8> {
-    let mut bits = Vec::with_capacity(bytes.len() * 8);
+    let mut bits = Vec::new();
+    bytes_to_bits_into(bytes, &mut bits);
+    bits
+}
+
+/// バイト列をビット列に変換 (MSB first, 出力バッファ再利用版)
+pub fn bytes_to_bits_into(bytes: &[u8], bits: &mut Vec<u8>) {
+    bits.clear();
+    bits.reserve(bytes.len() * 8);
     for &byte in bytes {
         for i in (0..8).rev() {
             bits.push((byte >> i) & 1);
         }
     }
-    bits
 }
 
 #[cfg(test)]

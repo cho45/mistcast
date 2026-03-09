@@ -5,7 +5,7 @@ use crate::{
     coding::fountain::{FountainEncoder, FountainPacket, FountainParams},
     coding::interleaver::BlockInterleaver,
     dsss::modulator::Modulator,
-    frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX},
+    frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX, PACKET_BYTES},
     params::PAYLOAD_SIZE,
     DspConfig,
 };
@@ -41,6 +41,10 @@ pub struct Encoder {
     config: EncoderConfig,
     modulator: Modulator,
     interleaver: BlockInterleaver,
+    raw_bits_buffer: Vec<u8>,
+    fec_bits_buffer: Vec<u8>,
+    padded_bits_buffer: Vec<u8>,
+    interleaved_bits_buffer: Vec<u8>,
     burst_bits_buffer: Vec<u8>,
 }
 
@@ -49,36 +53,52 @@ impl Encoder {
         let il = BlockInterleaver::new(config.il_rows, config.il_cols);
         let modulator = Modulator::new(config.dsp.clone());
         let packets_per_sync_burst = config.packets_per_sync_burst.max(1);
+        let interleaved_bits_per_packet = config.il_rows * config.il_cols;
         let burst_bits_capacity = config.il_rows * config.il_cols * packets_per_sync_burst;
+        let raw_bits_capacity = PACKET_BYTES * 8;
+        let fec_bits_capacity = (raw_bits_capacity + 6) * 2;
         Encoder {
             config,
             modulator,
             interleaver: il,
+            raw_bits_buffer: Vec::with_capacity(raw_bits_capacity),
+            fec_bits_buffer: Vec::with_capacity(fec_bits_capacity),
+            padded_bits_buffer: Vec::with_capacity(interleaved_bits_per_packet),
+            interleaved_bits_buffer: Vec::with_capacity(interleaved_bits_per_packet),
             burst_bits_buffer: Vec::with_capacity(burst_bits_capacity),
         }
     }
 
-    fn encode_packet_bits(&mut self, packet: &FountainPacket) -> Vec<u8> {
+    fn fill_packet_bits_buffer(&mut self, packet: &FountainPacket) {
         let seq = (packet.seq % (u32::from(LT_SEQ_MAX) + 1)) as u16;
         let pkt = Packet::new(seq, self.config.fountain_k, &packet.data);
         let pkt_bytes = pkt.serialize();
-        let bits = fec::bytes_to_bits(&pkt_bytes);
-        let coded = fec::encode(&bits);
+        fec::bytes_to_bits_into(&pkt_bytes, &mut self.raw_bits_buffer);
+        fec::encode_into(&self.raw_bits_buffer, &mut self.fec_bits_buffer);
 
         // インターリーバの全スロットを埋めるようにパディング
-        let mut padded = coded;
-        padded.resize(self.config.il_rows * self.config.il_cols, 0);
+        let interleaved_bits_per_packet = self.config.il_rows * self.config.il_cols;
+        self.padded_bits_buffer.clear();
+        self.padded_bits_buffer
+            .extend_from_slice(&self.fec_bits_buffer);
+        self.padded_bits_buffer
+            .resize(interleaved_bits_per_packet, 0);
 
         // ペイロード全体（パディング含む）をスクランブルしてトーンを抑圧
         let mut scrambler = crate::coding::scrambler::Scrambler::default();
-        scrambler.process_bits(&mut padded);
+        scrambler.process_bits(&mut self.padded_bits_buffer);
 
-        self.interleaver.interleave(&padded)
+        self.interleaved_bits_buffer
+            .resize(interleaved_bits_per_packet, 0);
+        self.interleaver.interleave_in_place(
+            &self.padded_bits_buffer,
+            &mut self.interleaved_bits_buffer[..interleaved_bits_per_packet],
+        );
     }
 
     pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
-        let interleaved = self.encode_packet_bits(packet);
-        self.modulator.encode_frame(&interleaved)
+        self.fill_packet_bits_buffer(packet);
+        self.modulator.encode_frame(&self.interleaved_bits_buffer)
     }
 
     pub fn encode_burst(&mut self, packets: &[FountainPacket]) -> Vec<f32> {
@@ -88,10 +108,12 @@ impl Encoder {
     }
 
     pub fn encode_burst_into(&mut self, packets: &[FountainPacket], out: &mut Vec<f32>) {
+        let interleaved_bits_per_packet = self.config.il_rows * self.config.il_cols;
         self.burst_bits_buffer.clear();
         for packet in packets {
-            let interleaved = self.encode_packet_bits(packet);
-            self.burst_bits_buffer.extend_from_slice(&interleaved);
+            self.fill_packet_bits_buffer(packet);
+            self.burst_bits_buffer
+                .extend_from_slice(&self.interleaved_bits_buffer[..interleaved_bits_per_packet]);
         }
         self.modulator
             .encode_frame_into(&self.burst_bits_buffer, out);

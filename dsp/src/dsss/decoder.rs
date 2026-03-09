@@ -81,6 +81,7 @@ pub struct Decoder {
     interleaver: BlockInterleaver,
     deinterleave_buffer: Vec<f32>,
     decoded_bits_buffer: Vec<u8>,
+    decoded_bytes_buffer: Vec<u8>,
     fec_workspace: fec::FecDecodeWorkspace,
     fountain_decoder: FountainDecoder,
     recovered_data: Option<Vec<u8>>,
@@ -247,6 +248,7 @@ impl Decoder {
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             deinterleave_buffer: Vec::with_capacity(fec_bits),
             decoded_bits_buffer: Vec::with_capacity(raw_bits),
+            decoded_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             fec_workspace: fec::FecDecodeWorkspace::new(),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
@@ -736,7 +738,11 @@ impl Decoder {
                 &mut self.decoded_bits_buffer,
                 &mut self.fec_workspace,
             );
-            match parse_packet_from_decoded_bits(&self.decoded_bits_buffer, p_bits_len) {
+            match parse_packet_from_decoded_bits(
+                &self.decoded_bits_buffer,
+                p_bits_len,
+                &mut self.decoded_bytes_buffer,
+            ) {
                 Ok(packet) => decoded_packets.push(packet),
                 Err(PacketParseError::CrcMismatch { .. }) => crc_errors += 1,
                 Err(PacketParseError::InvalidLength { .. }) => parse_errors += 1,
@@ -1057,14 +1063,15 @@ fn update_noise_var_ema(prev: f32, diff: Complex32, decided_symbol: Complex32) -
 fn parse_packet_from_decoded_bits(
     decoded_bits: &[u8],
     p_bits_len: usize,
+    decoded_bytes: &mut Vec<u8>,
 ) -> Result<Packet, PacketParseError> {
     if decoded_bits.len() < p_bits_len {
         return Err(PacketParseError::InvalidLength {
             actual: decoded_bits.len() / 8,
         });
     }
-    let d_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-    Packet::deserialize(&d_bytes)
+    fec::bits_to_bytes_into(&decoded_bits[..p_bits_len], decoded_bytes);
+    Packet::deserialize(decoded_bytes)
 }
 
 #[inline]

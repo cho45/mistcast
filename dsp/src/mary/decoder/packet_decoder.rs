@@ -13,7 +13,7 @@ use super::tracking::{
 use crate::coding::fec;
 use crate::coding::interleaver::BlockInterleaver;
 use crate::coding::scrambler::Scrambler;
-use crate::frame::packet::Packet;
+use crate::frame::packet::{Packet, PACKET_BYTES};
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
 use crate::mary::params::PAYLOAD_SPREAD_FACTOR;
@@ -42,6 +42,7 @@ pub(crate) struct PacketDecodeBuffers {
     pub deinterleave_buffer: Vec<f32>,
     pub erasure_llr_buffer: Vec<f32>,
     pub fec_candidates_buffer: Vec<Vec<u8>>,
+    pub decoded_bytes_buffer: Vec<u8>,
     pub fec_workspace: fec::FecDecodeWorkspace,
 }
 
@@ -53,6 +54,7 @@ impl PacketDecodeBuffers {
             deinterleave_buffer: Vec::with_capacity(cap),
             erasure_llr_buffer: Vec::with_capacity(cap),
             fec_candidates_buffer: Vec::new(),
+            decoded_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             fec_workspace: fec::FecDecodeWorkspace::new(),
         }
     }
@@ -62,6 +64,7 @@ impl PacketDecodeBuffers {
         self.deinterleave_buffer.clear();
         self.erasure_llr_buffer.clear();
         self.fec_candidates_buffer.clear();
+        self.decoded_bytes_buffer.clear();
     }
 }
 
@@ -360,6 +363,7 @@ fn decode_single_llr_candidate(
     let first_attempt = try_decode_soft_list_candidates(
         &context.buffers.fec_candidates_buffer,
         layout.payload_bits_len,
+        &mut context.buffers.decoded_bytes_buffer,
     );
     if let Ok(packet) = first_attempt {
         return Ok(packet);
@@ -388,6 +392,7 @@ fn decode_single_llr_candidate(
         match try_decode_soft_list_candidates(
             &context.buffers.fec_candidates_buffer,
             layout.payload_bits_len,
+            &mut context.buffers.decoded_bytes_buffer,
         ) {
             Ok(packet) => {
                 context.stats.llr_second_pass_rescued += 1;
@@ -408,13 +413,14 @@ fn decode_single_llr_candidate(
 fn try_decode_soft_list_candidates(
     decoded_candidates: &[Vec<u8>],
     p_bits_len: usize,
+    decoded_bytes: &mut Vec<u8>,
 ) -> Result<Packet, PacketDecodeError> {
     let mut saw_crc = false;
     for decoded_bits in decoded_candidates {
         if decoded_bits.len() < p_bits_len {
             continue;
         }
-        match decode_packet(&decoded_bits[..p_bits_len]) {
+        match decode_packet(&decoded_bits[..p_bits_len], decoded_bytes) {
             Ok(packet) => return Ok(packet),
             Err(PacketDecodeError::Crc) => saw_crc = true,
             Err(PacketDecodeError::Parse) => {}
@@ -427,9 +433,12 @@ fn try_decode_soft_list_candidates(
     }
 }
 
-fn decode_packet(packet_bits: &[u8]) -> Result<Packet, PacketDecodeError> {
-    let decoded_bytes = fec::bits_to_bytes(packet_bits);
-    match Packet::deserialize(&decoded_bytes) {
+fn decode_packet(
+    packet_bits: &[u8],
+    decoded_bytes: &mut Vec<u8>,
+) -> Result<Packet, PacketDecodeError> {
+    fec::bits_to_bytes_into(packet_bits, decoded_bytes);
+    match Packet::deserialize(decoded_bytes) {
         Ok(packet) => Ok(packet),
         Err(crate::frame::packet::PacketParseError::CrcMismatch { .. }) => {
             Err(PacketDecodeError::Crc)
@@ -624,7 +633,10 @@ mod tests {
         let bits = fec::bytes_to_bits(&packet.serialize());
 
         let candidates = vec![bits];
-        let decoded = try_decode_soft_list_candidates(&candidates, PACKET_BYTES * 8).unwrap();
+        let mut decoded_bytes = Vec::new();
+        let decoded =
+            try_decode_soft_list_candidates(&candidates, PACKET_BYTES * 8, &mut decoded_bytes)
+                .unwrap();
 
         assert_eq!(decoded, packet);
     }
@@ -636,11 +648,17 @@ mod tests {
         crc_bits[0] ^= 1;
 
         let crc_candidates = vec![crc_bits];
-        let crc_err = try_decode_soft_list_candidates(&crc_candidates, PACKET_BYTES * 8);
+        let mut decoded_bytes = Vec::new();
+        let crc_err =
+            try_decode_soft_list_candidates(&crc_candidates, PACKET_BYTES * 8, &mut decoded_bytes);
         assert!(matches!(crc_err, Err(PacketDecodeError::Crc)));
 
         let parse_candidates = vec![vec![0; PACKET_BYTES * 8 - 1]];
-        let parse_err = try_decode_soft_list_candidates(&parse_candidates, PACKET_BYTES * 8);
+        let parse_err = try_decode_soft_list_candidates(
+            &parse_candidates,
+            PACKET_BYTES * 8,
+            &mut decoded_bytes,
+        );
         assert!(matches!(parse_err, Err(PacketDecodeError::Parse)));
     }
 
@@ -648,19 +666,23 @@ mod tests {
     fn test_decode_packet_distinguishes_crc_and_parse_errors() {
         let packet = Packet::new(9, 4, &[0x33; crate::params::PAYLOAD_SIZE]);
         let valid_bits = fec::bytes_to_bits(&packet.serialize());
-        assert_eq!(decode_packet(&valid_bits).unwrap(), packet);
+        let mut decoded_bytes = Vec::new();
+        assert_eq!(
+            decode_packet(&valid_bits, &mut decoded_bytes).unwrap(),
+            packet
+        );
 
         let mut crc_bits = valid_bits.clone();
         crc_bits[5] ^= 1;
         assert!(matches!(
-            decode_packet(&crc_bits),
+            decode_packet(&crc_bits, &mut decoded_bytes),
             Err(PacketDecodeError::Crc)
         ));
 
         let mut parse_bits = valid_bits.clone();
         parse_bits.extend_from_slice(&[0; 8]);
         assert!(matches!(
-            decode_packet(&parse_bits),
+            decode_packet(&parse_bits, &mut decoded_bytes),
             Err(PacketDecodeError::Parse)
         ));
     }
