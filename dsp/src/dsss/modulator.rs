@@ -55,6 +55,13 @@ pub struct Modulator {
     prev_phase: u8,
     /// キャリア波生成用NCO
     nco: Nco,
+    /// ゼロアロケーション用の作業バッファ
+    chips_i_buffer: Vec<f32>,
+    chips_q_buffer: Vec<f32>,
+    bb_i_buffer: Vec<f32>,
+    bb_q_buffer: Vec<f32>,
+    resampled_i_buffer: Vec<f32>,
+    resampled_q_buffer: Vec<f32>,
 }
 
 impl Modulator {
@@ -87,6 +94,12 @@ impl Modulator {
             config,
             prev_phase: 0,
             nco,
+            chips_i_buffer: Vec::with_capacity(4096),
+            chips_q_buffer: Vec::with_capacity(4096),
+            bb_i_buffer: Vec::with_capacity(4096),
+            bb_q_buffer: Vec::with_capacity(4096),
+            resampled_i_buffer: Vec::with_capacity(4096),
+            resampled_q_buffer: Vec::with_capacity(4096),
         }
     }
 
@@ -196,10 +209,28 @@ impl Modulator {
     fn chips_to_samples_into(&mut self, chips_i: &[f32], chips_q: &[f32], out: &mut Vec<f32>) {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         let spc = INTERNAL_SPC;
+        let needed_bb = chips_i.len() * spc;
+        let ratio = self.config.sample_rate / self.config.proc_sample_rate();
+        let est_out = ((needed_bb as f32) * ratio).ceil() as usize + 8;
+
+        let mut bb_i = Vec::new();
+        let mut bb_q = Vec::new();
+        let mut resampled_i = Vec::new();
+        let mut resampled_q = Vec::new();
+        std::mem::swap(&mut bb_i, &mut self.bb_i_buffer);
+        std::mem::swap(&mut bb_q, &mut self.bb_q_buffer);
+        std::mem::swap(&mut resampled_i, &mut self.resampled_i_buffer);
+        std::mem::swap(&mut resampled_q, &mut self.resampled_q_buffer);
 
         // 1. 内部レート (fs_proc) でのベースバンド信号生成
-        let mut bb_i = Vec::with_capacity(chips_i.len() * spc);
-        let mut bb_q = Vec::with_capacity(chips_i.len() * spc);
+        bb_i.clear();
+        bb_q.clear();
+        if bb_i.capacity() < needed_bb {
+            bb_i.reserve(needed_bb - bb_i.capacity());
+        }
+        if bb_q.capacity() < needed_bb {
+            bb_q.reserve(needed_bb - bb_q.capacity());
+        }
         for (&ci, &cq) in chips_i.iter().zip(chips_q.iter()) {
             for k in 0..spc {
                 let i_imp = if k == 0 { ci } else { 0.0 };
@@ -210,18 +241,35 @@ impl Modulator {
         }
 
         // 2. 出力レート (fs_out) へのリサンプリング
-        let mut resampled_i = Vec::new();
-        let mut resampled_q = Vec::new();
+        resampled_i.clear();
+        resampled_q.clear();
+        if resampled_i.capacity() < est_out {
+            resampled_i.reserve(est_out - resampled_i.capacity());
+        }
+        if resampled_q.capacity() < est_out {
+            resampled_q.reserve(est_out - resampled_q.capacity());
+        }
         self.resampler_i.process(&bb_i, &mut resampled_i);
         self.resampler_q.process(&bb_q, &mut resampled_q);
 
         // 3. 出力レートでのキャリア混合 (Mix)
         out.clear();
-        out.reserve(resampled_i.len().saturating_sub(out.capacity()));
+        if out.capacity() < resampled_i.len() {
+            out.reserve(resampled_i.len() - out.capacity());
+        }
         for (&i_f, &q_f) in resampled_i.iter().zip(resampled_q.iter()) {
             let lo = self.nco.step();
             out.push(i_f * lo.re - q_f * lo.im);
         }
+
+        bb_i.clear();
+        bb_q.clear();
+        resampled_i.clear();
+        resampled_q.clear();
+        std::mem::swap(&mut bb_i, &mut self.bb_i_buffer);
+        std::mem::swap(&mut bb_q, &mut self.bb_q_buffer);
+        std::mem::swap(&mut resampled_i, &mut self.resampled_i_buffer);
+        std::mem::swap(&mut resampled_q, &mut self.resampled_q_buffer);
     }
 
     /// RRCフィルタに残っている遅延分のサンプルをゼロで押し出して出力する
@@ -242,13 +290,26 @@ impl Modulator {
 
         let mut res_i = Vec::new();
         let mut res_q = Vec::new();
+        std::mem::swap(&mut res_i, &mut self.resampled_i_buffer);
+        std::mem::swap(&mut res_q, &mut self.resampled_q_buffer);
+        res_i.clear();
+        res_q.clear();
         self.resampler_i.flush(&mut res_i);
         self.resampler_q.flush(&mut res_q);
+        let required = out.len() + res_i.len();
+        if out.capacity() < required {
+            out.reserve(required - out.capacity());
+        }
 
         for (&si, &sq) in res_i.iter().zip(res_q.iter()) {
             let lo = self.nco.step();
             out.push(si * lo.re - sq * lo.im);
         }
+
+        res_i.clear();
+        res_q.clear();
+        std::mem::swap(&mut res_i, &mut self.resampled_i_buffer);
+        std::mem::swap(&mut res_q, &mut self.resampled_q_buffer);
     }
 
     /// 指定されたサンプル数分だけ無音 (0.0) を入力して Modulator を進める
@@ -265,6 +326,10 @@ impl Modulator {
         out.reserve(samples.saturating_sub(out.capacity()));
         let mut res_i = Vec::new();
         let mut res_q = Vec::new();
+        std::mem::swap(&mut res_i, &mut self.resampled_i_buffer);
+        std::mem::swap(&mut res_q, &mut self.resampled_q_buffer);
+        res_i.clear();
+        res_q.clear();
 
         // 出力サンプル数が samples に達するまで内部レートで無音を生成し、
         // リサンプルとミキシングを行う。
@@ -290,6 +355,11 @@ impl Modulator {
         }
 
         out.truncate(samples);
+
+        res_i.clear();
+        res_q.clear();
+        std::mem::swap(&mut res_i, &mut self.resampled_i_buffer);
+        std::mem::swap(&mut res_q, &mut self.resampled_q_buffer);
     }
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
@@ -312,8 +382,19 @@ impl Modulator {
             + sync_bits.len()
             + bits.len().div_ceil(MODULATION.bits_per_symbol())
             + 1;
-        let mut chips_i = Vec::with_capacity(total_symbols * sf);
-        let mut chips_q = Vec::with_capacity(total_symbols * sf);
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        std::mem::swap(&mut chips_i, &mut self.chips_i_buffer);
+        std::mem::swap(&mut chips_q, &mut self.chips_q_buffer);
+        chips_i.clear();
+        chips_q.clear();
+        let needed = total_symbols * sf;
+        if chips_i.capacity() < needed {
+            chips_i.reserve(needed - chips_i.capacity());
+        }
+        if chips_q.capacity() < needed {
+            chips_q.reserve(needed - chips_q.capacity());
+        }
 
         // 1. プリアンブル
         self.mseq.reset();
@@ -348,6 +429,11 @@ impl Modulator {
         chips_q.resize(margin_start_q + sf, 0.0);
 
         self.chips_to_samples_into(&chips_i, &chips_q, out);
+
+        chips_i.clear();
+        chips_q.clear();
+        std::mem::swap(&mut chips_i, &mut self.chips_i_buffer);
+        std::mem::swap(&mut chips_q, &mut self.chips_q_buffer);
     }
 
     /// 変調器の状態をリセット

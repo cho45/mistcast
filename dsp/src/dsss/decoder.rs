@@ -105,6 +105,8 @@ pub struct Decoder {
     pub stats_sync_time: Duration,
     pub stats_total_samples: usize,
     pub stats_synced_frames: usize,
+    tracking_llr_buffer: Vec<f32>,
+    best_attempt_llr_buffer: Vec<f32>,
     pub llr_callback: Option<LlrCallback>,
 }
 
@@ -119,13 +121,7 @@ struct TrackingState {
 }
 
 #[derive(Debug)]
-struct DecodedSoftBits {
-    llrs: Vec<f32>,
-}
-
-#[derive(Debug)]
 struct PayloadDecodeAttempt {
-    llrs: Vec<f32>,
     packets: Vec<Packet>,
     crc_errors: usize,
     parse_errors: usize,
@@ -271,6 +267,8 @@ impl Decoder {
             stats_sync_time: Duration::ZERO,
             stats_total_samples: 0,
             stats_synced_frames: 0,
+            tracking_llr_buffer: Vec::with_capacity(fec_bits),
+            best_attempt_llr_buffer: Vec::with_capacity(fec_bits),
             llr_callback: None,
         }
     }
@@ -546,7 +544,8 @@ impl Decoder {
         num_bits: usize,
         initial_state: TrackingState,
         pn: &[f32],
-    ) -> Option<DecodedSoftBits> {
+        llrs: &mut Vec<f32>,
+    ) -> Option<()> {
         let sf = self.config.spread_factor();
         let spc = self.config.proc_samples_per_chip().max(1);
         let symbol_len = sf * spc;
@@ -561,7 +560,10 @@ impl Decoder {
         let timing_limit = spc as f32 * TRACKING_TIMING_LIMIT_CHIP;
         let timing_rate_limit = spc as f32 * TRACKING_TIMING_RATE_LIMIT_CHIP;
         let early_late_delta = (spc as f32 * TRACKING_EARLY_LATE_DELTA_CHIP).max(1.0);
-        let mut llrs = Vec::with_capacity(num_bits);
+        llrs.clear();
+        if llrs.capacity() < num_bits {
+            llrs.reserve(num_bits - llrs.capacity());
+        }
         let mut noise_var = initial_state
             .noise_var
             .clamp(LLR_NOISE_VAR_MIN, LLR_NOISE_VAR_MAX);
@@ -625,7 +627,7 @@ impl Decoder {
         }
 
         llrs.truncate(num_bits);
-        Some(DecodedSoftBits { llrs })
+        Some(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -638,17 +640,22 @@ impl Decoder {
         pn: &[f32],
         fec_bits_len: usize,
         p_bits_len: usize,
+        llrs: &mut Vec<f32>,
     ) -> Option<PayloadDecodeAttempt> {
         let spc = self.config.proc_samples_per_chip().max(1) as f32;
         let timing_limit = spc * TRACKING_TIMING_LIMIT_CHIP;
         initial_state.timing_offset =
             (initial_state.timing_offset + timing_bias).clamp(-timing_limit, timing_limit);
-        let decoded_soft_bits =
-            self.decode_bits_with_tracking(payload_start, burst_data_bits_len, initial_state, pn)?;
+        self.decode_bits_with_tracking(
+            payload_start,
+            burst_data_bits_len,
+            initial_state,
+            pn,
+            llrs,
+        )?;
         let (packets, crc_errors, parse_errors) =
-            self.parse_payload_packets(&decoded_soft_bits.llrs, fec_bits_len, p_bits_len);
+            self.parse_payload_packets(llrs, fec_bits_len, p_bits_len);
         Some(PayloadDecodeAttempt {
-            llrs: decoded_soft_bits.llrs,
             packets,
             crc_errors,
             parse_errors,
@@ -666,22 +673,6 @@ impl Decoder {
                         && candidate.parse_errors < best.parse_errors)))
     }
 
-    fn select_best_payload_attempt(
-        attempts: impl IntoIterator<Item = PayloadDecodeAttempt>,
-    ) -> Option<PayloadDecodeAttempt> {
-        let mut best: Option<PayloadDecodeAttempt> = None;
-        for candidate in attempts {
-            let replace = match best.as_ref() {
-                None => true,
-                Some(current) => Self::is_better_payload_attempt(&candidate, current),
-            };
-            if replace {
-                best = Some(candidate);
-            }
-        }
-        best
-    }
-
     fn decode_payload_with_timing_retries(
         &mut self,
         payload_start: usize,
@@ -693,7 +684,13 @@ impl Decoder {
     ) -> Option<PayloadDecodeAttempt> {
         let spc = self.config.proc_samples_per_chip().max(1) as f32;
         let timing_biases = [-0.75f32 * spc, 0.0, 0.75f32 * spc];
-        let mut attempts = Vec::with_capacity(timing_biases.len());
+
+        let mut attempt_llrs = Vec::new();
+        let mut best_llrs = Vec::new();
+        std::mem::swap(&mut attempt_llrs, &mut self.tracking_llr_buffer);
+        std::mem::swap(&mut best_llrs, &mut self.best_attempt_llr_buffer);
+
+        let mut best: Option<PayloadDecodeAttempt> = None;
         for timing_bias in timing_biases {
             if let Some(attempt) = self.try_decode_payload_once(
                 payload_start,
@@ -703,14 +700,27 @@ impl Decoder {
                 pn,
                 fec_bits_len,
                 p_bits_len,
+                &mut attempt_llrs,
             ) {
-                attempts.push(attempt);
+                let replace = best
+                    .as_ref()
+                    .is_none_or(|current| Self::is_better_payload_attempt(&attempt, current));
+                if replace {
+                    best_llrs.clear();
+                    best_llrs.extend_from_slice(&attempt_llrs);
+                    best = Some(attempt);
+                }
             }
         }
-        let best = Self::select_best_payload_attempt(attempts);
-        if let Some(attempt) = best.as_ref() {
-            self.emit_packet_llr_callbacks(&attempt.llrs, fec_bits_len);
+        if best.is_some() {
+            self.emit_packet_llr_callbacks(&best_llrs, fec_bits_len);
         }
+
+        attempt_llrs.clear();
+        best_llrs.clear();
+        std::mem::swap(&mut attempt_llrs, &mut self.tracking_llr_buffer);
+        std::mem::swap(&mut best_llrs, &mut self.best_attempt_llr_buffer);
+
         best
     }
 
@@ -757,15 +767,17 @@ impl Decoder {
         let Some(callback) = self.llr_callback.as_mut() else {
             return;
         };
+        self.deinterleave_buffer.resize(fec_bits_len, 0.0);
         for packet_llrs in payload_llrs.chunks_exact(fec_bits_len) {
-            let mut descrambled_llr = self.interleaver.deinterleave_f32(packet_llrs);
+            self.interleaver
+                .deinterleave_f32_in_place(packet_llrs, &mut self.deinterleave_buffer);
             let mut scrambler = crate::coding::scrambler::Scrambler::default();
-            for llr in descrambled_llr.iter_mut() {
+            for llr in self.deinterleave_buffer.iter_mut() {
                 if scrambler.next_bit() == 1 {
                     *llr = -*llr;
                 }
             }
-            callback(&descrambled_llr);
+            callback(&self.deinterleave_buffer);
         }
     }
 
@@ -952,6 +964,8 @@ impl Decoder {
         self.stats_sync_time = Duration::ZERO;
         self.stats_total_samples = 0;
         self.stats_synced_frames = 0;
+        self.tracking_llr_buffer.clear();
+        self.best_attempt_llr_buffer.clear();
         self.rebuild_fountain_decoder(self.fountain_decoder.params().k);
     }
 
