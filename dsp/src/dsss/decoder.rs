@@ -107,6 +107,8 @@ pub struct Decoder {
     pub stats_synced_frames: usize,
     tracking_llr_buffer: Vec<f32>,
     best_attempt_llr_buffer: Vec<f32>,
+    tracking_packets_buffer: Vec<Packet>,
+    best_attempt_packets_buffer: Vec<Packet>,
     pub llr_callback: Option<LlrCallback>,
 }
 
@@ -122,7 +124,7 @@ struct TrackingState {
 
 #[derive(Debug)]
 struct PayloadDecodeAttempt {
-    packets: Vec<Packet>,
+    packet_count: usize,
     crc_errors: usize,
     parse_errors: usize,
 }
@@ -200,6 +202,7 @@ impl Decoder {
         let fec_bits = raw_bits * 2;
         let il_rows = 16;
         let il_cols = fec_bits.div_ceil(16);
+        let packets_per_burst = dsp_config.packets_per_burst.max(1);
         let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
 
         // リサンプラのカットオフ設定:
@@ -271,6 +274,8 @@ impl Decoder {
             stats_synced_frames: 0,
             tracking_llr_buffer: Vec::with_capacity(fec_bits),
             best_attempt_llr_buffer: Vec::with_capacity(fec_bits),
+            tracking_packets_buffer: Vec::with_capacity(packets_per_burst),
+            best_attempt_packets_buffer: Vec::with_capacity(packets_per_burst),
             llr_callback: None,
         }
     }
@@ -422,13 +427,12 @@ impl Decoder {
                 self.current_sync = None;
                 continue;
             };
-            let decoded_packets = attempt.packets;
             let crc_errors = attempt.crc_errors;
             let parse_errors = attempt.parse_errors;
             self.crc_error_packets += crc_errors;
             self.parse_error_packets += parse_errors;
 
-            if decoded_packets.is_empty() || crc_errors > 0 {
+            if attempt.packet_count == 0 || crc_errors > 0 {
                 // payload が全滅した候補は境界ずれとして破棄する。
                 if self.fountain_decoder.received_count() == 0 && self.crc_error_packets < 20 {
                     // 起動直後だけ同期長ぶん先へ寄せて再探索し、誤同期固定化を崩す。
@@ -444,7 +448,9 @@ impl Decoder {
                 continue;
             }
 
-            for packet in decoded_packets {
+            let mut decoded_packets = Vec::new();
+            std::mem::swap(&mut decoded_packets, &mut self.best_attempt_packets_buffer);
+            for packet in decoded_packets.drain(..) {
                 // ... (FountainDecoder への供給ロジック) ...
                 let pkt_k = packet.lt_k as usize;
                 if pkt_k != self.fountain_decoder.params().k {
@@ -480,6 +486,8 @@ impl Decoder {
                     self.recovered_data = Some(data);
                 }
             }
+            decoded_packets.clear();
+            std::mem::swap(&mut decoded_packets, &mut self.best_attempt_packets_buffer);
             // 受信窓をバースト分前進させる
             let actual_end = (payload_start
                 + burst_data_bits_len / bits_per_symbol_payload * sf * spc)
@@ -643,6 +651,7 @@ impl Decoder {
         fec_bits_len: usize,
         p_bits_len: usize,
         llrs: &mut Vec<f32>,
+        decoded_packets: &mut Vec<Packet>,
     ) -> Option<PayloadDecodeAttempt> {
         let spc = self.config.proc_samples_per_chip().max(1) as f32;
         let timing_limit = spc * TRACKING_TIMING_LIMIT_CHIP;
@@ -655,10 +664,10 @@ impl Decoder {
             pn,
             llrs,
         )?;
-        let (packets, crc_errors, parse_errors) =
-            self.parse_payload_packets(llrs, fec_bits_len, p_bits_len);
+        let (crc_errors, parse_errors) =
+            self.parse_payload_packets_into(llrs, fec_bits_len, p_bits_len, decoded_packets);
         Some(PayloadDecodeAttempt {
-            packets,
+            packet_count: decoded_packets.len(),
             crc_errors,
             parse_errors,
         })
@@ -668,8 +677,8 @@ impl Decoder {
         candidate: &PayloadDecodeAttempt,
         best: &PayloadDecodeAttempt,
     ) -> bool {
-        candidate.packets.len() > best.packets.len()
-            || (candidate.packets.len() == best.packets.len()
+        candidate.packet_count > best.packet_count
+            || (candidate.packet_count == best.packet_count
                 && (candidate.crc_errors < best.crc_errors
                     || (candidate.crc_errors == best.crc_errors
                         && candidate.parse_errors < best.parse_errors)))
@@ -689,8 +698,14 @@ impl Decoder {
 
         let mut attempt_llrs = Vec::new();
         let mut best_llrs = Vec::new();
+        let mut attempt_packets = Vec::new();
+        let mut best_packets = Vec::new();
         std::mem::swap(&mut attempt_llrs, &mut self.tracking_llr_buffer);
         std::mem::swap(&mut best_llrs, &mut self.best_attempt_llr_buffer);
+        std::mem::swap(&mut attempt_packets, &mut self.tracking_packets_buffer);
+        std::mem::swap(&mut best_packets, &mut self.best_attempt_packets_buffer);
+        attempt_packets.clear();
+        best_packets.clear();
 
         let mut best: Option<PayloadDecodeAttempt> = None;
         for timing_bias in timing_biases {
@@ -703,6 +718,7 @@ impl Decoder {
                 fec_bits_len,
                 p_bits_len,
                 &mut attempt_llrs,
+                &mut attempt_packets,
             ) {
                 let replace = best
                     .as_ref()
@@ -710,29 +726,44 @@ impl Decoder {
                 if replace {
                     best_llrs.clear();
                     best_llrs.extend_from_slice(&attempt_llrs);
+                    std::mem::swap(&mut best_packets, &mut attempt_packets);
                     best = Some(attempt);
                 }
             }
         }
         if best.is_some() {
             self.emit_packet_llr_callbacks(&best_llrs, fec_bits_len);
+        } else {
+            best_packets.clear();
         }
 
         attempt_llrs.clear();
         best_llrs.clear();
+        attempt_packets.clear();
         std::mem::swap(&mut attempt_llrs, &mut self.tracking_llr_buffer);
         std::mem::swap(&mut best_llrs, &mut self.best_attempt_llr_buffer);
+        std::mem::swap(&mut attempt_packets, &mut self.tracking_packets_buffer);
+        std::mem::swap(&mut best_packets, &mut self.best_attempt_packets_buffer);
 
         best
     }
 
-    fn parse_payload_packets(
+    fn parse_payload_packets_into(
         &mut self,
         payload_llrs: &[f32],
         fec_bits_len: usize,
         p_bits_len: usize,
-    ) -> (Vec<Packet>, usize, usize) {
-        let mut decoded_packets = Vec::new();
+        decoded_packets: &mut Vec<Packet>,
+    ) -> (usize, usize) {
+        decoded_packets.clear();
+        let packet_capacity = if fec_bits_len > 0 {
+            payload_llrs.len() / fec_bits_len
+        } else {
+            0
+        };
+        if decoded_packets.capacity() < packet_capacity {
+            decoded_packets.reserve(packet_capacity - decoded_packets.capacity());
+        }
         let mut crc_errors = 0usize;
         let mut parse_errors = 0usize;
         self.deinterleave_buffer.resize(fec_bits_len, 0.0);
@@ -762,7 +793,7 @@ impl Decoder {
                 Err(PacketParseError::InvalidLength { .. }) => parse_errors += 1,
             }
         }
-        (decoded_packets, crc_errors, parse_errors)
+        (crc_errors, parse_errors)
     }
 
     fn emit_packet_llr_callbacks(&mut self, payload_llrs: &[f32], fec_bits_len: usize) {
@@ -968,6 +999,8 @@ impl Decoder {
         self.stats_synced_frames = 0;
         self.tracking_llr_buffer.clear();
         self.best_attempt_llr_buffer.clear();
+        self.tracking_packets_buffer.clear();
+        self.best_attempt_packets_buffer.clear();
         self.rebuild_fountain_decoder(self.fountain_decoder.params().k);
     }
 
@@ -1583,8 +1616,7 @@ mod tests {
             "ideal first frame should have no parse errors"
         );
         assert_eq!(
-            attempt.packets.len(),
-            1,
+            attempt.packet_count, 1,
             "ideal first frame should decode one packet"
         );
     }
@@ -1663,8 +1695,7 @@ mod tests {
                 frame_idx
             );
             assert_eq!(
-                attempt.packets.len(),
-                1,
+                attempt.packet_count, 1,
                 "isolated ideal frame {} should decode one packet",
                 frame_idx
             );
@@ -1690,8 +1721,13 @@ mod tests {
             8.0,
         ));
 
-        let (packets, crc_errors, parse_errors) =
-            decoder.parse_payload_packets(&payload_llrs, fec_bits_len, p_bits_len);
+        let mut packets = Vec::new();
+        let (crc_errors, parse_errors) = decoder.parse_payload_packets_into(
+            &payload_llrs,
+            fec_bits_len,
+            p_bits_len,
+            &mut packets,
+        );
 
         assert_eq!(packets, vec![valid_packet]);
         assert_eq!(crc_errors, 1);

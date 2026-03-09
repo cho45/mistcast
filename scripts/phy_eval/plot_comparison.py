@@ -7,7 +7,7 @@ import os
 import re
 import math
 
-def run_eval(phy, packets_per_frame="3", sweep_awgn="0.2,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.8,0.9",
+def run_eval(phy, packets_per_frame="3", sweep_awgn="0.2,0.3,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.8,0.85,0.9,0.95,1.0,1.2",
              columns="scenario,crc_pass_ratio,goodput_effective_bps,goodput_success_mean_bps,ebn0_db,raw_ber",
              mode="sweep-awgn", **extra_args):
     """指定された PHY で評価を実行し、JSON 結果を返す
@@ -74,7 +74,9 @@ def main():
         {
             "name": "dsss",
             "phy": "dsss",
-            "args": {}
+            "args": {
+                "packets_per_frame": "1",
+            }
         }
     ]
 
