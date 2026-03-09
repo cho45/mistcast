@@ -204,7 +204,7 @@ impl FountainDecoder {
             return ReceiveOutcome::DuplicateSeq;
         }
 
-        let rank_up = self.insert_row(packet.coefficients, packet.data);
+        let rank_up = self.insert_row_inner(packet.coefficients, packet.data);
         if rank_up {
             ReceiveOutcome::AcceptedRankUp
         } else {
@@ -231,7 +231,7 @@ impl FountainDecoder {
             return ReceiveOutcome::DuplicateSeq;
         }
 
-        let rank_up = self.insert_row_array(coefficients, data);
+        let rank_up = self.insert_row_inner(coefficients, data);
         if rank_up {
             ReceiveOutcome::AcceptedRankUp
         } else {
@@ -243,85 +243,53 @@ impl FountainDecoder {
         let _ = self.receive_with_outcome(packet);
     }
 
-    fn insert_row(&mut self, mut coeffs: Vec<u8>, mut data: Vec<u8>) -> bool {
+    fn insert_row_inner<D>(&mut self, mut coeffs: Vec<u8>, mut data: D) -> bool
+    where
+        D: AsMut<[u8]> + Into<Vec<u8>>,
+    {
         let k = self.params.k;
+        let pivot_col = {
+            let data_slice = data.as_mut();
 
-        for col in 0..k {
-            if coeffs[col] == 0 {
-                continue;
-            }
-            if let Some(pivot_row) = self.basis[col].as_ref() {
-                let factor = coeffs[col];
-                row_axpy(&mut coeffs, &pivot_row.coeffs, factor);
-                row_axpy(&mut data, &pivot_row.data, factor);
-            }
-        }
-
-        let Some(pivot_col) = coeffs.iter().position(|&c| c != 0) else {
-            return false;
-        };
-
-        let inv = gf_inv(coeffs[pivot_col]);
-        row_scale(&mut coeffs, inv);
-        row_scale(&mut data, inv);
-
-        for other_col in 0..k {
-            if other_col == pivot_col {
-                continue;
-            }
-            if let Some(other_row) = self.basis[other_col].as_mut() {
-                let factor = other_row.coeffs[pivot_col];
-                if factor != 0 {
-                    row_axpy(&mut other_row.coeffs, &coeffs, factor);
-                    row_axpy(&mut other_row.data, &data, factor);
+            for col in 0..k {
+                if coeffs[col] == 0 {
+                    continue;
+                }
+                if let Some(pivot_row) = self.basis[col].as_ref() {
+                    let factor = coeffs[col];
+                    row_axpy(&mut coeffs, &pivot_row.coeffs, factor);
+                    row_axpy(data_slice, &pivot_row.data, factor);
                 }
             }
-        }
 
-        self.basis[pivot_col] = Some(BasisRow { coeffs, data });
-        self.current_rank += 1;
-        true
-    }
+            let Some(pivot_col) = coeffs.iter().position(|&c| c != 0) else {
+                return false;
+            };
 
-    fn insert_row_array(&mut self, mut coeffs: Vec<u8>, mut data: [u8; PAYLOAD_SIZE]) -> bool {
-        let k = self.params.k;
+            let inv = gf_inv(coeffs[pivot_col]);
+            row_scale(&mut coeffs, inv);
+            row_scale(data_slice, inv);
 
-        for col in 0..k {
-            if coeffs[col] == 0 {
-                continue;
-            }
-            if let Some(pivot_row) = self.basis[col].as_ref() {
-                let factor = coeffs[col];
-                row_axpy(&mut coeffs, &pivot_row.coeffs, factor);
-                row_axpy(&mut data, &pivot_row.data, factor);
-            }
-        }
-
-        let Some(pivot_col) = coeffs.iter().position(|&c| c != 0) else {
-            return false;
-        };
-
-        let inv = gf_inv(coeffs[pivot_col]);
-        row_scale(&mut coeffs, inv);
-        row_scale(&mut data, inv);
-
-        for other_col in 0..k {
-            if other_col == pivot_col {
-                continue;
-            }
-            if let Some(other_row) = self.basis[other_col].as_mut() {
-                let factor = other_row.coeffs[pivot_col];
-                if factor != 0 {
-                    row_axpy(&mut other_row.coeffs, &coeffs, factor);
-                    row_axpy(&mut other_row.data, &data, factor);
+            for other_col in 0..k {
+                if other_col == pivot_col {
+                    continue;
+                }
+                if let Some(other_row) = self.basis[other_col].as_mut() {
+                    let factor = other_row.coeffs[pivot_col];
+                    if factor != 0 {
+                        row_axpy(&mut other_row.coeffs, &coeffs, factor);
+                        row_axpy(&mut other_row.data, data_slice, factor);
+                    }
                 }
             }
-        }
 
-        // rank-up 時のみ永続化のため Vec を確保する。
+            pivot_col
+        };
+
+        // rank-up 時のみ永続化のため Vec を確保する(配列経路でも同様)。
         self.basis[pivot_col] = Some(BasisRow {
             coeffs,
-            data: data.to_vec(),
+            data: data.into(),
         });
         self.current_rank += 1;
         true
