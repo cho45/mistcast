@@ -34,7 +34,7 @@ use crate::DspConfig;
 use num_complex::Complex32;
 
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
-const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.20;
+const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.10;
 const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 
 // DecodeProgressとCirNormalizationModeは各モジュールから再エクスポート

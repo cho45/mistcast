@@ -717,7 +717,7 @@ mod tests {
             mary_cir_tap_alpha: 0.0,
             mary_viterbi_list: 1,
             mary_llr_erasure_second_pass: true,
-            mary_llr_erasure_q: 0.2,
+            mary_llr_erasure_q: 0.1,
             mary_llr_erasure_list: 8,
             columns: None,
             output: OutputFormat::Csv,
