@@ -146,7 +146,7 @@ impl BlockInterleaver {
 }
 
 /// 代数インターリーバー (Algebraic / Prime Interleaver)
-/// 
+///
 /// `i_out = (i_in * q) % N` の数式を用いてマッピングを行う。
 /// N と q は互いに素である必要がある。
 pub struct AlgebraicInterleaver {
@@ -162,32 +162,32 @@ impl AlgebraicInterleaver {
     /// `n` と `q` が互いに素でない場合、または `n == 0` の場合にパニックする
     pub fn new(n: usize, q: usize) -> Self {
         assert!(n > 0, "size must be greater than 0");
-        
+
         // 互いに素であることの確認と、モジュラ逆元の計算 (拡張ユークリッドの互除法)
         let mut t_new = 1isize;
         let mut t_old = 0isize;
         let mut r_new = q as isize;
         let mut r_old = n as isize;
-        
+
         while r_new != 0 {
             let quotient = r_old / r_new;
-            
+
             let t_temp = t_old - quotient * t_new;
             t_old = t_new;
             t_new = t_temp;
-            
+
             let r_temp = r_old - quotient * r_new;
             r_old = r_new;
             r_new = r_temp;
         }
-        
+
         assert!(r_old == 1, "n and q must be coprime");
-        
+
         let mut q_inv = t_old;
         if q_inv < 0 {
             q_inv += n as isize;
         }
-        
+
         AlgebraicInterleaver {
             n,
             q,
@@ -198,7 +198,7 @@ impl AlgebraicInterleaver {
     pub fn size(&self) -> usize {
         self.n
     }
-    
+
     pub fn q(&self) -> usize {
         self.q
     }
@@ -302,13 +302,13 @@ mod tests {
     fn test_algebraic_f32_roundtrip() {
         let il = AlgebraicInterleaver::new(348, 55);
         let input: Vec<f32> = (0..348).map(|i| i as f32 * 0.1).collect();
-        
+
         // Manual interleave for test setup
         let mut interleaved = vec![0.0f32; 348];
         for i in 0..348 {
             interleaved[i] = input[(i * 55) % 348];
         }
-        
+
         let recovered = il.deinterleave_f32(&interleaved);
         assert_eq!(recovered, input);
     }
@@ -339,7 +339,7 @@ mod tests {
 
         assert_eq!(output, expected);
     }
-    
+
     #[test]
     #[should_panic(expected = "n and q must be coprime")]
     fn test_algebraic_not_coprime() {
