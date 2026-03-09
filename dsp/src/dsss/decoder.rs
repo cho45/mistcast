@@ -69,6 +69,7 @@ pub struct Decoder {
     rrc_filter_q: RrcFilter,
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
+    sample_buffer_start: usize,
     mix_buffer_i: Vec<f32>,
     mix_buffer_q: Vec<f32>,
     resample_buffer_i: Vec<f32>,
@@ -134,6 +135,47 @@ struct SymbolSoftDecision {
 }
 
 impl Decoder {
+    #[inline]
+    fn active_sample_buffer_i(&self) -> &[f32] {
+        &self.sample_buffer_i[self.sample_buffer_start..]
+    }
+
+    #[inline]
+    fn active_sample_buffer_q(&self) -> &[f32] {
+        &self.sample_buffer_q[self.sample_buffer_start..]
+    }
+
+    #[inline]
+    fn active_sample_len(&self) -> usize {
+        self.sample_buffer_i
+            .len()
+            .saturating_sub(self.sample_buffer_start)
+    }
+
+    #[inline]
+    fn consume_sample_front(&mut self, n: usize) {
+        let consume = n.min(self.active_sample_len());
+        self.sample_buffer_start =
+            (self.sample_buffer_start + consume).min(self.sample_buffer_i.len());
+    }
+
+    #[inline]
+    fn maybe_compact_sample_buffers(&mut self, max_active_len: usize) {
+        if self.sample_buffer_start == 0 {
+            return;
+        }
+        let len = self.sample_buffer_i.len();
+        let should_compact = self.sample_buffer_start >= (max_active_len / 2).max(1)
+            || self.sample_buffer_start * 2 >= len
+            || len > max_active_len.saturating_mul(2);
+
+        if should_compact {
+            self.sample_buffer_i.drain(0..self.sample_buffer_start);
+            self.sample_buffer_q.drain(0..self.sample_buffer_start);
+            self.sample_buffer_start = 0;
+        }
+    }
+
     fn build_pn_chips(mseq_order: usize, sf: usize) -> Vec<f32> {
         let mut mseq = crate::common::msequence::MSequence::new(mseq_order);
         mseq.generate(sf).into_iter().map(|v| v as f32).collect()
@@ -190,6 +232,7 @@ impl Decoder {
             rrc_filter_q: RrcFilter::from_config(&dsp_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
+            sample_buffer_start: 0,
             mix_buffer_i: Vec::with_capacity(4096),
             mix_buffer_q: Vec::with_capacity(4096),
             resample_buffer_i: Vec::with_capacity(6144),
@@ -266,7 +309,7 @@ impl Decoder {
         let total_symbols = sync_symbol_len + payload_symbols;
         let symbol_len = sf * spc;
         let frame_samples = (total_symbols * symbol_len).max(1);
-        let queued_frames = self.sample_buffer_i.len() / frame_samples;
+        let queued_frames = self.active_sample_len() / frame_samples;
         // バッファ量に応じて反復回数を決める。過不足を避けるために上下限を設ける。
         let mut iteration_budget = (queued_frames + ITERATION_BUDGET_HEADROOM)
             .clamp(ITERATION_BUDGET_MIN, ITERATION_BUDGET_MAX);
@@ -288,8 +331,8 @@ impl Decoder {
                 #[cfg(not(target_arch = "wasm32"))]
                 let sync_start = Instant::now();
                 let (sync_opt, next_search_idx) = self.sync_detector.detect(
-                    &self.sample_buffer_i,
-                    &self.sample_buffer_q,
+                    self.active_sample_buffer_i(),
+                    self.active_sample_buffer_q(),
                     self.last_search_idx,
                 );
                 self.stats_sync_calls += 1;
@@ -305,11 +348,11 @@ impl Decoder {
                     s
                 } else {
                     self.last_search_idx = next_search_idx;
-                    if self.sample_buffer_i.len() > max_buffer_len {
+                    if self.active_sample_len() > max_buffer_len {
                         let drain = drain_len;
-                        self.sample_buffer_i.drain(0..drain);
-                        self.sample_buffer_q.drain(0..drain);
+                        self.consume_sample_front(drain);
                         self.last_search_idx = self.last_search_idx.saturating_sub(drain);
+                        self.maybe_compact_sample_buffers(max_buffer_len);
                     }
                     break;
                 }
@@ -319,12 +362,12 @@ impl Decoder {
             let data_end_sample = start + total_symbols * sf * spc;
             let decode_guard_samples = spc * 2 + 1;
             let decode_ready_end = data_end_sample + decode_guard_samples;
-            let next_search_after_candidate = data_end_sample.min(self.sample_buffer_i.len());
+            let next_search_after_candidate = data_end_sample.min(self.active_sample_len());
 
             // データが溜まるのを待つ (start は既に SYNC_WORD の開始点付近)
-            if self.sample_buffer_i.len() < decode_ready_end {
+            if self.active_sample_len() < decode_ready_end {
                 // タイムアウト監視
-                if start + symbol_len < self.sample_buffer_i.len().saturating_sub(max_buffer_len) {
+                if start + symbol_len < self.active_sample_len().saturating_sub(max_buffer_len) {
                     self.current_sync = None;
                     self.last_search_idx = 0;
                     continue;
@@ -430,11 +473,11 @@ impl Decoder {
             // 受信窓をバースト分前進させる
             let actual_end = (payload_start
                 + burst_data_bits_len / bits_per_symbol_payload * sf * spc)
-                .min(self.sample_buffer_i.len());
-            self.sample_buffer_i.drain(0..actual_end);
-            self.sample_buffer_q.drain(0..actual_end);
+                .min(self.active_sample_len());
+            self.consume_sample_front(actual_end);
             self.last_search_idx = 0;
             self.current_sync = None;
+            self.maybe_compact_sample_buffers(max_buffer_len);
         }
 
         i_mixed.clear();
@@ -458,6 +501,7 @@ impl Decoder {
         sample_shift: f32,
     ) -> Option<Complex32> {
         let spc = self.config.proc_samples_per_chip().max(1);
+        let active_len = self.active_sample_len() as i32;
         let mut sum_i = 0.0f32;
         let mut sum_q = 0.0f32;
         for (chip_idx, &pn_val) in pn.iter().enumerate() {
@@ -469,15 +513,16 @@ impl Decoder {
             let i0 = p.floor() as i32;
             let frac = p - i0 as f32;
             let i1 = i0 + 1;
-            if i0 < 0 || i1 >= self.sample_buffer_i.len() as i32 {
+            if i0 < 0 || i1 >= active_len {
                 return None;
             }
+            let base = self.sample_buffer_start;
+            let i0u = base + i0 as usize;
+            let i1u = base + i1 as usize;
             let w0 = 1.0 - frac;
             let w1 = frac;
-            let si =
-                self.sample_buffer_i[i0 as usize] * w0 + self.sample_buffer_i[i1 as usize] * w1;
-            let sq =
-                self.sample_buffer_q[i0 as usize] * w0 + self.sample_buffer_q[i1 as usize] * w1;
+            let si = self.sample_buffer_i[i0u] * w0 + self.sample_buffer_i[i1u] * w1;
+            let sq = self.sample_buffer_q[i0u] * w0 + self.sample_buffer_q[i1u] * w1;
             sum_i += si * pn_val;
             sum_q += sq * pn_val;
         }
@@ -864,6 +909,7 @@ impl Decoder {
         self.rrc_filter_q.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
+        self.sample_buffer_start = 0;
         self.mix_buffer_i.clear();
         self.mix_buffer_q.clear();
         self.resample_buffer_i.clear();
@@ -1125,6 +1171,42 @@ mod tests {
         assert!(!progress.complete);
         assert_eq!(progress.received_packets, 0);
         assert!(decoder.recovered_data().is_none());
+    }
+
+    #[test]
+    fn test_unsynced_long_run_keeps_physical_buffer_bounded() {
+        let dsp_config = crate::dsss::params::dsp_config_48k();
+        let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
+        let chunk = vec![0.0f32; 2048];
+
+        let mut peak_physical_len = 0usize;
+        let mut peak_active_len = 0usize;
+        for _ in 0..600 {
+            let progress = decoder.process_samples(&chunk);
+            assert!(
+                !progress.complete,
+                "silence should remain unsynced during long run"
+            );
+
+            peak_physical_len = peak_physical_len.max(decoder.sample_buffer_i.len());
+            peak_active_len = peak_active_len.max(decoder.active_sample_len());
+            assert_eq!(decoder.sample_buffer_i.len(), decoder.sample_buffer_q.len());
+            assert!(decoder.sample_buffer_start <= decoder.sample_buffer_i.len());
+        }
+
+        // active は max_buffer_len(100_000) を大きく超えて増え続けないこと
+        assert!(
+            peak_active_len <= 102_048,
+            "active buffer grew too large: peak_active_len={}",
+            peak_active_len
+        );
+
+        // physical も compaction により上限内に収まること
+        assert!(
+            peak_physical_len <= 120_000,
+            "physical buffer grew too large: peak_physical_len={}",
+            peak_physical_len
+        );
     }
 
     #[test]
