@@ -20,15 +20,15 @@ pub mod interleaver_config {
     /// テールビット数（畳み込み符号の終了処理）
     pub const TAIL_BITS: usize = 6;
 
-    /// インターリーバ行数（29）
+    /// インターリーバ行数（12）
     ///
-    /// 29 × 12 = 348 = fec_bits と一致するよう設定
-    pub const INTERLEAVER_ROWS: usize = 29;
+    /// 12 × 29 = 348 = fec_bits と一致するよう設定
+    pub const INTERLEAVER_ROWS: usize = 12;
 
-    /// インターリーバ列数（12）
+    /// インターリーバ列数（29）
     ///
-    /// 29 × 12 = 348 = fec_bits と一致するよう設定
-    pub const INTERLEAVER_COLS: usize = 12;
+    /// 12 × 29 = 348 = fec_bits と一致するよう設定
+    pub const INTERLEAVER_COLS: usize = 29;
 
     /// 生ビット数（パケットバイト数 + テールビット）
     #[inline]
@@ -88,13 +88,13 @@ mod tests {
         );
         assert_eq!(
             interleaver_config::INTERLEAVER_ROWS,
-            29,
-            "INTERLEAVER_ROWS should be 29"
+            12,
+            "INTERLEAVER_ROWS should be 12"
         );
         assert_eq!(
             interleaver_config::INTERLEAVER_COLS,
-            12,
-            "INTERLEAVER_COLS should be 12"
+            29,
+            "INTERLEAVER_COLS should be 29"
         );
         assert_eq!(
             interleaver_config::interleaved_bits(),
