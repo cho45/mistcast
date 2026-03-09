@@ -63,6 +63,8 @@ pub struct EqualizationController {
     equalizer: Option<FrequencyDomainEqualizer>,
     equalized_buffer: Vec<Complex32>,
     equalizer_input_offset: usize,
+    eval_input_buffer: Vec<Complex32>,
+    eval_output_buffer: Vec<Complex32>,
     fde_enabled: bool,
     current_frame_use_fde: bool,
     fde_auto_path_select: bool,
@@ -95,6 +97,8 @@ impl EqualizationController {
             equalizer,
             equalized_buffer: Vec::new(),
             equalizer_input_offset: 0,
+            eval_input_buffer: Vec::new(),
+            eval_output_buffer: Vec::new(),
             fde_enabled,
             current_frame_use_fde: fde_enabled,
             fde_auto_path_select: false,
@@ -208,11 +212,11 @@ impl EqualizationController {
             )
             .unwrap_or(f32::NAN);
 
-        let Some(eq) = self.equalizer.as_mut() else {
+        let Some(eq_ref) = self.equalizer.as_ref() else {
             return (mse_raw, f32::NAN);
         };
 
-        let overlap = eq.overlap_len();
+        let overlap = eq_ref.overlap_len();
         let available_history = sync_start_idx.min(overlap);
         let missing_history = overlap - available_history;
         let analysis_start = sync_start_idx - available_history;
@@ -221,13 +225,28 @@ impl EqualizationController {
             return (mse_raw, f32::NAN);
         }
 
-        let mut eval_input = Vec::with_capacity(input_len);
+        let mut eval_input = Vec::new();
+        std::mem::swap(&mut eval_input, &mut self.eval_input_buffer);
+        eval_input.clear();
+        eval_input.reserve(input_len);
         eval_input.resize(missing_history, Complex32::new(0.0, 0.0));
         for idx in analysis_start..sync_end_idx {
             eval_input.push(Complex32::new(sample_buffer_i[idx], sample_buffer_q[idx]));
         }
 
-        let mut eval_output = Vec::with_capacity(input_len);
+        let mut eval_output = Vec::new();
+        std::mem::swap(&mut eval_output, &mut self.eval_output_buffer);
+        eval_output.clear();
+        eval_output.reserve(input_len + overlap);
+
+        let Some(eq) = self.equalizer.as_mut() else {
+            eval_input.clear();
+            eval_output.clear();
+            std::mem::swap(&mut eval_input, &mut self.eval_input_buffer);
+            std::mem::swap(&mut eval_output, &mut self.eval_output_buffer);
+            return (mse_raw, f32::NAN);
+        };
+
         eq.set_cir_with_mmse(&cir[..cir_len], mmse);
         eq.reset();
         eq.process(&eval_input, &mut eval_output);
@@ -237,6 +256,11 @@ impl EqualizationController {
         let mse_fde = sync_detector
             .sync_word_mse_complex(&eval_output, skip, cfo_rad_per_sample)
             .unwrap_or(f32::NAN);
+
+        eval_input.clear();
+        eval_output.clear();
+        std::mem::swap(&mut eval_input, &mut self.eval_input_buffer);
+        std::mem::swap(&mut eval_output, &mut self.eval_output_buffer);
 
         (mse_raw, mse_fde)
     }

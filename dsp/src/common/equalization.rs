@@ -81,6 +81,9 @@ pub struct FrequencyDomainEqualizer {
 
     /// `process` メソッド内でのゼロアロケーションを実現するための作業用バッファ
     scratch: Vec<Complex<f32>>,
+
+    /// `flush` 時に使うゼロ入力ブロック（毎回の確保を避ける）
+    flush_zero_input: Vec<Complex<f32>>,
 }
 
 /// フレームごとに呼ばれる MSE 予測用の固定長FFTインスタンス。
@@ -271,6 +274,7 @@ impl FrequencyDomainEqualizer {
         let step_size = fft_size - overlap_len;
         let buffer = vec![Complex::new(0.0, 0.0); overlap_len];
         let scratch = vec![Complex::new(0.0, 0.0); fft_size];
+        let flush_zero_input = vec![Complex::new(0.0, 0.0); step_size];
 
         let mut instance = Self {
             fft,
@@ -287,6 +291,7 @@ impl FrequencyDomainEqualizer {
             total_input_samples: 0,
             total_output_samples: 0,
             scratch,
+            flush_zero_input,
         };
 
         instance.set_cir(cir, snr_db);
@@ -416,25 +421,24 @@ impl FrequencyDomainEqualizer {
         }
 
         let original_total_input = self.total_input_samples;
-        let mut temp_out = Vec::new();
+        let mut zero_input = Vec::new();
+        std::mem::swap(&mut zero_input, &mut self.flush_zero_input);
 
         // 目標の出力サンプル数に到達するまでゼロをパディングして処理を進める
-        let zeros = vec![Complex::new(0.0, 0.0); self.step_size];
         while self.total_output_samples < target_total_out {
-            self.process(&zeros, &mut temp_out);
+            self.process(&zero_input, output);
         }
 
         // 過剰に出力されたゼロパディング由来のサンプルを切り詰める
         let excess = self.total_output_samples - target_total_out;
         if excess > 0 {
-            temp_out.truncate(temp_out.len() - excess);
+            output.truncate(output.len() - excess);
             self.total_output_samples = target_total_out;
         }
 
         // processによって加算された total_input_samples を論理的な値に戻す
         self.total_input_samples = original_total_input;
-
-        output.extend_from_slice(&temp_out);
+        std::mem::swap(&mut zero_input, &mut self.flush_zero_input);
     }
 
     /// フィルタリングによって生じる内部遅延サンプル数を返す。
