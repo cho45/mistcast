@@ -203,7 +203,7 @@ impl Decoder {
             search: SearchState::default(),
             frame_session: None,
             viterbi_list_size: 1,
-            llr_erasure_second_pass_enabled: false,
+            llr_erasure_second_pass_enabled: true,
             llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
             llr_erasure_list_size: LLR_ERASURE_LIST_SIZE_DEFAULT,
             stats: DecoderStats::new(),

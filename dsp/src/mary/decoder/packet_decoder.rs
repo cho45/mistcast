@@ -478,7 +478,7 @@ mod tests {
             spc: 2,
             early_late_delta: 1.0,
             viterbi_list_size: 1,
-            llr_erasure_second_pass_enabled: false,
+            llr_erasure_second_pass_enabled: true,
             llr_erasure_quantile: 0.2,
             llr_erasure_list_size: 1,
         }
@@ -690,7 +690,8 @@ mod tests {
             .map(|llr| -llr)
             .collect::<Vec<_>>();
         let layout = decode_layout();
-        let options = default_options();
+        let mut options = default_options();
+        options.llr_erasure_second_pass_enabled = false;
         let mut stats = DecoderStats::new();
         let mut buffers = PacketDecodeBuffers::new();
         let mut llr_callback: Option<LlrCallback> = None;
