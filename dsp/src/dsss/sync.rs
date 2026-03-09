@@ -86,7 +86,9 @@ impl SyncDetector {
         let mut mseq = MSequence::new(config.mseq_order);
         let sf = config.spread_factor();
         let spc = config.proc_samples_per_chip().max(1);
-        let pn: Vec<f32> = mseq.generate(sf).into_iter().map(|x| x as f32).collect();
+        let mut pn_i8 = Vec::with_capacity(sf);
+        mseq.generate_into(sf, &mut pn_i8);
+        let pn: Vec<f32> = pn_i8.into_iter().map(|x| x as f32).collect();
         let sym_len = sf * spc;
 
         // 36シンボルの期待される符号系列 (BPSK) を構築

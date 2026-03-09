@@ -56,6 +56,7 @@ pub struct Modulator {
     /// キャリア波生成用NCO
     nco: Nco,
     /// ゼロアロケーション用の作業バッファ
+    pn_chips_buffer: Vec<i8>,
     chips_i_buffer: Vec<f32>,
     chips_q_buffer: Vec<f32>,
     bb_i_buffer: Vec<f32>,
@@ -94,6 +95,7 @@ impl Modulator {
             config,
             prev_phase: 0,
             nco,
+            pn_chips_buffer: Vec::with_capacity(256),
             chips_i_buffer: Vec::with_capacity(4096),
             chips_q_buffer: Vec::with_capacity(4096),
             bb_i_buffer: Vec::with_capacity(4096),
@@ -118,11 +120,11 @@ impl Modulator {
         let mut chips_q = Vec::with_capacity(sf * repeat);
 
         self.mseq.reset();
-        let pn = self.mseq.generate(sf);
+        self.mseq.generate_into(sf, &mut self.pn_chips_buffer);
 
         for i in 0..repeat {
             let sign = if i == repeat - 1 { -1.0 } else { 1.0 };
-            for &c in &pn {
+            for &c in &self.pn_chips_buffer {
                 chips_i.push(sign * c as f32);
                 chips_q.push(0.0);
             }
@@ -151,7 +153,9 @@ impl Modulator {
         out_q: &mut Vec<f32>,
     ) {
         self.mseq.reset();
-        for chip in self.mseq.generate(self.config.spread_factor()) {
+        self.mseq
+            .generate_into(self.config.spread_factor(), &mut self.pn_chips_buffer);
+        for &chip in &self.pn_chips_buffer {
             let c = chip as f32;
             out_i.push(symbol_i * c);
             out_q.push(symbol_q * c);
@@ -398,14 +402,14 @@ impl Modulator {
 
         // 1. プリアンブル
         self.mseq.reset();
-        let pn = self.mseq.generate(sf);
+        self.mseq.generate_into(sf, &mut self.pn_chips_buffer);
         for rep in 0..preamble_repeat {
             let sign = if rep == preamble_repeat - 1 {
                 -1.0
             } else {
                 1.0
             };
-            for &chip in &pn {
+            for &chip in &self.pn_chips_buffer {
                 chips_i.push(sign * chip as f32);
                 chips_q.push(0.0);
             }

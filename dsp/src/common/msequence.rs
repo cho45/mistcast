@@ -90,7 +90,20 @@ impl MSequence {
 
     /// `len` チップ分のM系列を生成する ({-1, +1} 値)
     pub fn generate(&mut self, len: usize) -> Vec<i8> {
-        (0..len).map(|_| self.next_chip()).collect()
+        let mut out = Vec::with_capacity(len);
+        self.generate_into(len, &mut out);
+        out
+    }
+
+    /// `len` チップ分のM系列を `out` に書き込む ({-1, +1} 値)
+    pub fn generate_into(&mut self, len: usize, out: &mut Vec<i8>) {
+        out.clear();
+        if out.capacity() < len {
+            out.reserve(len - out.capacity());
+        }
+        for _ in 0..len {
+            out.push(self.next_chip());
+        }
     }
 
     /// 1周期 (2^order - 1 チップ) を生成してリセットする

@@ -67,7 +67,8 @@ impl WalshDictionary {
     /// M系列 (次数4, 長さ15) の末尾に +1 を追加したデフォルトのPN系列による辞書を生成
     pub fn default_w16() -> Self {
         let mut mseq = MSequence::new(4);
-        let mut pn = mseq.generate(15);
+        let mut pn = Vec::with_capacity(16);
+        mseq.generate_into(15, &mut pn);
         pn.push(1); // 16要素目を追加
         Self::new(&pn)
     }

@@ -178,7 +178,9 @@ impl Decoder {
 
     fn build_pn_chips(mseq_order: usize, sf: usize) -> Vec<f32> {
         let mut mseq = crate::common::msequence::MSequence::new(mseq_order);
-        mseq.generate(sf).into_iter().map(|v| v as f32).collect()
+        let mut chips = Vec::with_capacity(sf);
+        mseq.generate_into(sf, &mut chips);
+        chips.into_iter().map(|v| v as f32).collect()
     }
 
     fn refresh_pn_cache_if_needed(&mut self) {

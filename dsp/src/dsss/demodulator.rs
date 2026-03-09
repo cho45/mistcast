@@ -65,7 +65,9 @@ impl Demodulator {
         let mut bits = Vec::with_capacity(num_symbols * self.mode.bits_per_symbol());
 
         let mut mseq = crate::common::msequence::MSequence::new(self.config.mseq_order);
-        let pn: Vec<f32> = mseq.generate(sf).iter().map(|&c| c as f32).collect();
+        let mut pn_i8 = Vec::with_capacity(sf);
+        mseq.generate_into(sf, &mut pn_i8);
+        let pn: Vec<f32> = pn_i8.into_iter().map(|c| c as f32).collect();
 
         for s_idx in 0..num_symbols {
             let start = s_idx * sf;
