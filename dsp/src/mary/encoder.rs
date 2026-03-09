@@ -136,6 +136,12 @@ impl Encoder {
 
     /// バーストをエンコードする
     pub fn encode_burst(&mut self, packets: &[FountainPacket]) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.encode_burst_into(packets, &mut out);
+        out
+    }
+
+    pub fn encode_burst_into(&mut self, packets: &[FountainPacket], out: &mut Vec<f32>) {
         self.burst_bits_buffer.clear();
         for packet in packets {
             let bits = self.encode_packet_bits(packet);
@@ -144,7 +150,8 @@ impl Encoder {
         self.modulator_output.clear();
         self.modulator
             .encode_frame(&self.burst_bits_buffer, &mut self.modulator_output);
-        self.modulator_output.clone()
+        out.clear();
+        std::mem::swap(out, &mut self.modulator_output);
     }
 
     /// パケットをエンコードする
@@ -208,17 +215,31 @@ impl Encoder {
 
     /// フラッシュ
     pub fn flush(&mut self) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.flush_into(&mut out);
+        out
+    }
+
+    pub fn flush_into(&mut self, out: &mut Vec<f32>) {
         self.modulator_output.clear();
         self.modulator.flush(&mut self.modulator_output);
-        self.modulator_output.clone()
+        out.clear();
+        std::mem::swap(out, &mut self.modulator_output);
     }
 
     /// 無音を変調する
     pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.modulate_silence_into(samples, &mut out);
+        out
+    }
+
+    pub fn modulate_silence_into(&mut self, samples: usize, out: &mut Vec<f32>) {
         self.modulator_output.clear();
         self.modulator
             .modulate_silence(samples, &mut self.modulator_output);
-        self.modulator_output.clone()
+        out.clear();
+        std::mem::swap(out, &mut self.modulator_output);
     }
 
     /// リセット

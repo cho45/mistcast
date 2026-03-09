@@ -1,4 +1,4 @@
-use crate::channel::{apply_channel, ChannelImpairment, MultipathProfile};
+use crate::channel::{apply_channel_into, ChannelImpairment, MultipathProfile};
 use crate::metrics::{Metrics, PhaseStats};
 use crate::report::{print_header, print_row};
 use crate::utils::{count_bit_errors_bytes, BerAccumulator};
@@ -67,6 +67,9 @@ pub struct SimulationConfig<'a> {
     pub imp: &'a ChannelImpairment,
     pub rng: &'a mut StdRng,
     pub chunk_size: usize,
+    pub tx_buffer: Vec<f32>,
+    pub rx_buffer: Vec<f32>,
+    pub channel_scratch: Vec<f32>,
 }
 
 /// ウォームアップ処理を実行する
@@ -79,11 +82,18 @@ pub fn run_warmup<E, D>(
     E: WarmupSignal,
     D: ProcessSamples,
 {
-    let warmup = encoder.modulate_silence(TX_WARMUP_SAMPLES);
-    state.total_tx_signal_energy += signal_energy(&warmup);
-    state.total_tx_signal_samples += warmup.len();
-    let warmup_rx = apply_channel(&warmup, cfg.imp, cfg.rng, false);
-    process_samples_in_chunks(&warmup_rx, cfg.chunk_size, decoder, state, |_, _, _| {
+    encoder.modulate_silence_into(TX_WARMUP_SAMPLES, &mut cfg.tx_buffer);
+    state.total_tx_signal_energy += signal_energy(&cfg.tx_buffer);
+    state.total_tx_signal_samples += cfg.tx_buffer.len();
+    apply_channel_into(
+        &cfg.tx_buffer,
+        cfg.imp,
+        cfg.rng,
+        false,
+        &mut cfg.rx_buffer,
+        &mut cfg.channel_scratch,
+    );
+    process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
 }
@@ -98,15 +108,22 @@ pub fn run_flush<E, D>(
     E: FlushSignal,
     D: ProcessSamples,
 {
-    let flush = encoder.flush();
-    if flush.is_empty() {
+    encoder.flush_into(&mut cfg.tx_buffer);
+    if cfg.tx_buffer.is_empty() {
         return;
     }
-    state.total_tx_signal_energy += signal_energy(&flush);
-    state.total_tx_signal_samples += flush.len();
-    let flush_rx = apply_channel(&flush, cfg.imp, cfg.rng, false);
-    state.total_sim_sec += flush_rx.len() as f32 / cfg.sample_rate;
-    process_samples_in_chunks(&flush_rx, cfg.chunk_size, decoder, state, |_, _, _| {
+    state.total_tx_signal_energy += signal_energy(&cfg.tx_buffer);
+    state.total_tx_signal_samples += cfg.tx_buffer.len();
+    apply_channel_into(
+        &cfg.tx_buffer,
+        cfg.imp,
+        cfg.rng,
+        false,
+        &mut cfg.rx_buffer,
+        &mut cfg.channel_scratch,
+    );
+    state.total_sim_sec += cfg.rx_buffer.len() as f32 / cfg.sample_rate;
+    process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
 }
@@ -121,47 +138,54 @@ pub fn run_tail<E, D>(
     E: WarmupSignal,
     D: ProcessSamples,
 {
-    let tail = encoder.modulate_silence(TX_TAIL_SAMPLES);
-    if tail.is_empty() {
+    encoder.modulate_silence_into(TX_TAIL_SAMPLES, &mut cfg.tx_buffer);
+    if cfg.tx_buffer.is_empty() {
         return;
     }
-    state.total_tx_signal_energy += signal_energy(&tail);
-    state.total_tx_signal_samples += tail.len();
-    let tail_rx = apply_channel(&tail, cfg.imp, cfg.rng, false);
-    process_samples_in_chunks(&tail_rx, cfg.chunk_size, decoder, state, |_, _, _| {
+    state.total_tx_signal_energy += signal_energy(&cfg.tx_buffer);
+    state.total_tx_signal_samples += cfg.tx_buffer.len();
+    apply_channel_into(
+        &cfg.tx_buffer,
+        cfg.imp,
+        cfg.rng,
+        false,
+        &mut cfg.rx_buffer,
+        &mut cfg.channel_scratch,
+    );
+    process_samples_in_chunks(&cfg.rx_buffer, cfg.chunk_size, decoder, state, |_, _, _| {
         ControlFlow::Continue
     });
 }
 
 pub trait WarmupSignal {
-    fn modulate_silence(&mut self, samples: usize) -> Vec<f32>;
+    fn modulate_silence_into(&mut self, samples: usize, out: &mut Vec<f32>);
 }
 
 pub trait FlushSignal {
-    fn flush(&mut self) -> Vec<f32>;
+    fn flush_into(&mut self, out: &mut Vec<f32>);
 }
 
 impl WarmupSignal for dsp::dsss::encoder::Encoder {
-    fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
-        dsp::dsss::encoder::Encoder::modulate_silence(self, samples)
+    fn modulate_silence_into(&mut self, samples: usize, out: &mut Vec<f32>) {
+        dsp::dsss::encoder::Encoder::modulate_silence_into(self, samples, out)
     }
 }
 
 impl FlushSignal for dsp::dsss::encoder::Encoder {
-    fn flush(&mut self) -> Vec<f32> {
-        dsp::dsss::encoder::Encoder::flush(self)
+    fn flush_into(&mut self, out: &mut Vec<f32>) {
+        dsp::dsss::encoder::Encoder::flush_into(self, out)
     }
 }
 
 impl WarmupSignal for dsp::mary::encoder::Encoder {
-    fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
-        dsp::mary::encoder::Encoder::modulate_silence(self, samples)
+    fn modulate_silence_into(&mut self, samples: usize, out: &mut Vec<f32>) {
+        dsp::mary::encoder::Encoder::modulate_silence_into(self, samples, out)
     }
 }
 
 impl FlushSignal for dsp::mary::encoder::Encoder {
-    fn flush(&mut self) -> Vec<f32> {
-        dsp::mary::encoder::Encoder::flush(self)
+    fn flush_into(&mut self, out: &mut Vec<f32>) {
+        dsp::mary::encoder::Encoder::flush_into(self, out)
     }
 }
 
@@ -379,6 +403,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         imp,
         rng: &mut rng,
         chunk_size: chunk,
+        tx_buffer: Vec::new(),
+        rx_buffer: Vec::new(),
+        channel_scratch: Vec::new(),
     };
 
     let mut last_reset_sec = 0.0f32;
@@ -386,6 +413,8 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     let mut fountain_encoder = FountainEncoder::new(&payload, fountain_params);
     let ber_accum = BerAccumulator::new();
     decoder.llr_callback = Some(ber_accum.llr_callback());
+    let packet_count_per_frame = cli.packets_per_frame.max(1);
+    let mut packets = Vec::with_capacity(packet_count_per_frame);
 
     run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
     loop {
@@ -393,28 +422,34 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
             break;
         }
 
-        let packet_count_per_frame = cli.packets_per_frame.max(1);
-        let mut packets = Vec::with_capacity(packet_count_per_frame);
+        packets.clear();
         for _ in 0..packet_count_per_frame {
             let fp = fountain_encoder.next_packet();
             ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
             packets.push(fp);
         }
-        let frame = encoder.encode_burst(&packets);
+        encoder.encode_burst_into(&packets, &mut sim_cfg.tx_buffer);
 
         m.total_frame_attempts += 1;
-        m.total_tx_signal_energy += signal_energy(&frame);
-        m.total_tx_signal_samples += frame.len();
+        m.total_tx_signal_energy += signal_energy(&sim_cfg.tx_buffer);
+        m.total_tx_signal_samples += sim_cfg.tx_buffer.len();
 
         let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
         if drop_frame {
             m.dropped_frames += 1;
         }
-        let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
-        m.total_sim_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+        apply_channel_into(
+            &sim_cfg.tx_buffer,
+            imp,
+            sim_cfg.rng,
+            drop_frame,
+            &mut sim_cfg.rx_buffer,
+            &mut sim_cfg.channel_scratch,
+        );
+        m.total_sim_sec += sim_cfg.rx_buffer.len() as f32 / tx_cfg.sample_rate;
 
         process_samples_in_chunks(
-            &rx_frame,
+            &sim_cfg.rx_buffer,
             chunk,
             &mut decoder,
             &mut m,
@@ -506,6 +541,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         imp,
         rng: &mut rng,
         chunk_size: chunk,
+        tx_buffer: Vec::new(),
+        rx_buffer: Vec::new(),
+        channel_scratch: Vec::new(),
     };
 
     let fountain_params = dsp::coding::fountain::FountainParams::new(k, PAYLOAD_SIZE);
@@ -514,6 +552,8 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
     let ber_accum = BerAccumulator::new();
     decoder.llr_callback = Some(ber_accum.llr_callback());
+    let packet_count_per_frame = cli.packets_per_frame.max(1);
+    let mut packets = Vec::with_capacity(packet_count_per_frame);
 
     let mut last_reset_sec = 0.0f32;
     let mut last_total_llr_attempts = 0usize;
@@ -528,28 +568,34 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
             break;
         }
 
-        let packet_count_per_frame = cli.packets_per_frame.max(1);
-        let mut packets = Vec::with_capacity(packet_count_per_frame);
+        packets.clear();
         for _ in 0..packet_count_per_frame {
             let fp = fountain_encoder.next_packet();
             ber_accum.register_packet((fp.seq % (u32::from(u16::MAX) + 1)) as u16, &fp, k);
             packets.push(fp);
         }
-        let frame = encoder.encode_burst(&packets);
+        encoder.encode_burst_into(&packets, &mut sim_cfg.tx_buffer);
 
         m.total_frame_attempts += 1;
-        m.total_tx_signal_energy += signal_energy(&frame);
-        m.total_tx_signal_samples += frame.len();
+        m.total_tx_signal_energy += signal_energy(&sim_cfg.tx_buffer);
+        m.total_tx_signal_samples += sim_cfg.tx_buffer.len();
 
         let drop_frame = sim_cfg.rng.gen::<f32>() < imp.frame_loss;
         if drop_frame {
             m.dropped_frames += 1;
         }
-        let rx_frame = apply_channel(&frame, imp, sim_cfg.rng, drop_frame);
-        m.total_sim_sec += rx_frame.len() as f32 / tx_cfg.sample_rate;
+        apply_channel_into(
+            &sim_cfg.tx_buffer,
+            imp,
+            sim_cfg.rng,
+            drop_frame,
+            &mut sim_cfg.rx_buffer,
+            &mut sim_cfg.channel_scratch,
+        );
+        m.total_sim_sec += sim_cfg.rx_buffer.len() as f32 / tx_cfg.sample_rate;
 
         process_samples_in_chunks(
-            &rx_frame,
+            &sim_cfg.rx_buffer,
             chunk,
             &mut decoder,
             &mut m,

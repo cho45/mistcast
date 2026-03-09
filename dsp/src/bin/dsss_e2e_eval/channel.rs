@@ -87,21 +87,85 @@ pub struct ChannelImpairment {
     pub multipath: MultipathProfile,
 }
 
-pub fn apply_channel(
+#[inline]
+fn apply_multipath_into(input: &[f32], taps: &[(usize, f32)], out: &mut Vec<f32>) {
+    if taps.is_empty() || (taps.len() == 1 && taps[0].0 == 0 && (taps[0].1 - 1.0).abs() < 1e-6) {
+        out.clear();
+        out.extend_from_slice(input);
+        return;
+    }
+
+    let max_delay = taps.iter().map(|(d, _)| *d).max().unwrap_or(0);
+    let out_len = input.len() + max_delay;
+    out.clear();
+    out.resize(out_len, 0.0);
+
+    for &(delay, gain) in taps {
+        for (i, &x) in input.iter().enumerate() {
+            out[i + delay] += gain * x;
+        }
+    }
+
+    let norm = taps
+        .iter()
+        .map(|(_, g)| g * g)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-6);
+    for s in out.iter_mut() {
+        *s /= norm;
+    }
+}
+
+#[inline]
+fn apply_clock_drift_ppm_into(input: &[f32], ppm: f32, out: &mut Vec<f32>) {
+    if input.is_empty() || ppm.abs() < 0.1 {
+        out.clear();
+        out.extend_from_slice(input);
+        return;
+    }
+
+    let ratio = 1.0 + ppm / 1_000_000.0;
+    let out_len = (input.len() as f32 / ratio).floor() as usize;
+    out.clear();
+    out.reserve(out_len);
+
+    for i in 0..out_len {
+        let pos = i as f32 * ratio;
+        let i0 = pos.floor() as usize;
+        let frac = pos - i0 as f32;
+        if i0 + 1 < input.len() {
+            let a = input[i0];
+            let b = input[i0 + 1];
+            out.push(a + (b - a) * frac);
+        } else if i0 < input.len() {
+            out.push(input[i0]);
+        } else {
+            break;
+        }
+    }
+}
+
+pub fn apply_channel_into(
     tx: &[f32],
     imp: &ChannelImpairment,
     rng: &mut StdRng,
     drop_frame: bool,
-) -> Vec<f32> {
-    let mut sig = if drop_frame {
-        vec![0.0f32; tx.len()]
+    out: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+) {
+    if drop_frame {
+        out.clear();
+        out.resize(tx.len(), 0.0);
     } else {
-        channel::apply_multipath(tx, &imp.multipath.taps)
-    };
-    if imp.ppm.abs() >= 0.1 {
-        sig = channel::apply_clock_drift_ppm(&sig, imp.ppm);
+        apply_multipath_into(tx, &imp.multipath.taps, out);
     }
-    channel::apply_fading(&mut sig, imp.fading_depth, rng);
-    channel::add_awgn(&mut sig, imp.sigma, rng);
-    sig
+
+    if imp.ppm.abs() >= 0.1 {
+        apply_clock_drift_ppm_into(out, imp.ppm, scratch);
+        std::mem::swap(out, scratch);
+    }
+
+    channel::apply_fading(out, imp.fading_depth, rng);
+    channel::add_awgn(out, imp.sigma, rng);
 }

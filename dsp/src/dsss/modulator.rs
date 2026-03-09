@@ -120,8 +120,14 @@ impl Modulator {
 
     /// ビット列を変調してサンプル列を返す
     pub fn modulate(&mut self, bits: &[u8]) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.modulate_into(bits, &mut out);
+        out
+    }
+
+    pub fn modulate_into(&mut self, bits: &[u8], out: &mut Vec<f32>) {
         let (chips_i, chips_q) = self.bits_to_chips(bits);
-        self.chips_to_samples(&chips_i, &chips_q)
+        self.chips_to_samples_into(&chips_i, &chips_q, out);
     }
 
     fn append_symbol_chips(
@@ -182,6 +188,12 @@ impl Modulator {
 
     /// チップ列をRRC整形 + キャリア変調してサンプル列に変換
     fn chips_to_samples(&mut self, chips_i: &[f32], chips_q: &[f32]) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.chips_to_samples_into(chips_i, chips_q, &mut out);
+        out
+    }
+
+    fn chips_to_samples_into(&mut self, chips_i: &[f32], chips_q: &[f32], out: &mut Vec<f32>) {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         let spc = INTERNAL_SPC;
 
@@ -204,24 +216,29 @@ impl Modulator {
         self.resampler_q.process(&bb_q, &mut resampled_q);
 
         // 3. 出力レートでのキャリア混合 (Mix)
-        let mut out = Vec::with_capacity(resampled_i.len());
+        out.clear();
+        out.reserve(resampled_i.len().saturating_sub(out.capacity()));
         for (&i_f, &q_f) in resampled_i.iter().zip(resampled_q.iter()) {
             let lo = self.nco.step();
             out.push(i_f * lo.re - q_f * lo.im);
         }
-
-        out
     }
 
     /// RRCフィルタに残っている遅延分のサンプルをゼロで押し出して出力する
     pub fn flush(&mut self) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.flush_into(&mut out);
+        out
+    }
+
+    pub fn flush_into(&mut self, out: &mut Vec<f32>) {
         // RRCフィルタの応答全体（全タップ分）を押し出すために必要な無音サンプルを計算。
         // delay() ではなく num_taps() を使うのが物理的に正しい（テールの終わりまで出すため）。
         let rrc_taps_bb = self.rrc_i.num_taps().max(self.rrc_q.num_taps());
         let ratio = self.config.sample_rate / self.config.proc_sample_rate();
         let rrc_push_out = (rrc_taps_bb as f32 * ratio).ceil() as usize;
 
-        let mut out = self.modulate_silence(rrc_push_out);
+        self.modulate_silence_into(rrc_push_out, out);
 
         let mut res_i = Vec::new();
         let mut res_q = Vec::new();
@@ -232,15 +249,22 @@ impl Modulator {
             let lo = self.nco.step();
             out.push(si * lo.re - sq * lo.im);
         }
-
-        out
     }
 
     /// 指定されたサンプル数分だけ無音 (0.0) を入力して Modulator を進める
     ///
     /// これにより、無音期間中も NCO が回転し、RRC フィルタのテールが自然に出力される。
     pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
-        let mut out = Vec::with_capacity(samples);
+        let mut out = Vec::new();
+        self.modulate_silence_into(samples, &mut out);
+        out
+    }
+
+    pub fn modulate_silence_into(&mut self, samples: usize, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(samples.saturating_sub(out.capacity()));
+        let mut res_i = Vec::new();
+        let mut res_q = Vec::new();
 
         // 出力サンプル数が samples に達するまで内部レートで無音を生成し、
         // リサンプルとミキシングを行う。
@@ -251,8 +275,8 @@ impl Modulator {
             let i_f = self.rrc_i.process(0.0);
             let q_f = self.rrc_q.process(0.0);
 
-            let mut res_i = Vec::new();
-            let mut res_q = Vec::new();
+            res_i.clear();
+            res_q.clear();
             self.resampler_i.process(&[i_f], &mut res_i);
             self.resampler_q.process(&[q_f], &mut res_q);
 
@@ -266,11 +290,16 @@ impl Modulator {
         }
 
         out.truncate(samples);
-        out
     }
 
     /// 送信フレーム全体を生成する (プリアンブル + 同期ワード + データ)
     pub fn encode_frame(&mut self, bits: &[u8]) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.encode_frame_into(bits, &mut out);
+        out
+    }
+
+    pub fn encode_frame_into(&mut self, bits: &[u8], out: &mut Vec<f32>) {
         self.prev_phase = 0;
         let sf = self.config.spread_factor();
         let preamble_repeat = self.config.preamble_repeat;
@@ -313,10 +342,12 @@ impl Modulator {
         self.append_bits_chips(bits, &mut chips_i, &mut chips_q);
 
         // 4. マージン (1シンボル分の無音チップ)
-        chips_i.extend(vec![0.0; sf]);
-        chips_q.extend(vec![0.0; sf]);
+        let margin_start_i = chips_i.len();
+        chips_i.resize(margin_start_i + sf, 0.0);
+        let margin_start_q = chips_q.len();
+        chips_q.resize(margin_start_q + sf, 0.0);
 
-        self.chips_to_samples(&chips_i, &chips_q)
+        self.chips_to_samples_into(&chips_i, &chips_q, out);
     }
 
     /// 変調器の状態をリセット

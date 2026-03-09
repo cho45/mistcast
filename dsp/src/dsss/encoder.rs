@@ -41,16 +41,20 @@ pub struct Encoder {
     config: EncoderConfig,
     modulator: Modulator,
     interleaver: BlockInterleaver,
+    burst_bits_buffer: Vec<u8>,
 }
 
 impl Encoder {
     pub fn new(config: EncoderConfig) -> Self {
         let il = BlockInterleaver::new(config.il_rows, config.il_cols);
         let modulator = Modulator::new(config.dsp.clone());
+        let packets_per_sync_burst = config.packets_per_sync_burst.max(1);
+        let burst_bits_capacity = config.il_rows * config.il_cols * packets_per_sync_burst;
         Encoder {
             config,
             modulator,
             interleaver: il,
+            burst_bits_buffer: Vec::with_capacity(burst_bits_capacity),
         }
     }
 
@@ -78,21 +82,39 @@ impl Encoder {
     }
 
     pub fn encode_burst(&mut self, packets: &[FountainPacket]) -> Vec<f32> {
-        let burst_bits_len = self.config.il_rows * self.config.il_cols * packets.len();
-        let mut burst_bits = Vec::with_capacity(burst_bits_len);
+        let mut out = Vec::new();
+        self.encode_burst_into(packets, &mut out);
+        out
+    }
+
+    pub fn encode_burst_into(&mut self, packets: &[FountainPacket], out: &mut Vec<f32>) {
+        self.burst_bits_buffer.clear();
         for packet in packets {
             let interleaved = self.encode_packet_bits(packet);
-            burst_bits.extend_from_slice(&interleaved);
+            self.burst_bits_buffer.extend_from_slice(&interleaved);
         }
-        self.modulator.encode_frame(&burst_bits)
+        self.modulator
+            .encode_frame_into(&self.burst_bits_buffer, out);
     }
 
     pub fn flush(&mut self) -> Vec<f32> {
-        self.modulator.flush()
+        let mut out = Vec::new();
+        self.flush_into(&mut out);
+        out
+    }
+
+    pub fn flush_into(&mut self, out: &mut Vec<f32>) {
+        self.modulator.flush_into(out);
     }
 
     pub fn modulate_silence(&mut self, samples: usize) -> Vec<f32> {
-        self.modulator.modulate_silence(samples)
+        let mut out = Vec::new();
+        self.modulate_silence_into(samples, &mut out);
+        out
+    }
+
+    pub fn modulate_silence_into(&mut self, samples: usize, out: &mut Vec<f32>) {
+        self.modulator.modulate_silence_into(samples, out);
     }
 
     pub fn reset(&mut self) {
