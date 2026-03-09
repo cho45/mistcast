@@ -79,6 +79,9 @@ pub struct Decoder {
     pn_cache_sf: usize,
     sync_detector: SyncDetector,
     interleaver: BlockInterleaver,
+    deinterleave_buffer: Vec<f32>,
+    decoded_bits_buffer: Vec<u8>,
+    fec_workspace: fec::FecDecodeWorkspace,
     fountain_decoder: FountainDecoder,
     recovered_data: Option<Vec<u8>>,
     pub agc_peak_fast: f32,
@@ -242,6 +245,9 @@ impl Decoder {
             pn_cache_sf: sf,
             sync_detector: SyncDetector::new(dsp_config.clone(), tc, tf),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
+            deinterleave_buffer: Vec::with_capacity(fec_bits),
+            decoded_bits_buffer: Vec::with_capacity(raw_bits),
+            fec_workspace: fec::FecDecodeWorkspace::new(),
             fountain_decoder: FountainDecoder::new(params),
             recovered_data: None,
             config: dsp_config,
@@ -620,7 +626,7 @@ impl Decoder {
 
     #[allow(clippy::too_many_arguments)]
     fn try_decode_payload_once(
-        &self,
+        &mut self,
         payload_start: usize,
         burst_data_bits_len: usize,
         timing_bias: f32,
@@ -683,20 +689,20 @@ impl Decoder {
     ) -> Option<PayloadDecodeAttempt> {
         let spc = self.config.proc_samples_per_chip().max(1) as f32;
         let timing_biases = [-0.75f32 * spc, 0.0, 0.75f32 * spc];
-        let attempts: Vec<_> = timing_biases
-            .into_iter()
-            .filter_map(|timing_bias| {
-                self.try_decode_payload_once(
-                    payload_start,
-                    burst_data_bits_len,
-                    timing_bias,
-                    initial_state,
-                    pn,
-                    fec_bits_len,
-                    p_bits_len,
-                )
-            })
-            .collect();
+        let mut attempts = Vec::with_capacity(timing_biases.len());
+        for timing_bias in timing_biases {
+            if let Some(attempt) = self.try_decode_payload_once(
+                payload_start,
+                burst_data_bits_len,
+                timing_bias,
+                initial_state,
+                pn,
+                fec_bits_len,
+                p_bits_len,
+            ) {
+                attempts.push(attempt);
+            }
+        }
         let best = Self::select_best_payload_attempt(attempts);
         if let Some(attempt) = best.as_ref() {
             self.emit_packet_llr_callbacks(&attempt.llrs, fec_bits_len);
@@ -705,7 +711,7 @@ impl Decoder {
     }
 
     fn parse_payload_packets(
-        &self,
+        &mut self,
         payload_llrs: &[f32],
         fec_bits_len: usize,
         p_bits_len: usize,
@@ -713,18 +719,24 @@ impl Decoder {
         let mut decoded_packets = Vec::new();
         let mut crc_errors = 0usize;
         let mut parse_errors = 0usize;
+        self.deinterleave_buffer.resize(fec_bits_len, 0.0);
         for packet_llrs in payload_llrs.chunks_exact(fec_bits_len) {
-            let mut deinterleaved_llr = self.interleaver.deinterleave_f32(packet_llrs);
+            self.interleaver
+                .deinterleave_f32_in_place(packet_llrs, &mut self.deinterleave_buffer);
 
             let mut scrambler = crate::coding::scrambler::Scrambler::default();
-            for llr in deinterleaved_llr.iter_mut() {
+            for llr in self.deinterleave_buffer.iter_mut() {
                 if scrambler.next_bit() == 1 {
                     *llr = -*llr;
                 }
             }
 
-            let decoded_soft = fec::decode_soft(&deinterleaved_llr);
-            match parse_packet_from_decoded_bits(&decoded_soft, p_bits_len) {
+            fec::decode_soft_into(
+                &self.deinterleave_buffer,
+                &mut self.decoded_bits_buffer,
+                &mut self.fec_workspace,
+            );
+            match parse_packet_from_decoded_bits(&self.decoded_bits_buffer, p_bits_len) {
                 Ok(packet) => decoded_packets.push(packet),
                 Err(PacketParseError::CrcMismatch { .. }) => crc_errors += 1,
                 Err(PacketParseError::InvalidLength { .. }) => parse_errors += 1,
@@ -1637,7 +1649,7 @@ mod tests {
     #[test]
     fn test_parse_payload_packets_counts_crc_errors() {
         let dsp_config = crate::dsss::params::dsp_config_48k();
-        let decoder = Decoder::new(32, FIXED_K, dsp_config);
+        let mut decoder = Decoder::new(32, FIXED_K, dsp_config);
         let fec_bits_len = decoder.interleaver.rows() * decoder.interleaver.cols();
         let p_bits_len = PACKET_BYTES * 8;
 

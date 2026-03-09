@@ -106,6 +106,28 @@ pub struct PostFecStats {
 
 pub type LlrCallback = Box<dyn Fn(&[f32]) + Send + Sync>;
 
+#[inline]
+fn bits_msb_to_byte(bits: &[u8]) -> Option<u8> {
+    if bits.len() < 8 {
+        return None;
+    }
+    let mut out = 0u8;
+    for &b in bits.iter().take(8) {
+        out = (out << 1) | (b & 1);
+    }
+    Some(out)
+}
+
+#[inline]
+fn packet_seq_from_bits(packet_bits: &[u8]) -> Option<u16> {
+    if packet_bits.len() < 24 {
+        return None;
+    }
+    let b1 = bits_msb_to_byte(&packet_bits[8..16])?;
+    let b2 = bits_msb_to_byte(&packet_bits[16..24])?;
+    Some(u16::from_be_bytes([b1, b2]))
+}
+
 /// Mary BER集計用
 pub struct BerAccumulator {
     expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
@@ -189,19 +211,22 @@ impl BerAccumulator {
         let pcew = Arc::clone(&self.post_codeword_error_weights);
         let pda = Arc::clone(&self.post_decode_attempts);
         let pdm = Arc::clone(&self.post_decode_matched);
+        let fec_workspace = Arc::new(Mutex::new(fec::FecDecodeWorkspace::new()));
+        let decoded_bits_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
 
         Box::new(move |llrs: &[f32]| {
             *pda.lock().unwrap() += 1;
-            let decoded_bits = fec::decode_soft(llrs);
             let p_bits_len = PACKET_BYTES * 8;
-            if decoded_bits.len() < p_bits_len {
+            let mut ws_guard = fec_workspace.lock().unwrap();
+            let mut decoded_bits_guard = decoded_bits_buf.lock().unwrap();
+            fec::decode_soft_into(llrs, &mut decoded_bits_guard, &mut ws_guard);
+            if decoded_bits_guard.len() < p_bits_len {
                 return;
             }
-            let decoded_bytes = fec::bits_to_bytes(&decoded_bits[..p_bits_len]);
-            if decoded_bytes.len() < 3 {
+            let decoded_packet_bits = &decoded_bits_guard[..p_bits_len];
+            let Some(seq) = packet_seq_from_bits(decoded_packet_bits) else {
                 return;
-            }
-            let seq = u16::from_be_bytes([decoded_bytes[1], decoded_bytes[2]]);
+            };
             let expected_raw = match efb.lock().unwrap().get(&seq) {
                 Some(bits) => bits.clone(),
                 None => return,
@@ -222,7 +247,7 @@ impl BerAccumulator {
             };
             *pdm.lock().unwrap() += 1;
             let (post_errors, post_compare_len, post_runs, post_run_bits, post_run_max) =
-                bit_errors_and_runs_from_bits(&expected_post, &decoded_bits[..p_bits_len]);
+                bit_errors_and_runs_from_bits(&expected_post, decoded_packet_bits);
             *pbe.lock().unwrap() += post_errors;
             *pbc.lock().unwrap() += post_compare_len;
             *per.lock().unwrap() += post_runs;
