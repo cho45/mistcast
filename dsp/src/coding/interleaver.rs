@@ -45,24 +45,16 @@ impl BlockInterleaver {
     /// - `output`: 出力バッファ（十分なサイズが必要）
     ///
     /// # パニック
-    /// output.len() < input.len() の場合パニックします
+    /// output.len() < rows*cols の場合パニックします
     pub fn interleave_in_place(&self, input: &[u8], output: &mut [u8]) {
         let total = self.rows * self.cols;
-        assert!(output.len() >= input.len(), "output buffer too small");
+        assert!(output.len() >= total, "output buffer too small");
 
-        // 行列に書き込み（列優先で読み出すため、まず行優先で格納）
-        let mut matrix = vec![0u8; total];
-        for (i, &bit) in input.iter().enumerate().take(total) {
-            matrix[i] = bit;
-        }
-
-        // 列優先で読み出し
-        let mut k = 0;
-        for col in 0..self.cols {
-            for row in 0..self.rows {
-                output[k] = matrix[row * self.cols + col];
-                k += 1;
-            }
+        output[..total].fill(0);
+        for (k, &bit) in input.iter().enumerate().take(total) {
+            let row = k / self.cols;
+            let col = k % self.cols;
+            output[col * self.rows + row] = bit;
         }
     }
 
@@ -85,21 +77,17 @@ impl BlockInterleaver {
     /// - `output`: 出力バッファ（十分なサイズが必要）
     ///
     /// # パニック
-    /// output.len() < input.len() の場合パニックします
+    /// output.len() < rows*cols の場合パニックします
     pub fn deinterleave_in_place(&self, input: &[u8], output: &mut [u8]) {
         let total = self.rows * self.cols;
-        assert!(output.len() >= input.len(), "output buffer too small");
+        assert!(output.len() >= total, "output buffer too small");
 
-        // 一時的な行列バッファ
-        let mut matrix = vec![0u8; total];
+        output[..total].fill(0);
         for (k, &bit) in input.iter().enumerate().take(total) {
             let col = k / self.rows;
             let row = k % self.rows;
-            matrix[row * self.cols + col] = bit;
+            output[row * self.cols + col] = bit;
         }
-
-        // 行列を出力にコピー
-        output[..total].copy_from_slice(&matrix);
     }
 
     /// デインターリーブ処理 (受信側, f32値)
@@ -121,21 +109,17 @@ impl BlockInterleaver {
     /// - `output`: 出力バッファ（十分なサイズが必要）
     ///
     /// # パニック
-    /// output.len() < input.len() の場合パニックします
+    /// output.len() < rows*cols の場合パニックします
     pub fn deinterleave_f32_in_place(&self, input: &[f32], output: &mut [f32]) {
         let total = self.rows * self.cols;
-        assert!(output.len() >= input.len(), "output buffer too small");
+        assert!(output.len() >= total, "output buffer too small");
 
-        // 一時的な行列バッファ
-        let mut matrix = vec![0.0f32; total];
+        output[..total].fill(0.0);
         for (k, &value) in input.iter().enumerate().take(total) {
             let col = k / self.rows;
             let row = k % self.rows;
-            matrix[row * self.cols + col] = value;
+            output[row * self.cols + col] = value;
         }
-
-        // 行列を出力にコピー
-        output[..total].copy_from_slice(&matrix);
     }
 
     pub fn reset(&mut self) {}
