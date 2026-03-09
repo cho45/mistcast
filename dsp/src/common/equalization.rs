@@ -47,6 +47,8 @@ impl Default for MmseSettings {
 pub struct FrequencyDomainEqualizer {
     fft: Arc<dyn Fft<f32>>,
     ifft: Arc<dyn Fft<f32>>,
+    fft_scratch: Vec<Complex<f32>>,
+    ifft_scratch: Vec<Complex<f32>>,
 
     /// FFTサイズ (N)
     fft_size: usize,
@@ -258,6 +260,8 @@ impl FrequencyDomainEqualizer {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
         let ifft = planner.plan_fft_inverse(fft_size);
+        let fft_scratch = vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+        let ifft_scratch = vec![Complex::new(0.0, 0.0); ifft.get_inplace_scratch_len()];
 
         // FIR等化フィルタの長さを決定
         let l_eq = fft_size / 2;
@@ -271,6 +275,8 @@ impl FrequencyDomainEqualizer {
         let mut instance = Self {
             fft,
             ifft,
+            fft_scratch,
+            ifft_scratch,
             fft_size,
             weights: vec![Complex::new(0.0, 0.0); fft_size],
             overlap_len,
@@ -319,11 +325,13 @@ impl FrequencyDomainEqualizer {
         // 1. CIRをゼロパディングしてFFT
         self.scratch.fill(Complex::new(0.0, 0.0));
         self.scratch[..cir.len()].copy_from_slice(cir);
-        self.fft.process(&mut self.scratch);
+        self.fft
+            .process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
 
         // 2. 理想的なMMSE重みの算出とIFFT (weightsバッファを一時的に利用)
         Self::mmse_weights_from_h_in_place(&self.scratch, &mut self.weights, mmse);
-        self.ifft.process(&mut self.weights);
+        self.ifft
+            .process_with_scratch(&mut self.weights, &mut self.ifft_scratch);
 
         // IFFTの正規化
         let scale = 1.0 / (self.fft_size as f32);
@@ -341,7 +349,8 @@ impl FrequencyDomainEqualizer {
 
         // 4. Overlap-Save用の重みとしてFFT
         self.weights.copy_from_slice(&self.scratch);
-        self.fft.process(&mut self.weights);
+        self.fft
+            .process_with_scratch(&mut self.weights, &mut self.fft_scratch);
 
         // 内部状態を新しいパケット向けにリセット
         self.reset();
@@ -363,11 +372,13 @@ impl FrequencyDomainEqualizer {
             self.scratch.copy_from_slice(&self.buffer[..self.fft_size]);
 
             // FDE: 周波数領域での乗算
-            self.fft.process(&mut self.scratch);
+            self.fft
+                .process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
             for i in 0..self.fft_size {
                 self.scratch[i] *= self.weights[i];
             }
-            self.ifft.process(&mut self.scratch);
+            self.ifft
+                .process_with_scratch(&mut self.scratch, &mut self.ifft_scratch);
 
             // IFFTの正規化
             let scale = 1.0 / (self.fft_size as f32);
