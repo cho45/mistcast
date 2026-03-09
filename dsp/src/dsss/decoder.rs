@@ -69,6 +69,10 @@ pub struct Decoder {
     rrc_filter_q: RrcFilter,
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
+    mix_buffer_i: Vec<f32>,
+    mix_buffer_q: Vec<f32>,
+    resample_buffer_i: Vec<f32>,
+    resample_buffer_q: Vec<f32>,
     sync_detector: SyncDetector,
     interleaver: BlockInterleaver,
     fountain_decoder: FountainDecoder,
@@ -167,6 +171,10 @@ impl Decoder {
             rrc_filter_q: RrcFilter::from_config(&dsp_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
+            mix_buffer_i: Vec::with_capacity(4096),
+            mix_buffer_q: Vec::with_capacity(4096),
+            resample_buffer_i: Vec::with_capacity(6144),
+            resample_buffer_q: Vec::with_capacity(6144),
             sync_detector: SyncDetector::new(dsp_config.clone(), tc, tf),
             interleaver: BlockInterleaver::new(il_rows, il_cols),
             fountain_decoder: FountainDecoder::new(params),
@@ -205,23 +213,25 @@ impl Decoder {
         let drain_len = 50_000;
 
         // 1. 高レート混合 (at fs_in)
-        let mut i_mixed = Vec::with_capacity(samples.len());
-        let mut q_mixed = Vec::with_capacity(samples.len());
+        let mut i_mixed = std::mem::take(&mut self.mix_buffer_i);
+        let mut q_mixed = std::mem::take(&mut self.mix_buffer_q);
         self.mix_real_to_iq(samples, &mut i_mixed, &mut q_mixed);
 
         // 2. ベースバンド・リサンプリング (fs_in -> fs_proc)
-        let mut i_resampled = Vec::new();
-        let mut q_resampled = Vec::new();
+        let mut i_resampled = std::mem::take(&mut self.resample_buffer_i);
+        let mut q_resampled = std::mem::take(&mut self.resample_buffer_q);
+        i_resampled.clear();
+        q_resampled.clear();
         self.resampler_i.process(&i_mixed, &mut i_resampled);
         self.resampler_q.process(&q_mixed, &mut q_resampled);
 
         // 3. マッチドフィルタリング (at fs_proc)
-        let i_filtered = self.rrc_filter_i.process_block(&i_resampled);
-        let q_filtered = self.rrc_filter_q.process_block(&q_resampled);
+        self.rrc_filter_i.process_block_in_place(&mut i_resampled);
+        self.rrc_filter_q.process_block_in_place(&mut q_resampled);
 
         // 4. 処理用バッファへ追加
-        self.sample_buffer_i.extend_from_slice(&i_filtered);
-        self.sample_buffer_q.extend_from_slice(&q_filtered);
+        self.sample_buffer_i.extend_from_slice(&i_resampled);
+        self.sample_buffer_q.extend_from_slice(&q_resampled);
 
         let sync_bits_len = self.config.sync_word_bits;
         let sync_symbol_len = sync_bits_len;
@@ -405,6 +415,15 @@ impl Decoder {
             self.last_search_idx = 0;
             self.current_sync = None;
         }
+
+        i_mixed.clear();
+        q_mixed.clear();
+        i_resampled.clear();
+        q_resampled.clear();
+        self.mix_buffer_i = i_mixed;
+        self.mix_buffer_q = q_mixed;
+        self.resample_buffer_i = i_resampled;
+        self.resample_buffer_q = q_resampled;
 
         self.progress()
     }
@@ -823,6 +842,10 @@ impl Decoder {
         self.rrc_filter_q.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
+        self.mix_buffer_i.clear();
+        self.mix_buffer_q.clear();
+        self.resample_buffer_i.clear();
+        self.resample_buffer_q.clear();
         self.lo_nco.reset();
         self.agc_peak_fast = 0.5;
         self.agc_peak_slow = 0.5;
