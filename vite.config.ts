@@ -73,7 +73,7 @@ export default defineConfig({
     vue(),
     wasm(),
     topLevelAwait(),
-    rustWatchPlugin(),
+    // rustWatchPlugin(),
   ],
   server: {
     allowedHosts: ['.trycloudflare.com', '.stfuawsc.com'],
