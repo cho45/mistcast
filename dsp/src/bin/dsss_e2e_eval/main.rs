@@ -5,6 +5,10 @@ mod report;
 mod runner;
 mod utils;
 
+#[cfg(feature = "alloc-prof-dhat")]
+#[global_allocator]
+static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
+
 use crate::channel::{ChannelImpairment, MultipathProfile};
 use crate::runner::run_by_mode;
 use crate::utils::{
@@ -240,6 +244,9 @@ pub fn parse_cli() -> Cli {
 }
 
 fn main() {
+    #[cfg(feature = "alloc-prof-dhat")]
+    let _dhat_profiler = dhat::Profiler::new_heap();
+
     let cli = parse_cli();
 
     if cli.show_metrics_desc {

@@ -1,3 +1,4 @@
+#[cfg(not(feature = "alloc-prof-dhat"))]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
@@ -111,6 +112,7 @@ impl PhaseCounters {
 static CURRENT_PHASE: AtomicU8 = AtomicU8::new(Phase::Other as u8);
 static COUNTERS: PhaseCounters = PhaseCounters::new();
 
+#[cfg(not(feature = "alloc-prof-dhat"))]
 fn phase_index_now() -> usize {
     let idx = CURRENT_PHASE.load(Ordering::Relaxed) as usize;
     if idx < PHASE_COUNT {
@@ -120,18 +122,21 @@ fn phase_index_now() -> usize {
     }
 }
 
+#[cfg(not(feature = "alloc-prof-dhat"))]
 fn record_alloc(bytes: usize) {
     let idx = phase_index_now();
     COUNTERS.alloc_count[idx].fetch_add(1, Ordering::Relaxed);
     COUNTERS.alloc_bytes[idx].fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
+#[cfg(not(feature = "alloc-prof-dhat"))]
 fn record_dealloc(bytes: usize) {
     let idx = phase_index_now();
     COUNTERS.dealloc_count[idx].fetch_add(1, Ordering::Relaxed);
     COUNTERS.dealloc_bytes[idx].fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
+#[cfg(not(feature = "alloc-prof-dhat"))]
 fn record_realloc(old_bytes: usize, new_bytes: usize) {
     let idx = phase_index_now();
     COUNTERS.realloc_count[idx].fetch_add(1, Ordering::Relaxed);
@@ -204,12 +209,15 @@ pub fn report_to_stderr(label: &str) {
     }
 }
 
+#[cfg(not(feature = "alloc-prof-dhat"))]
 struct PhaseTrackingAllocator;
 
+#[cfg(not(feature = "alloc-prof-dhat"))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: PhaseTrackingAllocator = PhaseTrackingAllocator;
 
 // SAFETY: Delegates all operations to System allocator and only updates atomic counters.
+#[cfg(not(feature = "alloc-prof-dhat"))]
 unsafe impl GlobalAlloc for PhaseTrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };

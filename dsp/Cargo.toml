@@ -3,6 +3,10 @@ name = "dsp"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+alloc-prof-dhat = ["dep:dhat"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -22,6 +26,7 @@ hex = "0.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.128", features = ["preserve_order"] }
 csv = "1.4.0"
+dhat = { version = "0.3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
