@@ -206,10 +206,10 @@ impl AlgebraicInterleaver {
     /// インターリーブ処理 (送信側)
     pub fn interleave(&self, bits: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; self.n];
-        for i in 0..self.n {
+        for (i, dst) in out.iter_mut().enumerate().take(self.n) {
             let src_idx = (i * self.q) % self.n;
             if src_idx < bits.len() {
-                out[i] = bits[src_idx];
+                *dst = bits[src_idx];
             }
         }
         out
@@ -218,12 +218,12 @@ impl AlgebraicInterleaver {
     /// インターリーブ処理 (送信側, インプレース版)
     pub fn interleave_in_place(&self, input: &[u8], output: &mut [u8]) {
         assert!(output.len() >= self.n, "output buffer too small");
-        for i in 0..self.n {
+        for (i, dst) in output.iter_mut().enumerate().take(self.n) {
             let src_idx = (i * self.q) % self.n;
             if src_idx < input.len() {
-                output[i] = input[src_idx];
+                *dst = input[src_idx];
             } else {
-                output[i] = 0;
+                *dst = 0;
             }
         }
     }
@@ -231,10 +231,10 @@ impl AlgebraicInterleaver {
     /// デインターリーブ処理 (受信側)
     pub fn deinterleave(&self, bits: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; self.n];
-        for i in 0..self.n {
+        for (i, dst) in out.iter_mut().enumerate().take(self.n) {
             let src_idx = (i * self.q_inv) % self.n;
             if src_idx < bits.len() {
-                out[i] = bits[src_idx];
+                *dst = bits[src_idx];
             }
         }
         out
@@ -243,12 +243,12 @@ impl AlgebraicInterleaver {
     /// デインターリーブ処理 (受信側, インプレース版)
     pub fn deinterleave_in_place(&self, input: &[u8], output: &mut [u8]) {
         assert!(output.len() >= self.n, "output buffer too small");
-        for i in 0..self.n {
+        for (i, dst) in output.iter_mut().enumerate().take(self.n) {
             let src_idx = (i * self.q_inv) % self.n;
             if src_idx < input.len() {
-                output[i] = input[src_idx];
+                *dst = input[src_idx];
             } else {
-                output[i] = 0;
+                *dst = 0;
             }
         }
     }
@@ -256,10 +256,10 @@ impl AlgebraicInterleaver {
     /// デインターリーブ処理 (受信側, f32値)
     pub fn deinterleave_f32(&self, values: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0f32; self.n];
-        for i in 0..self.n {
+        for (i, dst) in out.iter_mut().enumerate().take(self.n) {
             let src_idx = (i * self.q_inv) % self.n;
             if src_idx < values.len() {
-                out[i] = values[src_idx];
+                *dst = values[src_idx];
             }
         }
         out
@@ -268,12 +268,12 @@ impl AlgebraicInterleaver {
     /// デインターリーブ処理 (受信側, f32値, インプレース版)
     pub fn deinterleave_f32_in_place(&self, input: &[f32], output: &mut [f32]) {
         assert!(output.len() >= self.n, "output buffer too small");
-        for i in 0..self.n {
+        for (i, dst) in output.iter_mut().enumerate().take(self.n) {
             let src_idx = (i * self.q_inv) % self.n;
             if src_idx < input.len() {
-                output[i] = input[src_idx];
+                *dst = input[src_idx];
             } else {
-                output[i] = 0.0;
+                *dst = 0.0;
             }
         }
     }
