@@ -59,7 +59,6 @@ pub fn postprocess_cir(
 }
 
 const FDE_FIT_BASE_ALPHA: f32 = 0.10;
-const FDE_FIT_TAP_THRESHOLD_ALPHA: f32 = 0.05;
 
 fn threshold_and_trim_cir(cir: &[Complex32], alpha: f32) -> Vec<Complex32> {
     if cir.is_empty() {
@@ -107,30 +106,6 @@ fn build_fde_cir_candidates(cir: &[Complex32]) -> Vec<Vec<Complex32>> {
     candidates.push(cir.to_vec());
     for alpha in [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30] {
         candidates.push(threshold_and_trim_cir(cir, alpha));
-    }
-
-    // 末尾/先頭に主タップが寄るケースでは、境界近傍だけ小さく循環シフトした候補も試す。
-    let peak_idx = cir
-        .iter()
-        .enumerate()
-        .max_by(|a, b| {
-            a.1.norm_sqr()
-                .partial_cmp(&b.1.norm_sqr())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(idx, _)| idx)
-        .unwrap_or(0);
-    let len = cir.len();
-    let edge_margin = len / 8;
-    if peak_idx <= edge_margin || peak_idx + edge_margin >= len {
-        for shift in [-4isize, -2, -1, 1, 2, 4] {
-            let mut shifted = vec![Complex32::new(0.0, 0.0); len];
-            for (idx, &tap) in cir.iter().enumerate() {
-                let new_idx = ((idx as isize + shift).rem_euclid(len as isize)) as usize;
-                shifted[new_idx] = tap;
-            }
-            candidates.push(threshold_and_trim_cir(&shifted, FDE_FIT_TAP_THRESHOLD_ALPHA));
-        }
     }
     candidates
 }
@@ -377,13 +352,14 @@ impl EqualizationController {
 
     /// パス選択を実行
     pub fn select_path(&mut self, mse_raw: f32, mse_fde: f32, auto_path_select: bool) {
+        const AUTO_SELECT_EPS: f32 = 1e-6;
         let use_fde = if auto_path_select {
             if mse_fde.is_nan() || !mse_fde.is_finite() {
                 false
             } else if mse_raw.is_nan() || !mse_raw.is_finite() {
                 true
             } else {
-                mse_fde < mse_raw
+                mse_fde + AUTO_SELECT_EPS < mse_raw
             }
         } else {
             self.equalizer.is_some()

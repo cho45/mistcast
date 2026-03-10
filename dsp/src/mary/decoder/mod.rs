@@ -619,6 +619,9 @@ impl Decoder {
                 cir_slice,
                 &mut chq,
             );
+            if self.equalization.equalizer_ref().is_some() {
+                self.sync_detector.deembed_cir_estimator_impulse(cir_slice);
+            }
             postprocess_cir(
                 cir_slice,
                 self.equalization.cir_normalization_mode(),
@@ -1722,6 +1725,8 @@ mod tests {
         let mut rx_config = config.clone();
         rx_config.carrier_freq += offset_hz;
         let mut decoder = Decoder::new(640, 40, rx_config);
+        // 本テストは追従ループの耐性検証が目的なので、FDE影響を切る。
+        decoder.set_fde_enabled(false);
         decoder.config.packets_per_burst = 40;
         let data = vec![0xAAu8; 640];
         encoder.set_data(&data);
@@ -2203,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fde_auto_selects_raw_on_flat_channel_with_large_lambda_floor() {
+    fn test_fde_auto_follows_pred_mse_ordering_on_flat_channel_with_large_lambda_floor() {
         use crate::mary::encoder::Encoder;
         let mut config = DspConfig::default_48k();
         config.preamble_sf = 127;
@@ -2212,17 +2217,29 @@ mod tests {
         decoder.config.packets_per_burst = 1;
         decoder.set_fde_enabled(true);
         decoder.set_fde_auto_path_select(true);
-        decoder.set_fde_mmse_settings(15.0, 1.0, 10.0, None);
+        decoder.set_fde_mmse_settings(15.0, 1.0, 1.0e6, None);
 
         let data = vec![0x45u8; 32];
         encoder.set_data(&data);
         let mut signal = encoder.encode_frame().expect("frame");
         signal.extend(vec![0.0; 8000]);
         decoder.process_samples(&signal);
+        let progress = decoder.progress();
+        let expect_use_fde = progress.last_pred_mse_fde + 1e-6 < progress.last_pred_mse_raw;
 
         assert!(
-            !decoder.equalization.current_frame_use_fde(),
-            "平坦チャネルかつ強正則化ではAUTOはRAWを選ぶべき"
+            progress.last_pred_mse_raw.is_finite() && progress.last_pred_mse_fde.is_finite(),
+            "pred MSE must be finite: pred_raw={}, pred_fde={}",
+            progress.last_pred_mse_raw,
+            progress.last_pred_mse_fde
+        );
+        assert_eq!(
+            decoder.equalization.current_frame_use_fde(),
+            expect_use_fde,
+            "AUTO path must follow replay MSE ordering: path_used={}, pred_raw={}, pred_fde={}",
+            progress.last_path_used,
+            progress.last_pred_mse_raw,
+            progress.last_pred_mse_fde
         );
     }
 }

@@ -7,6 +7,8 @@
 use crate::mary::params;
 use crate::DspConfig;
 use num_complex::Complex32;
+use rustfft::{Fft, FftPlanner};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct SyncResult {
@@ -39,6 +41,12 @@ pub struct MarySyncDetector {
     spc: usize,
     preamble_sym_len: usize,
     sync_sym_len: usize,
+    cir_estimator_impulse: Vec<Complex32>,
+    deembed_fft_size: usize,
+    deembed_fft_forward: Arc<dyn Fft<f32>>,
+    deembed_fft_inverse: Arc<dyn Fft<f32>>,
+    deembed_c_spec: Vec<Complex32>,
+    deembed_g_spec: Vec<Complex32>,
     pub threshold_coarse: f32,
     pub threshold_fine: f32,
 }
@@ -95,7 +103,12 @@ impl MarySyncDetector {
             sync_symbols.push(current_phase_factor);
         }
 
-        MarySyncDetector {
+        let cir_len = preamble_sf * spc;
+        let deembed_fft_size = (cir_len.max(1) * 2).next_power_of_two().max(64);
+        let mut planner = FftPlanner::<f32>::new();
+        let deembed_fft_forward = planner.plan_fft_forward(deembed_fft_size);
+        let deembed_fft_inverse = planner.plan_fft_inverse(deembed_fft_size);
+        let mut detector = MarySyncDetector {
             config,
             preamble_pn,
             sync_pn,
@@ -105,9 +118,17 @@ impl MarySyncDetector {
             spc,
             preamble_sym_len,
             sync_sym_len,
+            cir_estimator_impulse: Vec::new(),
+            deembed_fft_size,
+            deembed_fft_forward,
+            deembed_fft_inverse,
+            deembed_c_spec: vec![Complex32::new(0.0, 0.0); deembed_fft_size],
+            deembed_g_spec: vec![Complex32::new(0.0, 0.0); deembed_fft_size],
             threshold_coarse,
             threshold_fine,
-        }
+        };
+        detector.cir_estimator_impulse = detector.build_cir_estimator_impulse();
+        detector
     }
 
     pub fn filter_delay(&self) -> usize {
@@ -367,6 +388,140 @@ impl MarySyncDetector {
         cfo_rad_per_sample
     }
 
+    fn estimate_cir_raw(
+        &self,
+        i_ch: &[f32],
+        q_ch: &[f32],
+        n: usize,
+        cfo_rad_per_sample: f32,
+        cir_out: &mut [Complex32],
+    ) {
+        let repeat = self.config.preamble_repeat.max(1);
+        let sf = self.preamble_sf;
+        let preamble_sym_len = self.preamble_sym_len;
+        for (d, out_val) in cir_out.iter_mut().enumerate() {
+            let mut sum = Complex32::new(0.0, 0.0);
+            let mut used = 0usize;
+            for rep in 0..repeat {
+                let rep_start = n + rep * preamble_sym_len;
+                let rep_end = rep_start + preamble_sym_len;
+                let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
+                let sign_c = Complex32::new(sign, 0.0);
+                for k in 0..sf {
+                    let chip_start = rep_start + d + k * self.spc;
+                    if chip_start >= rep_end {
+                        break;
+                    }
+                    let val = self.preamble_pn[k] * sign_c;
+                    let mut chip_corr = Complex32::new(0.0, 0.0);
+                    let mut used_samples = 0usize;
+                    for s_idx in 0..self.spc {
+                        let p = chip_start + s_idx;
+                        if p >= rep_end || p >= i_ch.len() || p >= q_ch.len() {
+                            break;
+                        }
+                        let sig = Complex32::new(i_ch[p], q_ch[p]);
+                        let mut corr = sig * val.conj();
+                        if cfo_rad_per_sample != 0.0 {
+                            let t = (rep * preamble_sym_len + k * self.spc + s_idx) as f32;
+                            let ang = -cfo_rad_per_sample * t;
+                            let (s, c) = ang.sin_cos();
+                            corr *= Complex32::new(c, s);
+                        }
+                        chip_corr += corr;
+                        used_samples += 1;
+                    }
+
+                    if used_samples == 0 {
+                        break;
+                    }
+                    sum += chip_corr / (used_samples as f32).sqrt();
+                    used += 1;
+                }
+            }
+            *out_val = if used > 0 {
+                sum / used as f32
+            } else {
+                Complex32::new(0.0, 0.0)
+            };
+        }
+    }
+
+    fn build_cir_estimator_impulse(&self) -> Vec<Complex32> {
+        let cir_len = self.preamble_sf * self.spc;
+        if cir_len == 0 {
+            return Vec::new();
+        }
+        let repeat = self.config.preamble_repeat.max(1);
+        let len = repeat * self.preamble_sym_len + cir_len + self.spc + 8;
+        let chip_scale = 1.0 / (self.spc as f32).sqrt();
+
+        let mut x = vec![Complex32::new(0.0, 0.0); len];
+        for rep in 0..repeat {
+            let rep_start = rep * self.preamble_sym_len;
+            let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
+            for k in 0..self.preamble_sf {
+                for s_idx in 0..self.spc {
+                    let p = rep_start + k * self.spc + s_idx;
+                    if p < len {
+                        x[p] = self.preamble_pn[k] * Complex32::new(sign * chip_scale, 0.0);
+                    }
+                }
+            }
+        }
+        let i_ch: Vec<f32> = x.iter().map(|v| v.re).collect();
+        let q_ch: Vec<f32> = x.iter().map(|v| v.im).collect();
+
+        let mut kernel = vec![Complex32::new(0.0, 0.0); cir_len];
+        self.estimate_cir_raw(&i_ch, &q_ch, 0, 0.0, &mut kernel);
+        let ref_tap = kernel.first().copied().unwrap_or(Complex32::new(1.0, 0.0));
+        if ref_tap.norm() > 1e-9 {
+            for tap in &mut kernel {
+                *tap /= ref_tap;
+            }
+        }
+        kernel
+    }
+
+    /// 相関推定器が持つカーネル成分を除去し、FDE用CIRモデルに近づける。
+    pub fn deembed_cir_estimator_impulse(&mut self, cir: &mut [Complex32]) {
+        if cir.is_empty() || self.cir_estimator_impulse.is_empty() {
+            return;
+        }
+        let fft_size = self.deembed_fft_size;
+
+        self.deembed_c_spec.fill(Complex32::new(0.0, 0.0));
+        self.deembed_g_spec.fill(Complex32::new(0.0, 0.0));
+        self.deembed_c_spec[..cir.len()].copy_from_slice(cir);
+        self.deembed_g_spec[..self.cir_estimator_impulse.len()]
+            .copy_from_slice(&self.cir_estimator_impulse);
+
+        self.deembed_fft_forward.process(&mut self.deembed_c_spec);
+        self.deembed_fft_forward.process(&mut self.deembed_g_spec);
+
+        let peak_g = self
+            .deembed_g_spec
+            .iter()
+            .map(|v| v.norm_sqr())
+            .fold(0.0f32, f32::max);
+        let lambda = (peak_g * 1e-8).max(1e-10);
+        for idx in 0..fft_size {
+            let g = self.deembed_g_spec[idx];
+            let denom = g.norm_sqr() + lambda;
+            self.deembed_c_spec[idx] = if denom > 1e-12 {
+                self.deembed_c_spec[idx] * g.conj() / denom
+            } else {
+                Complex32::new(0.0, 0.0)
+            };
+        }
+
+        self.deembed_fft_inverse.process(&mut self.deembed_c_spec);
+        let scale = 1.0 / fft_size as f32;
+        for (idx, out) in cir.iter_mut().enumerate() {
+            *out = self.deembed_c_spec[idx] * scale;
+        }
+    }
+
     /// プリアンブル相関から CIR とチャネル品質を同時推定する。
     /// - `cir_out`: サンプル解像度のCIRを書き込む先（空ならCIR推定をスキップ）
     /// - `quality_out`: ノイズ分散/SNR/CFOなどを上書き
@@ -448,37 +603,7 @@ impl MarySyncDetector {
         }
 
         if !cir_out.is_empty() {
-            for (d, out_val) in cir_out.iter_mut().enumerate() {
-                let mut sum = Complex32::new(0.0, 0.0);
-                let mut used = 0usize;
-                for rep in 0..repeat {
-                    let rep_start = n + rep * preamble_sym_len;
-                    let sign = self.sync_symbols.get(rep).copied().unwrap_or(1.0);
-                    let sign_c = Complex32::new(sign, 0.0);
-                    for k in 0..sf {
-                        let p = rep_start + d + k * self.spc;
-                        if p >= i_ch.len() || p >= q_ch.len() {
-                            break;
-                        }
-                        let val = self.preamble_pn[k] * sign_c;
-                        let sig = Complex32::new(i_ch[p], q_ch[p]);
-                        let mut corr = sig * val.conj();
-                        if cfo_rad_per_sample != 0.0 {
-                            let t = (rep * preamble_sym_len + k * self.spc) as f32;
-                            let ang = -cfo_rad_per_sample * t;
-                            let (s, c) = ang.sin_cos();
-                            corr *= Complex32::new(c, s);
-                        }
-                        sum += corr;
-                        used += 1;
-                    }
-                }
-                *out_val = if used > 0 {
-                    sum / used as f32
-                } else {
-                    Complex32::new(0.0, 0.0)
-                };
-            }
+            self.estimate_cir_raw(i_ch, q_ch, n, cfo_rad_per_sample, cir_out);
         }
 
         let noise_var = if used_pairs > 0 {
@@ -1663,6 +1788,48 @@ mod tests {
         synth_preamble_observation_with_cfo(detector, taps, noise_std_iq, 0.0, seed)
     }
 
+    fn synth_preamble_baseband_with_known_chip_iq(
+        detector: &MarySyncDetector,
+        chip_iq: &[Complex32],
+        taps: &[(usize, Complex32)],
+    ) -> (Vec<f32>, Vec<f32>) {
+        let repeat = detector.config.preamble_repeat.max(1);
+        let sf = detector.preamble_sf;
+        let spc = detector.spc;
+        assert_eq!(chip_iq.len(), spc);
+
+        let preamble_sym_len = detector.preamble_sym_len;
+        let max_delay = taps.iter().map(|(d, _)| *d).max().unwrap_or(0);
+        let len = repeat * preamble_sym_len + max_delay + spc + 8;
+
+        let mut x = vec![Complex32::new(0.0, 0.0); len];
+        for rep in 0..repeat {
+            let rep_start = rep * preamble_sym_len;
+            let sign = detector.sync_symbols.get(rep).copied().unwrap_or(1.0);
+            let sign_c = Complex32::new(sign, 0.0);
+            for k in 0..sf {
+                let code = detector.preamble_pn[k] * sign_c;
+                for (s_idx, &shape) in chip_iq.iter().enumerate() {
+                    let p = rep_start + k * spc + s_idx;
+                    if p < len {
+                        x[p] = code * shape;
+                    }
+                }
+            }
+        }
+
+        let mut y = vec![Complex32::new(0.0, 0.0); len];
+        for &(delay, gain) in taps {
+            for n in delay..len {
+                y[n] += x[n - delay] * gain;
+            }
+        }
+
+        let i = y.iter().map(|c| c.re).collect();
+        let q = y.iter().map(|c| c.im).collect();
+        (i, q)
+    }
+
     fn synth_preamble_observation_with_cfo(
         detector: &MarySyncDetector,
         taps: &[(usize, Complex32)],
@@ -2453,62 +2620,149 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_cir_pure_unit() {
+    fn test_estimate_cir_baseband_known_iq() {
         let sf = 13;
-        let spc = 3;
         let mut config = DspConfig::default_48k();
         config.preamble_sf = sf;
+        config.preamble_repeat = 2;
         let detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let spc = detector.spc;
+        assert_eq!(spc, 3);
 
-        // 1. ZC系列をベースに、理想的なマルチパス信号を作成
-        // preamble_repeat=2回分の信号を生成する必要がある
-        let preamble_sym_len = sf * spc;
-        let signal_len = preamble_sym_len * detector.config.preamble_repeat + 100;
-        let mut i_ch = vec![0.0f32; signal_len];
-        let mut q_ch = vec![0.0f32; signal_len];
+        // 24kベースバンド上で、1チップ内既知IQ波形を直接構成する。
+        // s_idx=0 をゼロにして、spc積分していない実装では tap[0] が復元できない信号にする。
+        let chip_iq = vec![
+            Complex32::new(0.0, 0.0),
+            Complex32::new(1.0, 0.0),
+            Complex32::new(1.0, 0.0),
+        ];
+        let main_gain = Complex32::new(0.7, -0.25);
+        let (i_ch, q_ch) = synth_preamble_baseband_with_known_chip_iq(
+            &detector,
+            &chip_iq,
+            &[(0usize, main_gain)],
+        );
 
-        // メインパス (idx=0) - 2回の反復を生成
-        // sync_symbols の符号を考慮する必要がある
-        let zc = &detector.preamble_pn;
-        for rep in 0..detector.config.preamble_repeat {
-            let offset = rep * preamble_sym_len;
-            let sign = detector.sync_symbols[rep]; // 符号を取得 (rep=0: +1.0, rep=1: -1.0)
-            for k in 0..sf {
-                i_ch[offset + k * spc] = zc[k].re * sign;
-                q_ch[offset + k * spc] = zc[k].im * sign;
-            }
-        }
-
-        // 遅延パス (idx=1 に 0.7 倍の強度で重畳) - 2回の反復を生成
-        let alpha = 0.7f32;
-        for rep in 0..detector.config.preamble_repeat {
-            let offset = rep * preamble_sym_len;
-            let sign = detector.sync_symbols[rep]; // 符号を取得
-            for k in 0..sf {
-                i_ch[offset + 1 + k * spc] += zc[k].re * alpha * sign;
-                q_ch[offset + 1 + k * spc] += zc[k].im * alpha * sign;
-            }
-        }
-
-        // 2. CIR 推定
-        let mut est_cir = vec![Complex32::new(0.0, 0.0); 5];
+        // 2. CIR 推定 (d=0のみ検証)
+        let mut est_cir = vec![Complex32::new(0.0, 0.0); 1];
         let mut chq = ChannelQualityEstimate::default();
         detector.estimate_channel_quality(&i_ch, &q_ch, 0, &mut est_cir, &mut chq);
 
-        println!("Pure Unit Test CIR:");
-        for (i, val) in est_cir.iter().enumerate() {
-            println!(
-                "  [{}] {:.4} + {:.4}j (mag={:.4})",
-                i,
-                val.re,
-                val.im,
-                val.norm()
-            );
+        // 期待値:
+        // corr per chip = (chip_iq[0] + chip_iq[1] + chip_iq[2]) * main_gain
+        //              = 2 * main_gain
+        // estimator は chip ごとに sqrt(spc) で正規化するため 2/sqrt(3) 倍。
+        let expected_scale = 2.0 / (spc as f32).sqrt();
+        let expected = main_gain * Complex32::new(expected_scale, 0.0);
+        assert!(
+            (est_cir[0] - expected).norm() < 1e-5,
+            "tap[0] mismatch: est={:?}, expected={:?}",
+            est_cir[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_estimate_cir_baseband_identity() {
+        let sf = 127;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = sf;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+
+        // 24kベースバンドで理想単一経路（tap0のみ）を与える。
+        // チップ内波形は先頭サンプルのみ非ゼロにして、理想CIR [1,0,0,...] を狙う。
+        let chip_iq = vec![
+            Complex32::new(1.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.0, 0.0),
+        ];
+        let (i_ch, q_ch) = synth_preamble_baseband_with_known_chip_iq(
+            &detector,
+            &chip_iq,
+            &[(0usize, Complex32::new(1.0, 0.0))],
+        );
+
+        let mut est_cir = vec![Complex32::new(0.0, 0.0); 8];
+        let mut chq = ChannelQualityEstimate::default();
+        detector.estimate_channel_quality(&i_ch, &q_ch, 0, &mut est_cir, &mut chq);
+
+        let tap0 = est_cir[0];
+        assert!(tap0.norm() > 1e-4, "tap0 should be non-zero");
+        for tap in &mut est_cir {
+            *tap /= tap0;
         }
 
-        // 3. 検証: 理想的な環境なので、誤差なく抽出できるはず
-        assert!((est_cir[0].norm() - 1.0).abs() < 1e-5, "Main tap error");
-        assert!((est_cir[1].norm() - 0.7).abs() < 1e-5, "Delayed tap error");
-        assert!(est_cir[2].norm() < 1e-5, "Ghost tap at idx 2");
+        assert!(
+            (est_cir[0] - Complex32::new(1.0, 0.0)).norm() < 1e-5,
+            "tap0 must be 1 after normalization: {:?}",
+            est_cir[0]
+        );
+
+        let max_non_main = est_cir
+            .iter()
+            .skip(1)
+            .map(|c| c.norm())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_non_main < 0.2,
+            "Identity CIR expected: non-main taps too large (max={:.4})",
+            max_non_main
+        );
+    }
+
+    #[test]
+    fn test_cir_estimator_impulse_has_nonzero_main_tap() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let detector = MarySyncDetector::new(config, 0.0, 0.0);
+        assert!(
+            !detector.cir_estimator_impulse.is_empty(),
+            "estimator impulse must be initialized"
+        );
+        let tap0 = detector.cir_estimator_impulse[0];
+        assert!(tap0.norm() > 1e-4, "tap0 must be non-zero: {:?}", tap0);
+    }
+
+    #[test]
+    fn test_deembed_cir_estimator_impulse_recovers_sparse_channel() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let mut detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let cir_len = detector.preamble_sf * detector.spc;
+        let mut h_true = vec![Complex32::new(0.0, 0.0); cir_len];
+        h_true[0] = Complex32::new(1.0, 0.0);
+        h_true[7] = Complex32::new(0.24, -0.08);
+        h_true[21] = Complex32::new(-0.13, 0.05);
+
+        let g = &detector.cir_estimator_impulse;
+        let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
+        for n in 0..cir_len {
+            let mut acc = Complex32::new(0.0, 0.0);
+            let k_max = n.min(g.len().saturating_sub(1));
+            for k in 0..=k_max {
+                acc += h_true[k] * g[n - k];
+            }
+            cir_obs[n] = acc;
+        }
+
+        let mut h_est = cir_obs.clone();
+        detector.deembed_cir_estimator_impulse(&mut h_est);
+
+        let eval_len = 64.min(cir_len);
+        let mut err = 0.0f32;
+        let mut ref_pow = 0.0f32;
+        for idx in 0..eval_len {
+            err += (h_est[idx] - h_true[idx]).norm_sqr();
+            ref_pow += h_true[idx].norm_sqr();
+        }
+        let nmse = err / ref_pow.max(1e-12);
+        assert!(
+            nmse < 2e-2,
+            "deembed should recover sparse channel in noise-free model: nmse={}",
+            nmse
+        );
     }
 }
