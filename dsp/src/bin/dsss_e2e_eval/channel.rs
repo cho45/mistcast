@@ -19,26 +19,43 @@ impl MultipathProfile {
     pub fn preset(name: &str) -> Option<Self> {
         match name {
             "none" => Some(Self::none()),
+            // 48kHz換算:
+            // 9,23 samples = 0.188,0.479ms (約6.4,16.4cm path diff)
+            // 弱めの近距離反射。AWGN寄りの比較基準。
             "mild" => Some(Self {
                 name: "mild".to_string(),
                 taps: vec![(0, 1.0), (9, 0.40), (23, 0.22)],
             }),
+            // 48kHz換算:
+            // 9,23,49 samples = 0.188,0.479,1.021ms (約6.4,16.4,35.0cm path diff)
+            // 反射数と遅延を増やした中程度の周波数選択性。
             "medium" => Some(Self {
                 name: "medium".to_string(),
                 taps: vec![(0, 1.0), (9, 0.45), (23, 0.28), (49, 0.18)],
             }),
+            // 48kHz換算:
+            // 9,23,49,87 samples = 0.188,0.479,1.021,1.813ms (約6.4,16.4,35.0,62.2cm path diff)
+            // 長めの尾を含む強い反射。ISI寄りのストレス条件。
             "harsh" => Some(Self {
                 name: "harsh".to_string(),
                 taps: vec![(0, 1.0), (9, 0.55), (23, 0.35), (49, 0.25), (87, 0.18)],
             }),
-            // 48kHz 기준:
+            // 48kHz換算:
+            // 6,13,21,31 samples = 0.125,0.271,0.438,0.646ms
+            // (約4.3,9.3,15.0,22.2cm path diff)
+            // 近距離の強反射で高域コムノッチが深くなりやすい、FDE検証向け。
+            "isi" => Some(Self {
+                name: "isi".to_string(),
+                taps: vec![(0, 1.0), (6, -0.95), (13, 0.80), (21, -0.60), (31, 0.40)],
+            }),
+            // 48kHz換算:
             // 4,11,19 samples = 0.083,0.229,0.396ms (約2.9,7.9,13.6cm path diff)
             // デバイス近傍・机面の短遅延反射を想定した高域コムノッチ向け。
             "desk" => Some(Self {
                 name: "desk".to_string(),
                 taps: vec![(0, 1.0), (4, -0.45), (11, 0.28), (19, -0.18)],
             }),
-            // 48kHz 기준:
+            // 48kHz換算:
             // 42,87,154,233 samples = 0.875,1.813,3.208,4.854ms
             // (約0.30,0.62,1.10,1.66m path diff)
             // 家庭内の中距離反射を想定。
@@ -46,7 +63,7 @@ impl MultipathProfile {
                 name: "room".to_string(),
                 taps: vec![(0, 1.0), (42, 0.52), (87, -0.34), (154, 0.22), (233, -0.15)],
             }),
-            // 48kHz 기준:
+            // 48kHz換算:
             // 70,138,236,356 samples = 1.458,2.875,4.917,7.417ms
             // (約0.50,0.99,1.69,2.54m path diff)
             // 廊下/ホールの長遅延反射を想定。
@@ -94,7 +111,7 @@ impl FromStr for MultipathProfile {
         }
         Self::parse_custom(value).ok_or_else(|| {
             format!(
-                "invalid multipath: {value} (preset: none|mild|medium|harsh|desk|room|hall or taps: 0:1.0,9:0.4)"
+                "invalid multipath: {value} (preset: none|mild|medium|harsh|isi|desk|room|hall or taps: 0:1.0,9:0.4)"
             )
         })
     }
@@ -199,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_realistic_presets_exist_and_are_sorted() {
-        for &name in &["desk", "room", "hall"] {
+        for &name in &["isi", "desk", "room", "hall"] {
             let p = MultipathProfile::preset(name).expect("preset must exist");
             assert_eq!(p.name, name);
             assert_eq!(p.taps.first().copied(), Some((0, 1.0)));
@@ -215,6 +232,27 @@ mod tests {
     #[test]
     fn test_unknown_profile_error_mentions_realistic_presets() {
         let err = "not-a-profile".parse::<MultipathProfile>().unwrap_err();
-        assert!(err.contains("desk|room|hall"), "error={}", err);
+        assert!(err.contains("isi|desk|room|hall"), "error={}", err);
+    }
+
+    #[test]
+    fn test_isi_profile_has_short_delay_strong_reflections() {
+        let p = MultipathProfile::preset("isi").expect("isi preset");
+        assert_eq!(p.taps[0], (0, 1.0));
+        let max_delay = p.taps.iter().map(|(d, _)| *d).max().unwrap_or(0);
+        assert!(
+            max_delay <= 32,
+            "isi preset should stay in short-delay region: max_delay={}",
+            max_delay
+        );
+        let strongest_echo = p.taps[1..]
+            .iter()
+            .map(|(_, g)| g.abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            strongest_echo >= 0.9,
+            "isi preset should include a near-main strong reflection: strongest_echo={}",
+            strongest_echo
+        );
     }
 }

@@ -352,7 +352,7 @@ pub fn run_sweep_fading(cli: &Cli) {
 pub fn run_sweep_multipath(cli: &Cli) {
     print_header(cli);
     let mut base = cli.base_impairment();
-    let profiles = ["none", "mild", "medium", "harsh", "desk", "room", "hall"];
+    let profiles = ["none", "mild", "medium", "harsh", "isi", "desk", "room", "hall"];
     for name in profiles {
         base.multipath = MultipathProfile::preset(name).unwrap_or_else(MultipathProfile::none);
         let scenario = format!("sweep_multipath(profile={name})");
@@ -954,8 +954,7 @@ mod tests {
         cli.packets_per_frame = 3;
         cli.preamble_sf = 127;
         cli.preamble_repeat = 2;
-        cli.multipath = MultipathProfile::parse_custom("0:1.0,6:-0.95,13:0.8,21:-0.6,31:0.4")
-            .expect("custom multipath profile");
+        cli.multipath = MultipathProfile::preset("isi").expect("isi multipath profile");
 
         let imp = cli.base_impairment();
 
@@ -986,8 +985,7 @@ mod tests {
         cli.packets_per_frame = 3;
         cli.preamble_sf = 127;
         cli.preamble_repeat = 2;
-        cli.multipath = MultipathProfile::parse_custom("0:1.0,6:-0.95,13:0.8,21:-0.6,31:0.4")
-            .expect("custom multipath profile");
+        cli.multipath = MultipathProfile::preset("isi").expect("isi multipath profile");
 
         let imp = cli.base_impairment();
 
