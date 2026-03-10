@@ -620,7 +620,8 @@ impl Decoder {
                 &mut chq,
             );
             if self.equalization.equalizer_ref().is_some() {
-                self.sync_detector.deembed_cir_estimator_impulse(cir_slice);
+                self.sync_detector
+                    .deembed_cir_estimator_impulse_with_quality(cir_slice, Some(chq));
             }
             postprocess_cir(
                 cir_slice,

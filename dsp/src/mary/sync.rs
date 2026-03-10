@@ -483,8 +483,30 @@ impl MarySyncDetector {
         kernel
     }
 
+    fn deembed_lambda_from_quality(peak_g: f32, quality: Option<ChannelQualityEstimate>) -> f32 {
+        let base = (peak_g * 1e-8).max(1e-10);
+        let Some(q) = quality else {
+            return base;
+        };
+        if !q.noise_var.is_finite() || !q.signal_var.is_finite() {
+            return base;
+        }
+        if q.noise_var <= 0.0 || q.signal_var <= 1e-12 {
+            return base;
+        }
+        let snr_lin = (q.signal_var / q.noise_var).max(1e-6);
+        // MMSE風: |G|^2 の代表値に 1/SNR を掛けて正則化。
+        let lambda_q = peak_g / snr_lin;
+        lambda_q.clamp(1e-10, (peak_g * 10.0).max(1e-10))
+    }
+
     /// 相関推定器が持つカーネル成分を除去し、FDE用CIRモデルに近づける。
-    pub fn deembed_cir_estimator_impulse(&mut self, cir: &mut [Complex32]) {
+    /// `quality` を与えると noise_var/signal_var から正則化 λ を決める。
+    pub fn deembed_cir_estimator_impulse_with_quality(
+        &mut self,
+        cir: &mut [Complex32],
+        quality: Option<ChannelQualityEstimate>,
+    ) {
         if cir.is_empty() || self.cir_estimator_impulse.is_empty() {
             return;
         }
@@ -504,7 +526,7 @@ impl MarySyncDetector {
             .iter()
             .map(|v| v.norm_sqr())
             .fold(0.0f32, f32::max);
-        let lambda = (peak_g * 1e-8).max(1e-10);
+        let lambda = Self::deembed_lambda_from_quality(peak_g, quality);
         for idx in 0..fft_size {
             let g = self.deembed_g_spec[idx];
             let denom = g.norm_sqr() + lambda;
@@ -520,6 +542,11 @@ impl MarySyncDetector {
         for (idx, out) in cir.iter_mut().enumerate() {
             *out = self.deembed_c_spec[idx] * scale;
         }
+    }
+
+    /// 互換API: 品質情報なし（従来のヒューリスティック λ）
+    pub fn deembed_cir_estimator_impulse(&mut self, cir: &mut [Complex32]) {
+        self.deembed_cir_estimator_impulse_with_quality(cir, None);
     }
 
     /// プリアンブル相関から CIR とチャネル品質を同時推定する。
