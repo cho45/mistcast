@@ -171,6 +171,40 @@ impl Encoder {
         std::mem::swap(out, &mut self.modulator_output);
     }
 
+    /// バーストをキャリア混合前の複素ベースバンドでエンコードする（テスト専用）
+    #[cfg(test)]
+    pub fn encode_burst_baseband_into_for_test(
+        &mut self,
+        packets: &[FountainPacket],
+        out_i: &mut Vec<f32>,
+        out_q: &mut Vec<f32>,
+    ) {
+        let interleaved_size = interleaver_config::interleaved_bits();
+        self.burst_bits_buffer.clear();
+        for packet in packets {
+            self.fill_packet_bits_buffer(packet);
+            self.burst_bits_buffer
+                .extend_from_slice(&self.interleaved_buffer[..interleaved_size]);
+        }
+        self.modulator
+            .encode_frame_baseband_for_test(&self.burst_bits_buffer, out_i, out_q);
+    }
+
+    /// フレームをキャリア混合前の複素ベースバンドでエンコードする（テスト専用）
+    #[cfg(test)]
+    pub fn encode_frame_baseband_for_test(&mut self) -> Option<(Vec<f32>, Vec<f32>)> {
+        let encoder = self.fountain_encoder.as_mut()?;
+        let burst_count = self.config.packets_per_sync_burst.max(1);
+        let mut packets = Vec::with_capacity(burst_count);
+        for _ in 0..burst_count {
+            packets.push(encoder.next_packet());
+        }
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        self.encode_burst_baseband_into_for_test(&packets, &mut out_i, &mut out_q);
+        Some((out_i, out_q))
+    }
+
     /// パケットをエンコードする
     pub fn encode_packet(&mut self, packet: &FountainPacket) -> Vec<f32> {
         self.fill_packet_bits_buffer(packet);
@@ -313,6 +347,28 @@ mod tests {
             frame.iter().all(|&s| s.is_finite()),
             "All samples should be finite"
         );
+    }
+
+    #[test]
+    fn test_encode_frame_baseband_for_test_smoke() {
+        let mut encoder = make_encoder();
+        let data = vec![0x24u8; 32];
+        encoder.set_data(&data);
+
+        let (bb_i, bb_q) = encoder
+            .encode_frame_baseband_for_test()
+            .expect("Should encode a baseband frame");
+        assert_eq!(bb_i.len(), bb_q.len(), "I/Q length mismatch");
+        assert!(!bb_i.is_empty(), "Baseband frame should not be empty");
+        assert!(bb_i.iter().all(|&s| s.is_finite()), "I samples must be finite");
+        assert!(bb_q.iter().all(|&s| s.is_finite()), "Q samples must be finite");
+
+        let energy: f32 = bb_i
+            .iter()
+            .zip(bb_q.iter())
+            .map(|(&i, &q)| i * i + q * q)
+            .sum();
+        assert!(energy > 1.0, "Baseband frame should have non-zero energy");
     }
 
     /// バーストエンコード

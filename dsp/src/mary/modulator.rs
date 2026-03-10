@@ -265,6 +265,32 @@ impl Modulator {
         std::mem::swap(&mut chips_q, &mut self.chips_buffer_q);
     }
 
+    #[cfg(test)]
+    fn convert_internal_chips_to_baseband(
+        &mut self,
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+        append: bool,
+    ) {
+        let mut chips_i = Vec::new();
+        let mut chips_q = Vec::new();
+        std::mem::swap(&mut chips_i, &mut self.chips_buffer_i);
+        std::mem::swap(&mut chips_q, &mut self.chips_buffer_q);
+
+        self.chips_to_resampled_baseband(&chips_i, &chips_q);
+        if !append {
+            output_i.clear();
+            output_q.clear();
+        }
+        output_i.extend_from_slice(&self.resample_buffer_i);
+        output_q.extend_from_slice(&self.resample_buffer_q);
+
+        chips_i.clear();
+        chips_q.clear();
+        std::mem::swap(&mut chips_i, &mut self.chips_buffer_i);
+        std::mem::swap(&mut chips_q, &mut self.chips_buffer_q);
+    }
+
     fn chips_to_resampled_baseband(&mut self, chips_i: &[f32], chips_q: &[f32]) {
         debug_assert_eq!(chips_i.len(), chips_q.len());
         let spc = INTERNAL_SPC;
@@ -394,6 +420,34 @@ impl Modulator {
         // データ (MaryDQPSK)
         self.build_payload_chips(bits);
         self.convert_internal_chips_to_samples(output, true);
+    }
+
+    /// 送信フレーム全体をキャリア混合前の複素ベースバンドで生成する（テスト専用）
+    #[cfg(test)]
+    pub(crate) fn encode_frame_baseband_for_test(
+        &mut self,
+        bits: &[u8],
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+    ) {
+        self.prev_phase = 0; // フレーム開始時にリセット
+        output_i.clear();
+        output_q.clear();
+        let reserve = self.estimate_frame_samples(bits.len());
+        output_i.reserve(reserve);
+        output_q.reserve(reserve);
+
+        // プリアンブル
+        self.build_preamble_chips();
+        self.convert_internal_chips_to_baseband(output_i, output_q, true);
+
+        // 同期ワード (DBPSK, Walsh[0], sf=SYNC_SPREAD_FACTOR)
+        self.build_sync_word_chips();
+        self.convert_internal_chips_to_baseband(output_i, output_q, true);
+
+        // データ (MaryDQPSK)
+        self.build_payload_chips(bits);
+        self.convert_internal_chips_to_baseband(output_i, output_q, true);
     }
 
     fn estimate_frame_samples(&self, bits_len: usize) -> usize {
