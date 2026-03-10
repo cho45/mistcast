@@ -2712,6 +2712,102 @@ mod tests {
     }
 
     #[test]
+    fn test_cir_delay_observability_limit_depends_on_preamble_sf() {
+        // 300 samples @24 kHz(baseband) = 12.5 ms の遅延（経路差 約4.29 m）
+        // sf=71 の観測窓(71 chips)は 71/8000 = 8.875 ms（経路差 約3.04 m）なので外側。
+        // sf=127 の観測窓(127 chips)は 127/8000 = 15.875 ms（経路差 約5.44 m）なので内側。
+        let target_delay = 300usize;
+        let chip_iq = vec![
+            Complex32::new(1.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.0, 0.0),
+        ];
+
+        let mut cfg_71 = DspConfig::default_48k();
+        cfg_71.preamble_sf = 71;
+        cfg_71.preamble_repeat = 2;
+        let det_71 = MarySyncDetector::new(cfg_71, 0.0, 0.0);
+        let (i_71, q_71) = synth_preamble_baseband_with_known_chip_iq(
+            &det_71,
+            &chip_iq,
+            &[(target_delay, Complex32::new(1.0, 0.0))],
+        );
+        let mut cir_71 = vec![Complex32::new(0.0, 0.0); det_71.preamble_sf * det_71.spc];
+        let mut chq_71 = ChannelQualityEstimate::default();
+        det_71.estimate_channel_quality(&i_71, &q_71, 0, &mut cir_71, &mut chq_71);
+        let (peak_idx_71, peak_mag_71) = cir_71
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| (idx, c.norm()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, 0.0));
+        let energy_71 = cir_71.iter().map(|c| c.norm_sqr()).sum::<f32>();
+
+        assert!(
+            target_delay >= cir_71.len(),
+            "test setup invalid: target_delay={} cir_len_71={}",
+            target_delay,
+            cir_71.len()
+        );
+        assert!(
+            peak_idx_71 < cir_71.len(),
+            "peak index must stay within observable window for sf=71: peak_idx={} cir_len={}",
+            peak_idx_71,
+            cir_71.len()
+        );
+
+        let mut cfg_127 = DspConfig::default_48k();
+        cfg_127.preamble_sf = 127;
+        cfg_127.preamble_repeat = 2;
+        let det_127 = MarySyncDetector::new(cfg_127, 0.0, 0.0);
+        let (i_127, q_127) = synth_preamble_baseband_with_known_chip_iq(
+            &det_127,
+            &chip_iq,
+            &[(target_delay, Complex32::new(1.0, 0.0))],
+        );
+        let mut cir_127 = vec![Complex32::new(0.0, 0.0); det_127.preamble_sf * det_127.spc];
+        let mut chq_127 = ChannelQualityEstimate::default();
+        det_127.estimate_channel_quality(&i_127, &q_127, 0, &mut cir_127, &mut chq_127);
+        let (peak_idx_127, peak_mag_127) = cir_127
+            .iter()
+            .enumerate()
+            .map(|(idx, c)| (idx, c.norm()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, 0.0));
+        let energy_127 = cir_127.iter().map(|c| c.norm_sqr()).sum::<f32>();
+
+        assert!(
+            target_delay < cir_127.len(),
+            "test setup invalid: target_delay={} cir_len_127={}",
+            target_delay,
+            cir_127.len()
+        );
+        assert!(
+            (peak_idx_127 as isize - target_delay as isize).abs() <= 1,
+            "sf=127 should resolve the delayed path near true delay: peak_idx={} target_delay={}",
+            peak_idx_127,
+            target_delay
+        );
+        assert!(
+            peak_mag_127 > 0.5,
+            "sf=127 should recover a strong delayed tap: peak_mag={}",
+            peak_mag_127
+        );
+        assert!(
+            peak_mag_127 > peak_mag_71 * 1.8,
+            "when delay enters window, dominant tap magnitude should increase clearly: peak71={} peak127={}",
+            peak_mag_71,
+            peak_mag_127
+        );
+        assert!(
+            energy_127 > energy_71 * 5.0,
+            "observable CIR energy should jump when delay enters window: e71={} e127={}",
+            energy_71,
+            energy_127
+        );
+    }
+
+    #[test]
     fn test_cir_estimator_impulse_has_nonzero_main_tap() {
         let mut config = DspConfig::default_48k();
         config.preamble_sf = 127;
