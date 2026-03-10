@@ -1,6 +1,6 @@
 //! 等化制御モジュール
 //!
-//! 周波数領域等化器（FDE）の管理、CIR処理、パス選択ロジックを提供する。
+//! 周波数領域等化器（FDE）の管理、CIRモデル化、運用モード制御を提供する。
 
 use crate::common::equalization::{FrequencyDomainEqualizer, MmseSettings};
 use crate::mary::sync::MarySyncDetector;
@@ -58,19 +58,20 @@ pub fn postprocess_cir(
     }
 }
 
-const FDE_FIT_BASE_ALPHA: f32 = 0.10;
-
 fn threshold_and_trim_cir(cir: &[Complex32], alpha: f32) -> Vec<Complex32> {
     if cir.is_empty() {
         return Vec::new();
     }
 
-    let (peak_idx, peak_energy) = cir
-        .iter()
-        .enumerate()
-        .map(|(idx, tap)| (idx, tap.norm_sqr()))
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or((0, 0.0));
+    let mut peak_idx = 0usize;
+    let mut peak_energy = 0.0f32;
+    for (idx, tap) in cir.iter().enumerate() {
+        let e = tap.norm_sqr();
+        if e > peak_energy {
+            peak_energy = e;
+            peak_idx = idx;
+        }
+    }
     if peak_energy <= 1e-12 {
         return cir.to_vec();
     }
@@ -95,22 +96,63 @@ fn threshold_and_trim_cir(cir: &[Complex32], alpha: f32) -> Vec<Complex32> {
 }
 
 fn fit_observed_cir_for_fde(cir: &[Complex32]) -> Vec<Complex32> {
-    threshold_and_trim_cir(cir, FDE_FIT_BASE_ALPHA)
+    cir.to_vec()
 }
 
 fn build_fde_cir_candidates(cir: &[Complex32]) -> Vec<Vec<Complex32>> {
     if cir.is_empty() {
         return Vec::new();
     }
+    let observed_dominant = dominant_tap_count(cir, 0.1);
     let mut candidates = Vec::new();
     candidates.push(cir.to_vec());
     for alpha in [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30] {
-        candidates.push(threshold_and_trim_cir(cir, alpha));
+        let cand = threshold_and_trim_cir(cir, alpha);
+        if observed_dominant >= 2 && dominant_tap_count(&cand, 0.1) < 2 {
+            continue;
+        }
+        candidates.push(cand);
     }
     candidates
 }
 
-/// 等化制御コントローラ
+fn dominant_tap_count(cir: &[Complex32], alpha: f32) -> usize {
+    if cir.is_empty() {
+        return 0;
+    }
+    let peak = cir
+        .iter()
+        .map(|c| c.norm())
+        .fold(0.0f32, |a, b| a.max(b));
+    if peak <= 1e-12 {
+        return 0;
+    }
+    let th = peak * alpha.max(0.0);
+    cir.iter().filter(|tap| tap.norm() >= th).count()
+}
+
+fn build_mmse_candidates(base: MmseSettings) -> Vec<MmseSettings> {
+    let mut out = Vec::with_capacity(4);
+    for scale_mul in [1.0f32, 2.0, 4.0, 8.0] {
+        out.push(MmseSettings {
+            lambda_scale: base.lambda_scale * scale_mul,
+            ..base
+        });
+    }
+    out
+}
+
+/// Mary デコーダ向け等化制御コントローラ。
+///
+/// # 責務
+/// - `on/off/auto` の運用モードに応じて FDE 経路の利用可否を決定する。
+/// - `sync.rs` が推定した `CIR` を FDE に適用可能なモデルへ整形する。
+/// - `FrequencyDomainEqualizer` のライフサイクル（生成/再設定/状態初期化）を管理する。
+/// - 等化済みバッファと入力オフセット管理を行い、復号器へ供給する。
+///
+/// # 非責務
+/// - 生波形からの同期捕捉・CIR推定・雑音推定（`sync.rs` の責務）。
+/// - 復号パイプライン全体の状態遷移（`decoder/mod.rs` の責務）。
 pub struct EqualizationController {
     equalizer: Option<FrequencyDomainEqualizer>,
     equalized_buffer: Vec<Complex32>,
@@ -124,6 +166,7 @@ pub struct EqualizationController {
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
     selected_fde_cir_for_setup: Option<Vec<Complex32>>,
+    selected_fde_mmse_for_setup: Option<MmseSettings>,
     #[cfg(test)]
     last_setup_cir_debug: Vec<Complex32>,
 }
@@ -161,6 +204,7 @@ impl EqualizationController {
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
             selected_fde_cir_for_setup: None,
+            selected_fde_mmse_for_setup: None,
             #[cfg(test)]
             last_setup_cir_debug: Vec::new(),
         }
@@ -186,12 +230,17 @@ impl EqualizationController {
             self.equalizer = Some(Self::build_default_equalizer(config));
         }
         self.selected_fde_cir_for_setup = None;
+        self.selected_fde_mmse_for_setup = None;
         #[cfg(test)]
         self.last_setup_cir_debug.clear();
         self.reset_frame_buffers();
     }
 
-    /// FDE有効/無効を設定
+    /// FDE 有効/無効を設定する。
+    ///
+    /// モード定義:
+    /// - `enabled=true` かつ `auto=false` は `on`（常時FDE経路）
+    /// - `enabled=false` は `off`（常時バイパス）
     pub fn set_fde_enabled(&mut self, enabled: bool, config: &DspConfig) {
         self.fde_enabled = enabled;
         if enabled {
@@ -205,12 +254,16 @@ impl EqualizationController {
             self.fde_auto_path_select = false;
         }
         self.selected_fde_cir_for_setup = None;
+        self.selected_fde_mmse_for_setup = None;
         #[cfg(test)]
         self.last_setup_cir_debug.clear();
         self.reset_frame_buffers();
     }
 
-    /// 自動パス選択を設定
+    /// 自動パス選択を設定する。
+    ///
+    /// `enabled=true` かつ FDE が有効なとき `auto` として動作し、
+    /// フレームごとに raw/FDE の経路を選択する。
     pub fn set_fde_auto_path_select(&mut self, enabled: bool) {
         self.fde_auto_path_select = enabled;
         if !enabled {
@@ -244,6 +297,8 @@ impl EqualizationController {
     ///
     /// ここで返す `Pred MSE` は理論モデル予測ではなく、フレーム開始時に
     /// 既知区間である sync word を raw/FDE の両経路に replay して得た実測値。
+    /// `fde_auto_path_select=true` のときのみ候補探索を行い、best モデルを setup 用に保持する。
+    /// `fde_auto_path_select=false`（on/off運用）では実適用モデル1本のみを評価する。
     ///
     /// FDE 側は sync word 直前の `overlap_len()` サンプルを warmup として使う。
     /// 実デコーダはフレーム開始時に zero-initialized な equalizer state から始まるため、
@@ -319,28 +374,50 @@ impl EqualizationController {
             std::mem::swap(&mut eval_output, &mut self.eval_output_buffer);
             return (mse_raw, f32::NAN);
         }
-        let mut best_mse_fde = f32::NAN;
-        let mut best_candidate: Option<Vec<Complex32>> = None;
-        let cir_candidates = build_fde_cir_candidates(&cir[..cir_eval_len]);
         let skip = overlap;
-        for candidate in cir_candidates {
-            if candidate.is_empty() {
-                continue;
+        let auto_path_select = self.fde_auto_path_select;
+        let mut best_mse_fde = f32::NAN;
+        if auto_path_select {
+            let mut best_candidate: Option<Vec<Complex32>> = None;
+            let mut best_mmse = None;
+            let cir_base = fit_observed_cir_for_fde(&cir[..cir_eval_len]);
+            let cir_candidates = build_fde_cir_candidates(&cir_base);
+            let mmse_candidates = build_mmse_candidates(mmse);
+            for candidate in cir_candidates {
+                if candidate.is_empty() {
+                    continue;
+                }
+                for mmse_cand in &mmse_candidates {
+                    eq.set_cir_with_mmse(&candidate, *mmse_cand);
+                    eq.reset();
+                    eval_output.clear();
+                    eq.process(&eval_input, &mut eval_output);
+                    eq.flush(&mut eval_output);
+                    let mse = sync_detector
+                        .sync_word_mse_complex(&eval_output, skip, cfo_rad_per_sample)
+                        .unwrap_or(f32::NAN);
+                    if mse.is_finite() && (!best_mse_fde.is_finite() || mse < best_mse_fde) {
+                        best_mse_fde = mse;
+                        best_candidate = Some(candidate.clone());
+                        best_mmse = Some(*mmse_cand);
+                    }
+                }
             }
-            eq.set_cir_with_mmse(&candidate, mmse);
+            self.selected_fde_cir_for_setup = best_candidate;
+            self.selected_fde_mmse_for_setup = best_mmse;
+        } else {
+            let cir_model = fit_observed_cir_for_fde(&cir[..cir_eval_len]);
+            eq.set_cir_with_mmse(&cir_model, mmse);
             eq.reset();
             eval_output.clear();
             eq.process(&eval_input, &mut eval_output);
             eq.flush(&mut eval_output);
-            let mse = sync_detector
+            best_mse_fde = sync_detector
                 .sync_word_mse_complex(&eval_output, skip, cfo_rad_per_sample)
                 .unwrap_or(f32::NAN);
-            if mse.is_finite() && (!best_mse_fde.is_finite() || mse < best_mse_fde) {
-                best_mse_fde = mse;
-                best_candidate = Some(candidate);
-            }
+            self.selected_fde_cir_for_setup = None;
+            self.selected_fde_mmse_for_setup = None;
         }
-        self.selected_fde_cir_for_setup = best_candidate;
 
         eval_input.clear();
         eval_output.clear();
@@ -351,8 +428,9 @@ impl EqualizationController {
     }
 
     /// パス選択を実行
-    pub fn select_path(&mut self, mse_raw: f32, mse_fde: f32, auto_path_select: bool) {
+    pub fn select_path(&mut self, mse_raw: f32, mse_fde: f32) {
         const AUTO_SELECT_EPS: f32 = 1e-6;
+        let auto_path_select = self.fde_auto_path_select;
         let use_fde = if auto_path_select {
             if mse_fde.is_nan() || !mse_fde.is_finite() {
                 false
@@ -406,6 +484,7 @@ impl EqualizationController {
     /// 等化器のCIRとMMSEパラメータを設定
     pub fn setup_equalizer(&mut self, cir: &[Complex32], mmse: MmseSettings) {
         let selected_cir = self.selected_fde_cir_for_setup.take();
+        let selected_mmse = self.selected_fde_mmse_for_setup.take().unwrap_or(mmse);
         let cir_model = if let Some(cir_model) = selected_cir {
             cir_model
         } else {
@@ -416,7 +495,7 @@ impl EqualizationController {
             {
                 self.last_setup_cir_debug = cir_model.clone();
             }
-            eq.set_cir_with_mmse(&cir_model, mmse);
+            eq.set_cir_with_mmse(&cir_model, selected_mmse);
             eq.reset();
         }
     }
@@ -439,10 +518,6 @@ impl EqualizationController {
 
     pub fn current_frame_use_fde(&self) -> bool {
         self.current_frame_use_fde
-    }
-
-    pub fn fde_auto_path_select(&self) -> bool {
-        self.fde_auto_path_select
     }
 
     pub fn fde_mmse_settings(&self) -> MmseSettings {
@@ -665,15 +740,38 @@ mod tests {
     }
 
     #[test]
-    fn test_fit_observed_cir_for_fde_prunes_weak_taps_when_confident() {
-        let mut cir = vec![Complex32::new(0.0, 0.0); 12];
-        cir[4] = Complex32::new(1.0, 0.0);
-        cir[5] = Complex32::new(0.30, -0.05);
-        cir[6] = Complex32::new(0.02, 0.01);
+    fn test_fit_observed_cir_for_fde_preserves_observed_taps() {
+        let mut cir = vec![Complex32::new(0.0, 0.0); 32];
+        cir[3] = Complex32::new(0.8, -0.2);
+        cir[7] = Complex32::new(1.0, 0.1);
+        cir[8] = Complex32::new(0.4, -0.3);
+        cir[19] = Complex32::new(-0.2, 0.05);
         let fitted = fit_observed_cir_for_fde(&cir);
-        assert_eq!(fitted.len(), 6, "tail should be trimmed after weak taps");
-        assert!(fitted[4].norm() > 0.9);
-        assert!(fitted[5].norm() > 0.25);
+        assert_eq!(fitted.len(), cir.len());
+        for (a, b) in fitted.iter().zip(cir.iter()) {
+            assert!(
+                (*a - *b).norm() < 1e-7,
+                "fit must not alter observed CIR: fitted={:?} observed={:?}",
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_fit_observed_cir_for_fde_keeps_bulk_delay() {
+        let cir = vec![
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.2, -0.1),
+            Complex32::new(1.0, 0.0),
+            Complex32::new(0.4, 0.2),
+        ];
+        let fitted = fit_observed_cir_for_fde(&cir);
+        assert_eq!(
+            fitted, cir,
+            "on path model fitting must be identity mapping"
+        );
     }
 
     #[test]
@@ -706,9 +804,30 @@ mod tests {
     }
 
     #[test]
+    fn test_build_fde_cir_candidates_do_not_collapse_to_single_tap_when_multipath_observed() {
+        let mut cir = vec![Complex32::new(0.0, 0.0); 24];
+        cir[3] = Complex32::new(1.0, 0.0);
+        cir[8] = Complex32::new(0.45, -0.1);
+        cir[15] = Complex32::new(0.12, 0.04);
+        let candidates = build_fde_cir_candidates(&cir);
+        assert!(
+            dominant_tap_count(&cir, 0.1) >= 2,
+            "test precondition: observed CIR must be multipath"
+        );
+        for cand in candidates {
+            assert!(
+                dominant_tap_count(&cand, 0.1) >= 2,
+                "candidate collapsed to near single-tap in multipath case: {:?}",
+                cand
+            );
+        }
+    }
+
+    #[test]
     fn test_setup_equalizer_uses_selected_replay_cir_model() {
         let config = DspConfig::default_48k();
         let mut controller = EqualizationController::new(&config, true);
+        controller.set_fde_auto_path_select(true);
         let mmse = MmseSettings::default();
 
         let selected = vec![
@@ -852,10 +971,10 @@ mod tests {
         let mut controller = EqualizationController::new(&config, true);
         controller.set_fde_auto_path_select(true);
 
-        controller.select_path(0.20, 0.05, controller.fde_auto_path_select());
+        controller.select_path(0.20, 0.05);
         assert!(controller.current_frame_use_fde());
 
-        controller.select_path(0.05, 0.20, controller.fde_auto_path_select());
+        controller.select_path(0.05, 0.20);
         assert!(!controller.current_frame_use_fde());
     }
 
@@ -864,11 +983,12 @@ mod tests {
         let config = DspConfig::default_48k();
         let mut controller = EqualizationController::new(&config, true);
 
-        controller.select_path(0.01, 10.0, false);
+        controller.set_fde_auto_path_select(false);
+        controller.select_path(0.01, 10.0);
         assert!(controller.current_frame_use_fde());
 
         controller.set_fde_enabled(false, &config);
-        controller.select_path(10.0, 0.01, false);
+        controller.select_path(10.0, 0.01);
         assert!(!controller.current_frame_use_fde());
     }
 
@@ -939,7 +1059,6 @@ mod tests {
 
         controller.set_fde_enabled(false, &config);
 
-        assert!(!controller.fde_auto_path_select());
         assert!(!controller.current_frame_use_fde());
         assert!(controller.equalizer_ref().is_none());
     }
@@ -1043,6 +1162,62 @@ mod tests {
             .expect("non-zero known interval should produce a raw MSE estimate");
         assert_eq!(mse_raw, expected_raw);
         assert!(mse_fde.is_nan());
+    }
+
+    #[test]
+    fn test_evaluate_sync_word_path_mse_commit_false_keeps_setup_model_unset() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 8;
+
+        let detector = MarySyncDetector::new(
+            config.clone(),
+            MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT,
+        );
+        let (i_ch, q_ch) = generate_known_interval_frontend_signal(&config);
+        let (sync_opt, _) = detector.detect(&i_ch, &q_ch, 0);
+        let sync = sync_opt.expect("sync should be detected");
+
+        let spc = config.proc_samples_per_chip().max(1);
+        let sync_start = sync.peak_sample_idx.saturating_sub(spc / 2);
+        let sync_end = sync_start + detector.sync_word_len_samples();
+        let preamble_len = config.preamble_sf * config.preamble_repeat * spc;
+        let preamble_start_idx = sync
+            .peak_sample_idx
+            .saturating_sub(preamble_len)
+            .saturating_sub(spc / 2);
+
+        let cir_len = config.preamble_sf * spc;
+        let mut cir = vec![Complex32::new(0.0, 0.0); cir_len];
+        let mut chq = crate::mary::sync::ChannelQualityEstimate::default();
+        detector.estimate_channel_quality(&i_ch, &q_ch, preamble_start_idx, &mut cir, &mut chq);
+
+        let mut controller = EqualizationController::new(&config, true);
+        controller.set_fde_auto_path_select(false);
+        let _ = controller.evaluate_sync_word_path_mse_with_live_equalizer(
+            SyncWordPathMseInput {
+                sync_detector: &detector,
+                cir: &cir,
+                sample_buffer_i: &i_ch,
+                sample_buffer_q: &q_ch,
+                sync_start_idx: sync_start,
+                sync_end_idx: sync_end,
+                cir_len,
+                mmse: MmseSettings::default(),
+                cfo_rad_per_sample: chq.cfo_rad_per_sample,
+            },
+        );
+
+        assert!(
+            controller.selected_fde_cir_for_setup.is_none(),
+            "commit=false must not persist selected FDE model"
+        );
+        assert!(
+            controller.selected_fde_mmse_for_setup.is_none(),
+            "commit=false must not persist selected MMSE"
+        );
     }
 
     #[test]

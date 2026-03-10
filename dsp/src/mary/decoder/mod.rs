@@ -132,7 +132,16 @@ struct SyncHandoffResult {
     prev_phase: Complex32,
 }
 
-/// MaryDQPSKデコーダ
+/// MaryDQPSK デコーダのパイプラインオーケストレータ。
+///
+/// # 責務
+/// - 同期検出、等化、復調、Fountain 復号の状態遷移を管理する。
+/// - `MarySyncDetector` の推定結果 (`CIR`/品質量) を `EqualizationController` へ受け渡す。
+/// - フレーム境界・バッファ寿命・統計収集を一貫して管理する。
+///
+/// # 非責務
+/// - チャネル推定アルゴリズムそのもの（`sync.rs` の責務）。
+/// - FDE係数演算の数値実装（`FrequencyDomainEqualizer` の責務）。
 pub struct Decoder {
     pub config: DspConfig,
     pipeline: SignalPipeline,
@@ -214,10 +223,18 @@ impl Decoder {
         }
     }
 
+    /// FDE 有効/無効を設定する。
+    ///
+    /// `set_fde_auto_path_select(false)` と組み合わせることで
+    /// `on` / `off` を外部から明示的に指定できる。
     pub fn set_fde_enabled(&mut self, enabled: bool) {
         self.equalization.set_fde_enabled(enabled, &self.config);
     }
 
+    /// `auto` モードの有効/無効を設定する。
+    ///
+    /// - `enabled=true`: `auto`（raw/FDE の経路選択を有効化）
+    /// - `enabled=false`: `on`/`off` 固定運用（`set_fde_enabled` の状態に従う）
     pub fn set_fde_auto_path_select(&mut self, enabled: bool) {
         self.equalization.set_fde_auto_path_select(enabled);
     }
@@ -656,11 +673,7 @@ impl Decoder {
                 });
             pred_mse_fde = mse_fde;
             pred_mse_raw = mse_raw;
-            self.equalization.select_path(
-                mse_raw,
-                mse_fde,
-                self.equalization.fde_auto_path_select(),
-            );
+            self.equalization.select_path(mse_raw, mse_fde);
         }
 
         let use_fde_this_frame = self.equalization.current_frame_use_fde();
@@ -2199,12 +2212,27 @@ mod tests {
         let data = vec![0x23u8; 32];
         encoder.set_data(&data);
         let mut signal = encoder.encode_frame().expect("frame");
-        signal.extend(vec![0.0; 8000]);
+        signal.extend(vec![0.0; 20000]);
         decoder.process_samples(&signal);
+        let progress = decoder.progress();
 
         assert!(
             decoder.equalization.current_frame_use_fde(),
             "AUTO無効時は常にFDE経路を使うべき"
+        );
+        let total_selected = progress.fde_selected_frames + progress.raw_selected_frames;
+        assert!(total_selected > 0, "test input must produce at least one frame selection");
+        assert_eq!(
+            progress.last_path_used, 1,
+            "on mode must never switch to raw path"
+        );
+        assert_eq!(
+            progress.raw_selected_frames, 0,
+            "on mode must not count raw selections"
+        );
+        assert!(
+            progress.fde_selected_frames >= 1,
+            "on mode must select FDE at least once per detected frame"
         );
     }
 
@@ -2241,6 +2269,44 @@ mod tests {
             progress.last_path_used,
             progress.last_pred_mse_raw,
             progress.last_pred_mse_fde
+        );
+    }
+
+    #[test]
+    fn test_fde_off_mode_keeps_raw_path() {
+        use crate::mary::encoder::Encoder;
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        let mut encoder = Encoder::new(config.clone());
+        let mut decoder = Decoder::new(160, 10, config);
+        decoder.config.packets_per_burst = 1;
+        decoder.set_fde_enabled(false);
+        decoder.set_fde_auto_path_select(false);
+
+        let data = vec![0x7Au8; 32];
+        encoder.set_data(&data);
+        let mut signal = encoder.encode_frame().expect("frame");
+        signal.extend(vec![0.0; 20000]);
+        decoder.process_samples(&signal);
+        let progress = decoder.progress();
+
+        assert!(
+            !decoder.equalization.current_frame_use_fde(),
+            "off mode must keep FDE path disabled"
+        );
+        let total_selected = progress.fde_selected_frames + progress.raw_selected_frames;
+        assert!(total_selected > 0, "test input must produce at least one frame selection");
+        assert_eq!(
+            progress.last_path_used, 0,
+            "off mode must stay on raw path"
+        );
+        assert_eq!(
+            progress.fde_selected_frames, 0,
+            "off mode must not select FDE"
+        );
+        assert!(
+            progress.raw_selected_frames >= 1,
+            "off mode must select raw path at least once per detected frame"
         );
     }
 }

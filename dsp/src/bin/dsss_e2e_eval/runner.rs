@@ -942,4 +942,77 @@ mod tests {
         // SNR
         assert!(m.avg_last_est_snr_db().unwrap() > 20.0);
     }
+
+    #[test]
+    fn test_high_snr_multipath_fde_on_off_sync_ratio_is_similar() {
+        let mut cli = dummy_cli(Phy::Mary);
+        cli.total_sim_sec = 5.0;
+        cli.seed = 4096;
+        cli.sigma = 0.30;
+        cli.payload_bytes = 64;
+        cli.chunk_samples = 2048;
+        cli.packets_per_frame = 3;
+        cli.preamble_sf = 127;
+        cli.preamble_repeat = 2;
+        cli.multipath = MultipathProfile::parse_custom("0:1.0,6:-0.95,13:0.8,21:-0.6,31:0.4")
+            .expect("custom multipath profile");
+
+        let imp = cli.base_impairment();
+
+        let mut cli_on = cli.clone();
+        cli_on.mary_fde_mode = MaryFdeMode::On;
+        let m_on = run_trial_mary_e2e(&imp, &cli_on, cli_on.seed);
+
+        let mut cli_off = cli.clone();
+        cli_off.mary_fde_mode = MaryFdeMode::Off;
+        let m_off = run_trial_mary_e2e(&imp, &cli_off, cli_off.seed);
+
+        assert!(
+            (m_on.synced_frame_ratio() - m_off.synced_frame_ratio()).abs() <= 0.01,
+            "sync failure is not the dominant issue in this repro: on_sync={} off_sync={}",
+            m_on.synced_frame_ratio(),
+            m_off.synced_frame_ratio()
+        );
+    }
+
+    #[test]
+    fn test_high_snr_multipath_fde_on_clearly_outperforms_off() {
+        let mut cli = dummy_cli(Phy::Mary);
+        cli.total_sim_sec = 5.0;
+        cli.seed = 4096;
+        cli.sigma = 0.30;
+        cli.payload_bytes = 64;
+        cli.chunk_samples = 2048;
+        cli.packets_per_frame = 3;
+        cli.preamble_sf = 127;
+        cli.preamble_repeat = 2;
+        cli.multipath = MultipathProfile::parse_custom("0:1.0,6:-0.95,13:0.8,21:-0.6,31:0.4")
+            .expect("custom multipath profile");
+
+        let imp = cli.base_impairment();
+
+        let mut cli_on = cli.clone();
+        cli_on.mary_fde_mode = MaryFdeMode::On;
+        let m_on = run_trial_mary_e2e(&imp, &cli_on, cli_on.seed);
+
+        let mut cli_off = cli.clone();
+        cli_off.mary_fde_mode = MaryFdeMode::Off;
+        let m_off = run_trial_mary_e2e(&imp, &cli_off, cli_off.seed);
+
+        assert!(
+            m_on.crc_pass_ratio() > m_off.crc_pass_ratio() + 0.15,
+            "FDE on should clearly improve CRC in high-SNR multipath: on_crc={} off_crc={} on_accept={} off_accept={}",
+            m_on.crc_pass_ratio(),
+            m_off.crc_pass_ratio(),
+            m_on.packet_accept_ratio(),
+            m_off.packet_accept_ratio()
+        );
+        assert!(
+            m_on.goodput_effective_bps(cli.payload_bytes * 8)
+                > m_off.goodput_effective_bps(cli.payload_bytes * 8) + 80.0,
+            "FDE on should clearly improve goodput in high-SNR multipath: on_gb={} off_gb={}",
+            m_on.goodput_effective_bps(cli.payload_bytes * 8),
+            m_off.goodput_effective_bps(cli.payload_bytes * 8)
+        );
+    }
 }

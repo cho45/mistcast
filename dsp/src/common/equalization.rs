@@ -43,7 +43,15 @@ impl Default for MmseSettings {
 }
 
 /// Minimum Mean Square Error (MMSE) 基準を用いた周波数領域等化器 (FDE)。
-/// Overlap-Save法を用いて、連続するストリームデータに対して線形畳み込み（デコンボリューション）を数学的に正しく適用する。
+///
+/// # 責務
+/// - 与えられた `CIR` と `MMSE` 設定から周波数領域重みを計算する。
+/// - Overlap-Save 法で連続ストリームへ線形等化を適用する。
+/// - 等化器内部状態（オーバーラップ、遅延補償、flush）を管理する。
+///
+/// # 非責務
+/// - 受信波形からのチャネル推定（`sync.rs` の責務）。
+/// - `on/off/auto` の運用判断（`EqualizationController` の責務）。
 pub struct FrequencyDomainEqualizer {
     fft: Arc<dyn Fft<f32>>,
     ifft: Arc<dyn Fft<f32>>,

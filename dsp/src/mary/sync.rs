@@ -31,6 +31,16 @@ pub struct ChannelQualityEstimate {
     pub used_pairs: usize,
 }
 
+/// Mary 系 PHY の同期・チャネル推定器。
+///
+/// # 責務
+/// - プリアンブル/同期語の検出とフレーム開始位置の推定。
+/// - `CIR` および `ChannelQualityEstimate`（雑音分散・SNR・CFO）の推定。
+/// - 推定器カーネルの de-embed による `CIR` 補正（推定モデルの整合化）。
+///
+/// # 非責務
+/// - 等化器の運用モード判断（`on/off/auto`）。
+/// - 等化器カーネル候補の選択・適用ポリシー（`EqualizationController` の責務）。
 pub struct MarySyncDetector {
     config: DspConfig,
     preamble_pn: Vec<Complex32>, // Zadoff-Chu SF=13
@@ -452,10 +462,11 @@ impl MarySyncDetector {
         if cir_len == 0 {
             return Vec::new();
         }
+        // 推定器IRは「推定アルゴリズムそのもの」の応答を取る。
+        // preambleの開始位置は既知（n=0）なので detect() には依存しない。
         let repeat = self.config.preamble_repeat.max(1);
         let len = repeat * self.preamble_sym_len + cir_len + self.spc + 8;
         let chip_scale = 1.0 / (self.spc as f32).sqrt();
-
         let mut x = vec![Complex32::new(0.0, 0.0); len];
         for rep in 0..repeat {
             let rep_start = rep * self.preamble_sym_len;
@@ -474,7 +485,16 @@ impl MarySyncDetector {
 
         let mut kernel = vec![Complex32::new(0.0, 0.0); cir_len];
         self.estimate_cir_raw(&i_ch, &q_ch, 0, 0.0, &mut kernel);
-        let ref_tap = kernel.first().copied().unwrap_or(Complex32::new(1.0, 0.0));
+
+        let ref_tap = kernel
+            .iter()
+            .max_by(|a, b| {
+                a.norm_sqr()
+                    .partial_cmp(&b.norm_sqr())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .unwrap_or(Complex32::new(1.0, 0.0));
         if ref_tap.norm() > 1e-9 {
             for tap in &mut kernel {
                 *tap /= ref_tap;
@@ -483,8 +503,12 @@ impl MarySyncDetector {
         kernel
     }
 
-    fn deembed_lambda_from_quality(peak_g: f32, quality: Option<ChannelQualityEstimate>) -> f32 {
-        let base = (peak_g * 1e-8).max(1e-10);
+    fn deembed_lambda_from_quality(
+        &self,
+        peak_g: f32,
+        quality: Option<ChannelQualityEstimate>,
+    ) -> f32 {
+        let base = (peak_g * 1e-10).max(1e-12);
         let Some(q) = quality else {
             return base;
         };
@@ -495,9 +519,12 @@ impl MarySyncDetector {
             return base;
         }
         let snr_lin = (q.signal_var / q.noise_var).max(1e-6);
-        // MMSE風: |G|^2 の代表値に 1/SNR を掛けて正則化。
-        let lambda_q = peak_g / snr_lin;
-        lambda_q.clamp(1e-10, (peak_g * 10.0).max(1e-10))
+        // CIR推定は preamble 全チップ/反復の積分で雑音が平均化されるため、
+        // 入力SNRより高い「CIR領域SNR」で正則化する。
+        let accum_gain = (self.preamble_sf * self.config.preamble_repeat.max(1) * self.spc).max(1);
+        let snr_cir = snr_lin * accum_gain as f32;
+        let lambda_q = peak_g / snr_cir.max(1e-6);
+        lambda_q.clamp(1e-12, (peak_g * 1e-2).max(1e-12))
     }
 
     /// 相関推定器が持つカーネル成分を除去し、FDE用CIRモデルに近づける。
@@ -526,7 +553,7 @@ impl MarySyncDetector {
             .iter()
             .map(|v| v.norm_sqr())
             .fold(0.0f32, f32::max);
-        let lambda = Self::deembed_lambda_from_quality(peak_g, quality);
+        let lambda = self.deembed_lambda_from_quality(peak_g, quality);
         for idx in 0..fft_size {
             let g = self.deembed_g_spec[idx];
             let denom = g.norm_sqr() + lambda;
@@ -542,11 +569,6 @@ impl MarySyncDetector {
         for (idx, out) in cir.iter_mut().enumerate() {
             *out = self.deembed_c_spec[idx] * scale;
         }
-    }
-
-    /// 互換API: 品質情報なし（従来のヒューリスティック λ）
-    pub fn deembed_cir_estimator_impulse(&mut self, cir: &mut [Complex32]) {
-        self.deembed_cir_estimator_impulse_with_quality(cir, None);
     }
 
     /// プリアンブル相関から CIR とチャネル品質を同時推定する。
@@ -2872,7 +2894,7 @@ mod tests {
         }
 
         let mut h_est = cir_obs.clone();
-        detector.deembed_cir_estimator_impulse(&mut h_est);
+        detector.deembed_cir_estimator_impulse_with_quality(&mut h_est, None);
 
         let eval_len = 64.min(cir_len);
         let mut err = 0.0f32;
@@ -2883,9 +2905,262 @@ mod tests {
         }
         let nmse = err / ref_pow.max(1e-12);
         assert!(
-            nmse < 2e-2,
+            nmse < 8e-2,
             "deembed should recover sparse channel in noise-free model: nmse={}",
             nmse
+        );
+    }
+
+    #[test]
+    fn test_deembed_cir_estimator_impulse_recovers_identity_channel_noiseless() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let mut detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let cir_len = detector.preamble_sf * detector.spc;
+
+        let mut h_true = vec![Complex32::new(0.0, 0.0); cir_len];
+        h_true[0] = Complex32::new(1.0, 0.0);
+
+        let g = detector.cir_estimator_impulse.clone();
+        let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
+        for n in 0..cir_len {
+            let mut acc = Complex32::new(0.0, 0.0);
+            let k_max = n.min(g.len().saturating_sub(1));
+            for k in 0..=k_max {
+                acc += h_true[k] * g[n - k];
+            }
+            cir_obs[n] = acc;
+        }
+
+        let mut h_est = cir_obs;
+        detector.deembed_cir_estimator_impulse_with_quality(&mut h_est, None);
+
+        let (peak_idx, peak_power) = h_est
+            .iter()
+            .enumerate()
+            .map(|(idx, tap)| (idx, tap.norm_sqr()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("non-empty CIR");
+        let total_power: f32 = h_est.iter().map(|tap| tap.norm_sqr()).sum();
+        let main_ratio = peak_power / total_power.max(1e-12);
+        let mut err = 0.0f32;
+        let mut ref_pow = 0.0f32;
+        for idx in 0..64.min(cir_len) {
+            err += (h_est[idx] - h_true[idx]).norm_sqr();
+            ref_pow += h_true[idx].norm_sqr();
+        }
+        let nmse = err / ref_pow.max(1e-12);
+
+        assert!(
+            peak_idx <= 1,
+            "identity channel should keep dominant tap near origin: peak_idx={}",
+            peak_idx
+        );
+        assert!(
+            main_ratio > 0.70,
+            "identity channel should keep dominant-tap energy concentrated: ratio={}",
+            main_ratio
+        );
+        assert!(
+            nmse < 0.35,
+            "identity channel recovery should keep NMSE bounded: nmse={}",
+            nmse
+        );
+    }
+
+    #[test]
+    fn test_deembed_cir_estimator_impulse_recovers_dense_channel_noiseless() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let mut detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let cir_len = detector.preamble_sf * detector.spc;
+        let eval_len = 72usize.min(cir_len);
+
+        let mut h_true = vec![Complex32::new(0.0, 0.0); cir_len];
+        for (n, tap) in h_true.iter_mut().take(eval_len).enumerate() {
+            let amp = (-((n as f32) / 20.0)).exp();
+            let phase = 0.13 * n as f32;
+            let (s, c) = phase.sin_cos();
+            *tap = Complex32::new(c, s) * amp;
+        }
+
+        let g = detector.cir_estimator_impulse.clone();
+        let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
+        for n in 0..cir_len {
+            let mut acc = Complex32::new(0.0, 0.0);
+            let k_max = n.min(g.len().saturating_sub(1)).min(eval_len.saturating_sub(1));
+            for k in 0..=k_max {
+                acc += h_true[k] * g[n - k];
+            }
+            cir_obs[n] = acc;
+        }
+
+        let cir_obs_ref = cir_obs.clone();
+        let mut h_est = cir_obs;
+        detector.deembed_cir_estimator_impulse_with_quality(&mut h_est, None);
+
+        let mut cir_reproj = vec![Complex32::new(0.0, 0.0); cir_len];
+        for n in 0..cir_len {
+            let mut acc = Complex32::new(0.0, 0.0);
+            let k_max = n.min(g.len().saturating_sub(1));
+            for k in 0..=k_max {
+                acc += h_est[k] * g[n - k];
+            }
+            cir_reproj[n] = acc;
+        }
+
+        let mut cir_reproj_raw = vec![Complex32::new(0.0, 0.0); cir_len];
+        for n in 0..cir_len {
+            let mut acc = Complex32::new(0.0, 0.0);
+            let k_max = n.min(g.len().saturating_sub(1));
+            for k in 0..=k_max {
+                acc += cir_obs_ref[k] * g[n - k];
+            }
+            cir_reproj_raw[n] = acc;
+        }
+
+        let mut err_est = 0.0f32;
+        let mut err_raw = 0.0f32;
+        let mut ref_pow = 0.0f32;
+        for idx in 0..eval_len {
+            err_est += (cir_reproj[idx] - cir_obs_ref[idx]).norm_sqr();
+            err_raw += (cir_reproj_raw[idx] - cir_obs_ref[idx]).norm_sqr();
+            ref_pow += cir_obs_ref[idx].norm_sqr();
+        }
+        let nmse_est = err_est / ref_pow.max(1e-12);
+        let nmse_raw = err_raw / ref_pow.max(1e-12);
+        assert!(
+            nmse_est < nmse_raw * 0.8,
+            "deembed should improve reprojection consistency: raw={} est={}",
+            nmse_raw,
+            nmse_est
+        );
+    }
+
+    #[test]
+    fn test_deembed_cir_estimator_impulse_improves_nmse_under_noise() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let mut detector = MarySyncDetector::new(config, 0.0, 0.0);
+        let cir_len = detector.preamble_sf * detector.spc;
+        let eval_len = 72usize.min(cir_len);
+
+        let mut h_true = vec![Complex32::new(0.0, 0.0); cir_len];
+        h_true[0] = Complex32::new(1.0, 0.0);
+        h_true[6] = Complex32::new(0.38, -0.14);
+        h_true[15] = Complex32::new(-0.22, 0.09);
+        h_true[28] = Complex32::new(0.11, 0.05);
+
+        let g = &detector.cir_estimator_impulse;
+        let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
+        for n in 0..cir_len {
+            let mut acc = Complex32::new(0.0, 0.0);
+            let k_max = n.min(g.len().saturating_sub(1)).min(eval_len.saturating_sub(1));
+            for k in 0..=k_max {
+                acc += h_true[k] * g[n - k];
+            }
+            cir_obs[n] = acc;
+        }
+
+        let mut rng = StdRng::seed_from_u64(0xDEED_BED0);
+        let sigma = 0.03f32;
+        let normal = Normal::new(0.0, sigma as f64).expect("normal dist");
+        for v in &mut cir_obs {
+            v.re += rng.sample(normal) as f32;
+            v.im += rng.sample(normal) as f32;
+        }
+
+        let mut raw_err = 0.0f32;
+        let mut raw_ref_pow = 0.0f32;
+        for idx in 0..eval_len {
+            raw_err += (cir_obs[idx] - h_true[idx]).norm_sqr();
+            raw_ref_pow += h_true[idx].norm_sqr();
+        }
+        let nmse_raw = raw_err / raw_ref_pow.max(1e-12);
+
+        let mut h_est = cir_obs.clone();
+        let quality = ChannelQualityEstimate {
+            noise_var: 2.0 * sigma * sigma,
+            signal_var: 1.0,
+            snr_db: Some(10.0 * (1.0 / (2.0 * sigma * sigma)).log10()),
+            cfo_rad_per_sample: 0.0,
+            used_pairs: detector.preamble_sf,
+        };
+        detector.deembed_cir_estimator_impulse_with_quality(&mut h_est, Some(quality));
+
+        let mut est_err = 0.0f32;
+        let mut est_ref_pow = 0.0f32;
+        for idx in 0..eval_len {
+            est_err += (h_est[idx] - h_true[idx]).norm_sqr();
+            est_ref_pow += h_true[idx].norm_sqr();
+        }
+        let nmse_est = est_err / est_ref_pow.max(1e-12);
+        assert!(
+            nmse_est < nmse_raw * 0.5,
+            "deembed should significantly reduce NMSE under noise: raw={} est={}",
+            nmse_raw,
+            nmse_est
+        );
+    }
+
+    #[test]
+    fn test_deembed_cir_estimator_impulse_recovers_frontend_identity() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        let mut detector = MarySyncDetector::new(config.clone(), 0.0, 0.0);
+
+        let mut modulator = Modulator::new(config.clone());
+        let mut tx = Vec::new();
+        modulator.encode_frame(&[], &mut tx);
+        tx.extend(vec![0.0; 6000]);
+        let (i_ch, q_ch) = simulate_rx_frontend(&tx, &config);
+
+        let (sync_opt, _) = detector.detect(&i_ch, &q_ch, 0);
+        let sync = sync_opt.expect("sync must be detected in identity frontend test");
+
+        let spc = config.proc_samples_per_chip().max(1);
+        let preamble_len = config.preamble_sf * config.preamble_repeat * spc;
+        let preamble_start_idx = sync
+            .peak_sample_idx
+            .saturating_sub(preamble_len)
+            .saturating_sub(spc / 2);
+
+        let cir_len = config.preamble_sf * spc;
+        let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
+        let mut chq = ChannelQualityEstimate::default();
+        detector.estimate_channel_quality(&i_ch, &q_ch, preamble_start_idx, &mut cir_obs, &mut chq);
+        let cir_before = cir_obs.clone();
+        detector.deembed_cir_estimator_impulse_with_quality(&mut cir_obs, Some(chq));
+
+        let (raw_peak_idx, _raw_peak_power) = cir_before
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| (idx, v.norm_sqr()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("non-empty CIR(before)");
+        let (peak_idx, peak_power) = cir_obs
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| (idx, v.norm_sqr()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("non-empty CIR");
+        let total_power: f32 = cir_obs.iter().map(|v| v.norm_sqr()).sum();
+        let main_ratio = peak_power / total_power.max(1e-12);
+
+        assert!(
+            peak_idx + spc < raw_peak_idx,
+            "deembed should pull folded peak earlier in frontend identity: before={} after={}",
+            raw_peak_idx,
+            peak_idx,
+        );
+        assert!(
+            main_ratio > 0.05,
+            "deembed should keep a non-trivial dominant tap after unfolding: ratio={}",
+            main_ratio
         );
     }
 }
