@@ -58,6 +58,83 @@ pub fn postprocess_cir(
     }
 }
 
+const FDE_FIT_BASE_ALPHA: f32 = 0.10;
+const FDE_FIT_TAP_THRESHOLD_ALPHA: f32 = 0.05;
+
+fn threshold_and_trim_cir(cir: &[Complex32], alpha: f32) -> Vec<Complex32> {
+    if cir.is_empty() {
+        return Vec::new();
+    }
+
+    let (peak_idx, peak_energy) = cir
+        .iter()
+        .enumerate()
+        .map(|(idx, tap)| (idx, tap.norm_sqr()))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((0, 0.0));
+    if peak_energy <= 1e-12 {
+        return cir.to_vec();
+    }
+    let peak_mag = peak_energy.sqrt();
+    let threshold = peak_mag * alpha.max(0.0);
+    let mut fitted = cir.to_vec();
+    for tap in &mut fitted {
+        if tap.norm() < threshold {
+            *tap = Complex32::new(0.0, 0.0);
+        }
+    }
+    if fitted[peak_idx].norm_sqr() <= 1e-12 {
+        fitted[peak_idx] = cir[peak_idx];
+    }
+
+    if let Some(last_nonzero_idx) = fitted.iter().rposition(|tap| tap.norm_sqr() > 1e-12) {
+        fitted.truncate(last_nonzero_idx + 1);
+    } else {
+        fitted = cir.to_vec();
+    }
+    fitted
+}
+
+fn fit_observed_cir_for_fde(cir: &[Complex32]) -> Vec<Complex32> {
+    threshold_and_trim_cir(cir, FDE_FIT_BASE_ALPHA)
+}
+
+fn build_fde_cir_candidates(cir: &[Complex32]) -> Vec<Vec<Complex32>> {
+    if cir.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    candidates.push(cir.to_vec());
+    for alpha in [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30] {
+        candidates.push(threshold_and_trim_cir(cir, alpha));
+    }
+
+    // 末尾/先頭に主タップが寄るケースでは、境界近傍だけ小さく循環シフトした候補も試す。
+    let peak_idx = cir
+        .iter()
+        .enumerate()
+        .max_by(|a, b| {
+            a.1.norm_sqr()
+                .partial_cmp(&b.1.norm_sqr())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    let len = cir.len();
+    let edge_margin = len / 8;
+    if peak_idx <= edge_margin || peak_idx + edge_margin >= len {
+        for shift in [-4isize, -2, -1, 1, 2, 4] {
+            let mut shifted = vec![Complex32::new(0.0, 0.0); len];
+            for (idx, &tap) in cir.iter().enumerate() {
+                let new_idx = ((idx as isize + shift).rem_euclid(len as isize)) as usize;
+                shifted[new_idx] = tap;
+            }
+            candidates.push(threshold_and_trim_cir(&shifted, FDE_FIT_TAP_THRESHOLD_ALPHA));
+        }
+    }
+    candidates
+}
+
 /// 等化制御コントローラ
 pub struct EqualizationController {
     equalizer: Option<FrequencyDomainEqualizer>,
@@ -71,6 +148,9 @@ pub struct EqualizationController {
     fde_mmse_settings: MmseSettings,
     cir_normalization_mode: CirNormalizationMode,
     cir_tap_threshold_alpha: f32,
+    selected_fde_cir_for_setup: Option<Vec<Complex32>>,
+    #[cfg(test)]
+    last_setup_cir_debug: Vec<Complex32>,
 }
 
 pub struct SyncWordPathMseInput<'a> {
@@ -105,6 +185,9 @@ impl EqualizationController {
             fde_mmse_settings: MmseSettings::default(),
             cir_normalization_mode: CirNormalizationMode::None,
             cir_tap_threshold_alpha: 0.0,
+            selected_fde_cir_for_setup: None,
+            #[cfg(test)]
+            last_setup_cir_debug: Vec::new(),
         }
     }
 
@@ -127,6 +210,9 @@ impl EqualizationController {
         if self.fde_enabled {
             self.equalizer = Some(Self::build_default_equalizer(config));
         }
+        self.selected_fde_cir_for_setup = None;
+        #[cfg(test)]
+        self.last_setup_cir_debug.clear();
         self.reset_frame_buffers();
     }
 
@@ -143,6 +229,9 @@ impl EqualizationController {
             self.current_frame_use_fde = false;
             self.fde_auto_path_select = false;
         }
+        self.selected_fde_cir_for_setup = None;
+        #[cfg(test)]
+        self.last_setup_cir_debug.clear();
         self.reset_frame_buffers();
     }
 
@@ -247,22 +336,43 @@ impl EqualizationController {
             return (mse_raw, f32::NAN);
         };
 
-        eq.set_cir_with_mmse(&cir[..cir_len], mmse);
-        eq.reset();
-        eq.process(&eval_input, &mut eval_output);
-        eq.flush(&mut eval_output);
-
+        let cir_eval_len = cir_len.min(cir.len());
+        if cir_eval_len == 0 {
+            eval_input.clear();
+            eval_output.clear();
+            std::mem::swap(&mut eval_input, &mut self.eval_input_buffer);
+            std::mem::swap(&mut eval_output, &mut self.eval_output_buffer);
+            return (mse_raw, f32::NAN);
+        }
+        let mut best_mse_fde = f32::NAN;
+        let mut best_candidate: Option<Vec<Complex32>> = None;
+        let cir_candidates = build_fde_cir_candidates(&cir[..cir_eval_len]);
         let skip = overlap;
-        let mse_fde = sync_detector
-            .sync_word_mse_complex(&eval_output, skip, cfo_rad_per_sample)
-            .unwrap_or(f32::NAN);
+        for candidate in cir_candidates {
+            if candidate.is_empty() {
+                continue;
+            }
+            eq.set_cir_with_mmse(&candidate, mmse);
+            eq.reset();
+            eval_output.clear();
+            eq.process(&eval_input, &mut eval_output);
+            eq.flush(&mut eval_output);
+            let mse = sync_detector
+                .sync_word_mse_complex(&eval_output, skip, cfo_rad_per_sample)
+                .unwrap_or(f32::NAN);
+            if mse.is_finite() && (!best_mse_fde.is_finite() || mse < best_mse_fde) {
+                best_mse_fde = mse;
+                best_candidate = Some(candidate);
+            }
+        }
+        self.selected_fde_cir_for_setup = best_candidate;
 
         eval_input.clear();
         eval_output.clear();
         std::mem::swap(&mut eval_input, &mut self.eval_input_buffer);
         std::mem::swap(&mut eval_output, &mut self.eval_output_buffer);
 
-        (mse_raw, mse_fde)
+        (mse_raw, best_mse_fde)
     }
 
     /// パス選択を実行
@@ -319,8 +429,18 @@ impl EqualizationController {
 
     /// 等化器のCIRとMMSEパラメータを設定
     pub fn setup_equalizer(&mut self, cir: &[Complex32], mmse: MmseSettings) {
+        let selected_cir = self.selected_fde_cir_for_setup.take();
+        let cir_model = if let Some(cir_model) = selected_cir {
+            cir_model
+        } else {
+            fit_observed_cir_for_fde(cir)
+        };
         if let Some(eq) = self.equalizer.as_mut() {
-            eq.set_cir_with_mmse(cir, mmse);
+            #[cfg(test)]
+            {
+                self.last_setup_cir_debug = cir_model.clone();
+            }
+            eq.set_cir_with_mmse(&cir_model, mmse);
             eq.reset();
         }
     }
@@ -399,8 +519,101 @@ impl EqualizationController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::equalization::FrequencyDomainEqualizer;
+    use crate::common::nco::Nco;
+    use crate::common::resample::Resampler;
+    use crate::common::rrc_filter::RrcFilter;
+    use crate::mary::modulator::Modulator;
     use crate::mary::sync::MarySyncDetector;
     use crate::DspConfig;
+
+    fn downconvert(samples: &[f32], config: &DspConfig) -> (Vec<f32>, Vec<f32>) {
+        let mut nco = Nco::new(-config.carrier_freq, config.sample_rate);
+        let mut i_ch = Vec::with_capacity(samples.len());
+        let mut q_ch = Vec::with_capacity(samples.len());
+        for &s in samples {
+            let lo = nco.step();
+            i_ch.push(s * lo.re * 2.0);
+            q_ch.push(s * lo.im * 2.0);
+        }
+        (i_ch, q_ch)
+    }
+
+    fn simulate_rx_frontend(samples: &[f32], config: &DspConfig) -> (Vec<f32>, Vec<f32>) {
+        let (i_raw, q_raw) = downconvert(samples, config);
+
+        let rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;
+        let mut resampler_i = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+            Some(config.rx_resampler_taps),
+        );
+        let mut resampler_q = Resampler::new_with_cutoff(
+            config.sample_rate as u32,
+            config.proc_sample_rate() as u32,
+            Some(rrc_bw),
+            Some(config.rx_resampler_taps),
+        );
+        let mut i_res = Vec::new();
+        let mut q_res = Vec::new();
+        resampler_i.process(&i_raw, &mut i_res);
+        resampler_q.process(&q_raw, &mut q_res);
+
+        let mut rrc_i = RrcFilter::from_config(config);
+        let mut rrc_q = RrcFilter::from_config(config);
+        let i_ch: Vec<f32> = i_res.iter().map(|&s| rrc_i.process(s)).collect();
+        let q_ch: Vec<f32> = q_res.iter().map(|&s| rrc_q.process(s)).collect();
+        (i_ch, q_ch)
+    }
+
+    fn generate_known_interval_frontend_signal(config: &DspConfig) -> (Vec<f32>, Vec<f32>) {
+        let mut modulator = Modulator::new(config.clone());
+        let mut tx = Vec::new();
+        modulator.encode_frame(&[], &mut tx);
+        tx.extend(vec![0.0; 5000]);
+        simulate_rx_frontend(&tx, config)
+    }
+
+    fn replay_sync_word_mse_with_given_cir(
+        config: &DspConfig,
+        detector: &MarySyncDetector,
+        cir: &[Complex32],
+        sample_buffer_i: &[f32],
+        sample_buffer_q: &[f32],
+        sync_start_idx: usize,
+        sync_end_idx: usize,
+        mmse: MmseSettings,
+        cfo_rad_per_sample: f32,
+    ) -> f32 {
+        let fft_size = EqualizationController::default_fde_fft_size(config);
+        let mut eq = FrequencyDomainEqualizer::new(cir, fft_size, mmse.snr_db);
+        eq.set_cir_with_mmse(cir, mmse);
+        eq.reset();
+
+        let overlap = eq.overlap_len();
+        let available_history = sync_start_idx.min(overlap);
+        let missing_history = overlap - available_history;
+        let analysis_start = sync_start_idx - available_history;
+        let input_len = sync_end_idx.saturating_sub(analysis_start) + missing_history;
+        if input_len == 0 {
+            return f32::NAN;
+        }
+
+        let mut eval_input = Vec::with_capacity(input_len);
+        eval_input.resize(missing_history, Complex32::new(0.0, 0.0));
+        for idx in analysis_start..sync_end_idx {
+            eval_input.push(Complex32::new(sample_buffer_i[idx], sample_buffer_q[idx]));
+        }
+
+        let mut eval_output = Vec::with_capacity(input_len + overlap);
+        eq.process(&eval_input, &mut eval_output);
+        eq.flush(&mut eval_output);
+
+        detector
+            .sync_word_mse_complex(&eval_output, overlap, cfo_rad_per_sample)
+            .unwrap_or(f32::NAN)
+    }
 
     #[test]
     fn test_postprocess_cir_empty() {
@@ -437,6 +650,224 @@ mod tests {
         assert!(cir[1].norm() < 1e-6);
         assert!(cir[0].norm() > 0.9);
         assert!(cir[2].norm() > 0.7);
+    }
+
+    #[test]
+    fn test_postprocess_cir_threshold_preserves_main_tap_position() {
+        let mut cir = vec![Complex32::new(0.0, 0.0); 16];
+        cir[3] = Complex32::new(1.0, 0.1);
+        cir[4] = Complex32::new(0.32, -0.08);
+        cir[9] = Complex32::new(0.18, 0.04);
+        cir[14] = Complex32::new(0.06, -0.03);
+
+        postprocess_cir(&mut cir, CirNormalizationMode::None, 0.2);
+
+        let peak_idx = cir
+            .iter()
+            .enumerate()
+            .max_by(|a, b| {
+                a.1.norm()
+                    .partial_cmp(&b.1.norm())
+                    .expect("finite magnitudes")
+            })
+            .map(|(idx, _)| idx)
+            .expect("non-empty cir");
+        assert_eq!(peak_idx, 3, "main tap index must be preserved");
+        assert!(cir[14].norm() < 1e-6, "far weak tail should be removed");
+    }
+
+    #[test]
+    fn test_fit_observed_cir_for_fde_does_not_fallback_to_identity_for_diffuse_cir() {
+        let cir = vec![Complex32::new(1.0, 0.0); 64];
+        let fitted = fit_observed_cir_for_fde(&cir);
+        assert_eq!(fitted.len(), 64);
+        assert!(
+            fitted
+                .iter()
+                .all(|tap| (*tap - Complex32::new(1.0, 0.0)).norm() < 1e-6)
+        );
+    }
+
+    #[test]
+    fn test_fit_observed_cir_for_fde_prunes_weak_taps_when_confident() {
+        let mut cir = vec![Complex32::new(0.0, 0.0); 12];
+        cir[4] = Complex32::new(1.0, 0.0);
+        cir[5] = Complex32::new(0.30, -0.05);
+        cir[6] = Complex32::new(0.02, 0.01);
+        let fitted = fit_observed_cir_for_fde(&cir);
+        assert_eq!(fitted.len(), 6, "tail should be trimmed after weak taps");
+        assert!(fitted[4].norm() > 0.9);
+        assert!(fitted[5].norm() > 0.25);
+    }
+
+    #[test]
+    fn test_build_fde_cir_candidates_preserve_structure_under_global_phase_scale() {
+        let mut cir = vec![Complex32::new(0.0, 0.0); 20];
+        cir[1] = Complex32::new(0.2, 0.1);
+        cir[2] = Complex32::new(1.0, -0.2);
+        cir[3] = Complex32::new(0.3, 0.15);
+        cir[8] = Complex32::new(0.05, -0.02);
+        cir[17] = Complex32::new(0.12, 0.07);
+
+        let phase = 0.73f32;
+        let gain = 1.9f32;
+        let (s, c) = phase.sin_cos();
+        let scalar = Complex32::new(c, s) * gain;
+        let cir_rotated_scaled: Vec<Complex32> = cir.iter().map(|&v| v * scalar).collect();
+
+        let cand_a = build_fde_cir_candidates(&cir);
+        let cand_b = build_fde_cir_candidates(&cir_rotated_scaled);
+        assert_eq!(cand_a.len(), cand_b.len(), "candidate count should match");
+
+        for (a, b) in cand_a.iter().zip(cand_b.iter()) {
+            assert_eq!(a.len(), b.len(), "candidate length should be invariant");
+            for (ta, tb) in a.iter().zip(b.iter()) {
+                let za = ta.norm() < 1e-6;
+                let zb = tb.norm() < 1e-6;
+                assert_eq!(za, zb, "zero/non-zero support should be invariant");
+            }
+        }
+    }
+
+    #[test]
+    fn test_setup_equalizer_uses_selected_replay_cir_model() {
+        let config = DspConfig::default_48k();
+        let mut controller = EqualizationController::new(&config, true);
+        let mmse = MmseSettings::default();
+
+        let selected = vec![
+            Complex32::new(1.0, 0.0),
+            Complex32::new(0.2, -0.1),
+            Complex32::new(0.0, 0.0),
+        ];
+        let bad_input = vec![
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(1.0, 0.0),
+            Complex32::new(0.5, 0.0),
+        ];
+
+        controller.selected_fde_cir_for_setup = Some(selected.clone());
+        controller.setup_equalizer(&bad_input, mmse);
+
+        assert!(
+            controller.selected_fde_cir_for_setup.is_none(),
+            "selected replay model should be consumed"
+        );
+        assert_eq!(
+            controller.last_setup_cir_debug, selected,
+            "setup_equalizer must pass replay-selected CIR model to kernel"
+        );
+
+        controller.setup_equalizer(&bad_input, mmse);
+        assert_eq!(
+            controller.last_setup_cir_debug,
+            fit_observed_cir_for_fde(&bad_input),
+            "without replay-selected model, setup_equalizer should use fitted input CIR"
+        );
+    }
+
+    #[test]
+    fn test_replay_mse_flat_channel_fde_with_fitted_cir_improves_over_raw_cir_fde() {
+        let mut config = DspConfig::default_48k();
+        config.preamble_sf = 127;
+        config.preamble_repeat = 2;
+        config.sync_word_bits = 8;
+
+        let detector = MarySyncDetector::new(
+            config.clone(),
+            MarySyncDetector::THRESHOLD_COARSE_DEFAULT,
+            MarySyncDetector::THRESHOLD_FINE_DEFAULT,
+        );
+        let (i_ch, q_ch) = generate_known_interval_frontend_signal(&config);
+        let (sync_opt, _) = detector.detect(&i_ch, &q_ch, 0);
+        let sync = sync_opt.expect("sync should be detected for clean known frame");
+
+        let spc = config.proc_samples_per_chip().max(1);
+        let sync_start = sync.peak_sample_idx.saturating_sub(spc / 2);
+        let preamble_len = config.preamble_sf * config.preamble_repeat * spc;
+        let preamble_start_idx = sync
+            .peak_sample_idx
+            .saturating_sub(preamble_len)
+            .saturating_sub(spc / 2);
+        let sync_end = sync_start + detector.sync_word_len_samples();
+        assert!(sync_end <= i_ch.len());
+
+        let cir_len = config.preamble_sf * spc;
+        let mut cir_raw = vec![Complex32::new(0.0, 0.0); cir_len];
+        let mut chq = crate::mary::sync::ChannelQualityEstimate::default();
+        detector.estimate_channel_quality(&i_ch, &q_ch, preamble_start_idx, &mut cir_raw, &mut chq);
+
+        let mut controller = EqualizationController::new(&config, true);
+        let mmse = MmseSettings::default();
+        let mse_fde_raw_cir = replay_sync_word_mse_with_given_cir(
+            &config,
+            &detector,
+            &cir_raw,
+            &i_ch,
+            &q_ch,
+            sync_start,
+            sync_end,
+            mmse,
+            chq.cfo_rad_per_sample,
+        );
+        let (mse_raw_path, mse_fde_raw) =
+            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
+                sync_detector: &detector,
+                cir: &cir_raw,
+                sample_buffer_i: &i_ch,
+                sample_buffer_q: &q_ch,
+                sync_start_idx: sync_start,
+                sync_end_idx: sync_end,
+                cir_len,
+                mmse,
+                cfo_rad_per_sample: chq.cfo_rad_per_sample,
+            });
+
+        let mut cir_pruned = cir_raw.clone();
+        postprocess_cir(&mut cir_pruned, CirNormalizationMode::None, 0.2);
+        let mse_fde_pruned_cir = replay_sync_word_mse_with_given_cir(
+            &config,
+            &detector,
+            &cir_pruned,
+            &i_ch,
+            &q_ch,
+            sync_start,
+            sync_end,
+            mmse,
+            chq.cfo_rad_per_sample,
+        );
+        let (_, mse_fde_pruned) =
+            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
+                sync_detector: &detector,
+                cir: &cir_pruned,
+                sample_buffer_i: &i_ch,
+                sample_buffer_q: &q_ch,
+                sync_start_idx: sync_start,
+                sync_end_idx: sync_end,
+                cir_len,
+                mmse,
+                cfo_rad_per_sample: chq.cfo_rad_per_sample,
+            });
+
+        assert!(mse_raw_path.is_finite(), "raw-path mse must be finite");
+        assert!(mse_fde_raw.is_finite(), "raw cir mse must be finite");
+        assert!(
+            mse_fde_pruned.is_finite(),
+            "postprocessed cir mse must be finite"
+        );
+        assert!(
+            mse_fde_raw <= mse_fde_raw_cir + 1e-6,
+            "fitted CIR should improve over raw-CIR FDE baseline: raw_cir_fde={} fitted={}",
+            mse_fde_raw_cir,
+            mse_fde_raw,
+        );
+        assert!(
+            mse_fde_pruned <= mse_fde_pruned_cir + 1e-6,
+            "postprocessed + fitted CIR should improve over postprocessed raw-CIR FDE baseline: pruned_raw_cir_fde={} pruned_fitted={}",
+            mse_fde_pruned_cir,
+            mse_fde_pruned
+        );
     }
 
     #[test]
