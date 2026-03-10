@@ -31,6 +31,29 @@ impl MultipathProfile {
                 name: "harsh".to_string(),
                 taps: vec![(0, 1.0), (9, 0.55), (23, 0.35), (49, 0.25), (87, 0.18)],
             }),
+            // 48kHz 기준:
+            // 4,11,19 samples = 0.083,0.229,0.396ms (約2.9,7.9,13.6cm path diff)
+            // デバイス近傍・机面の短遅延反射を想定した高域コムノッチ向け。
+            "desk" => Some(Self {
+                name: "desk".to_string(),
+                taps: vec![(0, 1.0), (4, -0.45), (11, 0.28), (19, -0.18)],
+            }),
+            // 48kHz 기준:
+            // 42,87,154,233 samples = 0.875,1.813,3.208,4.854ms
+            // (約0.30,0.62,1.10,1.66m path diff)
+            // 家庭内の中距離反射を想定。
+            "room" => Some(Self {
+                name: "room".to_string(),
+                taps: vec![(0, 1.0), (42, 0.52), (87, -0.34), (154, 0.22), (233, -0.15)],
+            }),
+            // 48kHz 기준:
+            // 70,138,236,356 samples = 1.458,2.875,4.917,7.417ms
+            // (約0.50,0.99,1.69,2.54m path diff)
+            // 廊下/ホールの長遅延反射を想定。
+            "hall" => Some(Self {
+                name: "hall".to_string(),
+                taps: vec![(0, 1.0), (70, 0.55), (138, -0.40), (236, 0.30), (356, -0.22)],
+            }),
             _ => None,
         }
     }
@@ -71,7 +94,7 @@ impl FromStr for MultipathProfile {
         }
         Self::parse_custom(value).ok_or_else(|| {
             format!(
-                "invalid multipath: {value} (preset: none|mild|medium|harsh or taps: 0:1.0,9:0.4)"
+                "invalid multipath: {value} (preset: none|mild|medium|harsh|desk|room|hall or taps: 0:1.0,9:0.4)"
             )
         })
     }
@@ -168,4 +191,30 @@ pub fn apply_channel_into(
 
     channel::apply_fading(out, imp.fading_depth, rng);
     channel::add_awgn(out, imp.sigma, rng);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MultipathProfile;
+
+    #[test]
+    fn test_realistic_presets_exist_and_are_sorted() {
+        for &name in &["desk", "room", "hall"] {
+            let p = MultipathProfile::preset(name).expect("preset must exist");
+            assert_eq!(p.name, name);
+            assert_eq!(p.taps.first().copied(), Some((0, 1.0)));
+            assert!(p.taps.len() >= 4, "preset {} should have enough taps", name);
+            assert!(
+                p.taps.windows(2).all(|w| w[0].0 < w[1].0),
+                "preset {} taps must be strictly sorted by delay",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_profile_error_mentions_realistic_presets() {
+        let err = "not-a-profile".parse::<MultipathProfile>().unwrap_err();
+        assert!(err.contains("desk|room|hall"), "error={}", err);
+    }
 }

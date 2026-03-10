@@ -352,7 +352,7 @@ pub fn run_sweep_fading(cli: &Cli) {
 pub fn run_sweep_multipath(cli: &Cli) {
     print_header(cli);
     let mut base = cli.base_impairment();
-    let profiles = ["none", "mild", "medium", "harsh"];
+    let profiles = ["none", "mild", "medium", "harsh", "desk", "room", "hall"];
     for name in profiles {
         base.multipath = MultipathProfile::preset(name).unwrap_or_else(MultipathProfile::none);
         let scenario = format!("sweep_multipath(profile={name})");
