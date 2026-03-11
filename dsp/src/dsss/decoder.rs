@@ -9,6 +9,7 @@ use crate::{
     common::nco::Nco,
     common::resample::Resampler,
     common::rrc_filter::RrcFilter,
+    dsss::params as dsss_params,
     dsss::sync::{SyncDetector, SyncResult},
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
     params::{MODULATION, PAYLOAD_SIZE},
@@ -198,10 +199,10 @@ impl Decoder {
     pub fn new(_data_size: usize, fountain_k: usize, dsp_config: DspConfig) -> Self {
         let proc_sample_rate = dsp_config.proc_sample_rate();
         let params = FountainParams::new(fountain_k, PAYLOAD_SIZE);
-        let raw_bits = PACKET_BYTES * 8 + 6;
-        let fec_bits = raw_bits * 2;
-        let il_rows = 16;
-        let il_cols = fec_bits.div_ceil(16);
+        let raw_bits = dsss_params::raw_bits();
+        let fec_bits = dsss_params::fec_bits();
+        let il_rows = dsss_params::INTERLEAVER_ROWS;
+        let il_cols = dsss_params::INTERLEAVER_COLS;
         let packets_per_burst = dsp_config.packets_per_burst.max(1);
         let lo_nco = Nco::new(-dsp_config.carrier_freq, dsp_config.sample_rate);
 
@@ -1219,7 +1220,10 @@ mod tests {
         let mut fec_bits = fec::encode(bits);
         let mut scrambler = Scrambler::default();
         scrambler.process_bits(&mut fec_bits);
-        let interleaver = BlockInterleaver::new(16, fec_bits.len().div_ceil(16));
+        let interleaver = BlockInterleaver::new(
+            dsss_params::INTERLEAVER_ROWS,
+            dsss_params::INTERLEAVER_COLS,
+        );
         interleaver
             .interleave(&fec_bits)
             .into_iter()

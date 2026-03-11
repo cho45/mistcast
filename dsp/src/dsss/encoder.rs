@@ -5,6 +5,7 @@ use crate::{
     coding::fountain::{FountainEncoder, FountainPacket, FountainParams},
     coding::interleaver::BlockInterleaver,
     dsss::modulator::Modulator,
+    dsss::params as dsss_params,
     frame::packet::{Packet, LT_K_MAX, LT_SEQ_MAX, PACKET_BYTES},
     params::PAYLOAD_SIZE,
     DspConfig,
@@ -22,16 +23,11 @@ pub struct EncoderConfig {
 
 impl EncoderConfig {
     pub fn new(dsp: DspConfig) -> Self {
-        use crate::frame::packet::PACKET_BYTES;
-        let raw_bits = PACKET_BYTES * 8 + 6; // テールビット(6)含む
-        let fec_bits = raw_bits * 2;
-        let rows = 16;
-        let cols = fec_bits.div_ceil(rows);
         EncoderConfig {
             fountain_k: 10,
             packets_per_sync_burst: dsp.packets_per_burst,
-            il_rows: rows,
-            il_cols: cols,
+            il_rows: dsss_params::INTERLEAVER_ROWS,
+            il_cols: dsss_params::INTERLEAVER_COLS,
             dsp,
         }
     }
@@ -57,7 +53,7 @@ impl Encoder {
         let interleaved_bits_per_packet = config.il_rows * config.il_cols;
         let burst_bits_capacity = config.il_rows * config.il_cols * packets_per_sync_burst;
         let raw_bits_capacity = PACKET_BYTES * 8;
-        let fec_bits_capacity = (raw_bits_capacity + 6) * 2;
+        let fec_bits_capacity = dsss_params::fec_bits();
         Encoder {
             config,
             modulator,
@@ -78,7 +74,7 @@ impl Encoder {
         fec::bytes_to_bits_into(&self.packet_bytes_buffer, &mut self.raw_bits_buffer);
         fec::encode_into(&self.raw_bits_buffer, &mut self.fec_bits_buffer);
 
-        // インターリーバの全スロットを埋めるようにパディング
+        // DSSS は 12x29=348 で FECビット長(348)と一致するため追加パディング不要
         let interleaved_bits_per_packet = self.config.il_rows * self.config.il_cols;
         self.padded_bits_buffer.clear();
         self.padded_bits_buffer

@@ -264,8 +264,8 @@ pub fn calculate_info_bit_rate(cli: &Cli) -> f32 {
             // DSSS SF は M系列の長さ (2^order - 1)
             let sf = ((1 << cli.mseq_order) - 1) as f32;
             let bits_per_symbol = 2.0; // DQPSK
-                                       // DSSS インターリーバは 16x22 = 352 bits
-            let interleaved_bits = 352.0;
+                                       // DSSS インターリーバは 12x29 = 348 bits
+            let interleaved_bits = dsp::dsss::params::interleaved_bits() as f32;
 
             let symbol_rate = chip_rate / sf;
             let coded_bit_rate = symbol_rate * bits_per_symbol;
@@ -801,16 +801,16 @@ mod tests {
             rb_mary
         );
 
-        // --- DSSS 8000 cps, Order=4 (SF=15), DQPSK, 128/352 FEC ---
+        // --- DSSS 8000 cps, Order=4 (SF=15), DQPSK, 128/348 FEC ---
         let mut cli_dsss = dummy_cli(Phy::Dsss);
         cli_dsss.chip_rate = 8000.0;
         cli_dsss.mseq_order = 4;
         let rb_dsss = calculate_info_bit_rate(&cli_dsss);
 
-        // 期待値: (8000 / 15) * 2 * (128 / 352) = 387.878 bps
+        // 期待値: (8000 / 15) * 2 * (128 / 348) = 392.337 bps
         assert!(
-            (rb_dsss - 387.878).abs() < 0.01,
-            "DSSS bit rate mismatch: expected 387.878, got {}",
+            (rb_dsss - 392.337).abs() < 0.01,
+            "DSSS bit rate mismatch: expected 392.337, got {}",
             rb_dsss
         );
     }

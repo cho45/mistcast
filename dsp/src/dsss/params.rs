@@ -1,11 +1,39 @@
 //! DSSS モジュール固有のパラメータ定義
 
+use crate::frame::packet::PACKET_BYTES;
 use crate::DspConfig;
 
 const DSSS_MSEQ_ORDER: usize = 4;
 const DSSS_PREAMBLE_REPEAT: usize = 2;
 const DSSS_PREAMBLE_SF: usize = 15;
 const DSSS_SYNC_WORD_BITS: usize = 16;
+
+/// 畳み込み符号のテールビット数
+pub const TAIL_BITS: usize = 6;
+
+/// DSSS インターリーバ行数
+pub const INTERLEAVER_ROWS: usize = 12;
+
+/// DSSS インターリーバ列数
+pub const INTERLEAVER_COLS: usize = 29;
+
+/// FEC入力ビット数（生ビット + テールビット）
+#[inline]
+pub const fn raw_bits() -> usize {
+    PACKET_BYTES * 8 + TAIL_BITS
+}
+
+/// FEC出力ビット数（畳み込み符号率 1/2）
+#[inline]
+pub const fn fec_bits() -> usize {
+    raw_bits() * 2
+}
+
+/// インターリーバ処理後のビット数
+#[inline]
+pub const fn interleaved_bits() -> usize {
+    INTERLEAVER_ROWS * INTERLEAVER_COLS
+}
 
 /// DSSS 用の DspConfig を作成する
 pub fn dsp_config(sample_rate: f32) -> DspConfig {
