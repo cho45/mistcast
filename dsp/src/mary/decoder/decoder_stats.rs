@@ -124,7 +124,7 @@ impl DecoderStats {
     }
 
     pub fn reset_fountain_session(&mut self) {
-        // synced_frames is not reset as it's a global counter for the decoder instance
+        // セッション境界で同期/受信統計をリセットする。
         self.synced_frames = 0;
         self.received_packets = 0;
         self.stalled_packets = 0;
@@ -255,6 +255,7 @@ mod tests {
     fn test_decoder_stats_reset_fountain_session_preserves_frame_diagnostics() {
         let mut stats = DecoderStats::new();
         stats.received_packets = 4;
+        stats.synced_frames = 9;
         stats.last_packet_seq = Some(7);
         stats.last_rank_up_seq = Some(6);
         stats.last_pred_mse_fde = 0.25;
@@ -265,6 +266,7 @@ mod tests {
 
         stats.reset_fountain_session();
 
+        assert_eq!(stats.synced_frames, 0);
         assert_eq!(stats.received_packets, 0);
         assert_eq!(stats.last_packet_seq, None);
         assert_eq!(stats.last_rank_up_seq, None);
