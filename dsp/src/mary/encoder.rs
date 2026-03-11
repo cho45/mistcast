@@ -317,6 +317,7 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mary::decoder::Decoder as MaryDecoder;
     use num_complex::Complex;
     use rustfft::FftPlanner;
 
@@ -346,6 +347,45 @@ mod tests {
         assert!(
             frame.iter().all(|&s| s.is_finite()),
             "All samples should be finite"
+        );
+    }
+
+    /// RED: frame input exhausted を終端として扱わないと、
+    /// incomplete frame のまま EqualizedDecoding に残留する。
+    #[test]
+    fn test_red_truncated_frame_input_exhaustion_blocks_resync() {
+        let mut config = DspConfig::default_48k();
+        config.packets_per_burst = 3;
+
+        let mut decoder = MaryDecoder::new(160, 10, config.clone());
+        decoder.config.packets_per_burst = config.packets_per_burst;
+        decoder.set_fde_enabled(true);
+        decoder.set_fde_auto_path_select(false);
+
+        let spc = config.proc_samples_per_chip().max(1);
+        let packet_samples =
+            crate::mary::interleaver_config::mary_symbols() * crate::mary::params::PAYLOAD_SPREAD_FACTOR * spc;
+        let insufficient_equalized = packet_samples + spc - 1;
+        decoder.test_inject_exhausted_incomplete_frame_state(0, insufficient_equalized);
+
+        assert!(
+            decoder.test_frame_input_fully_consumed(),
+            "precondition failed: injected frame should be marked as input-exhausted"
+        );
+        assert!(
+            decoder.test_packets_decoded_in_burst() < config.packets_per_burst,
+            "precondition failed: injected frame must be incomplete"
+        );
+        assert!(
+            decoder.test_has_active_frame_session(),
+            "precondition failed: frame session should start as active"
+        );
+
+        // 終端遷移が正しければ、incomplete frame はここで破棄されるべき。
+        let _ = decoder.process_samples(&[]);
+        assert!(
+            !decoder.test_has_active_frame_session(),
+            "RED: frame input exhausted + incomplete frame should terminate, but frame session remains active"
         );
     }
 

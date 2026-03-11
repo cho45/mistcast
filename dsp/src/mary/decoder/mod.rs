@@ -281,6 +281,39 @@ impl Decoder {
         self.detect_and_process_frames()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_has_active_frame_session(&self) -> bool {
+        self.frame_session.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_frame_input_fully_consumed(&self) -> bool {
+        self.frame_input_fully_consumed()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_packets_decoded_in_burst(&self) -> usize {
+        self.packets_decoded_in_burst()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_inject_exhausted_incomplete_frame_state(
+        &mut self,
+        packets_decoded: usize,
+        equalized_len: usize,
+    ) {
+        self.frame_session = Some(FrameSession {
+            tracking_state: TrackingState::new(),
+            phase: FramePhase::PacketDecoding,
+            payload_packets_processed: packets_decoded,
+            pending_warmup_samples: 0,
+            pending_warmup_input_samples: 0,
+            remaining_samples_in_frame: -1,
+        });
+        self.equalization
+            .replace_test_equalized_buffer(vec![Complex32::new(0.0, 0.0); equalized_len]);
+    }
+
     fn detect_and_process_frames(&mut self) -> DecodeProgress {
         loop {
             if self.recovered_data.is_some() {
@@ -764,6 +797,12 @@ impl Decoder {
         }
 
         if self.equalization.equalized_len() < packet_samples + spc {
+            // 入力が既に尽きていて次パケット長を満たせない場合は、
+            // このフレームは未完了のまま継続不能なので破棄して探索へ戻る。
+            if self.frame_input_fully_consumed() && to_process == 0 {
+                self.abort_current_frame();
+                return true;
+            }
             return false;
         }
 
