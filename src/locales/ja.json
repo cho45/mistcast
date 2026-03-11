@@ -128,8 +128,8 @@
     },
     "modem": {
       "label": "通信方式 (PHY)",
-      "dsss": "DSSS (堅牢・低速)",
-      "mary": "M-ary (高速・繊細)"
+      "dsss": "DSSS (軽量・省CPU・低速)",
+      "mary": "M-ary (高性能・高負荷・高速)"
     },
     "debug": {
       "label": "デバッグモード",

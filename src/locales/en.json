@@ -128,8 +128,8 @@
     },
     "modem": {
       "label": "Modem Mode (PHY)",
-      "dsss": "DSSS (Robust)",
-      "mary": "M-ary (Fast)"
+      "dsss": "DSSS (Lightweight, Low-CPU, Low-speed)",
+      "mary": "M-ary (High-performance, High-load, High-speed)"
     },
     "debug": {
       "label": "Debug Mode",

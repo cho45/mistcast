@@ -32,8 +32,8 @@ describe('Settings.vue', () => {
 
     const modeButtons = wrapper.findAll('.mode-btn');
     expect(modeButtons.length).toBe(2);
-    expect(modeButtons[0].text()).toContain('DSSS (Robust)');
-    expect(modeButtons[1].text()).toContain('M-ary (Fast)');
+    expect(modeButtons[0].text()).toContain('DSSS (Lightweight, Low-CPU, Low-speed)');
+    expect(modeButtons[1].text()).toContain('M-ary (High-performance, High-load, High-speed)');
   });
 
   it('should render Debug Mode checkbox', () => {
