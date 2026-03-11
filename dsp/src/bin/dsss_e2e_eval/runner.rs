@@ -440,6 +440,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     };
 
     let mut last_reset_sec = 0.0f32;
+    let mut last_synced_frames = 0usize;
+    let mut last_received_packets = 0usize;
+    let mut last_crc_error_packets = 0usize;
     let fountain_params = FountainParams::new(k, PAYLOAD_SIZE);
     let mut fountain_encoder = FountainEncoder::new(&payload, fountain_params);
     let ber_accum = BerAccumulator::new();
@@ -493,14 +496,22 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                 &mut decoder,
                 &mut m,
                 |decoder: &mut DsssDecoder, progress, m: &mut Metrics| {
+                    m.add_frame_event(
+                        progress.synced_frames.saturating_sub(last_synced_frames),
+                        progress
+                            .received_packets
+                            .saturating_sub(last_received_packets),
+                        progress
+                            .crc_error_packets
+                            .saturating_sub(last_crc_error_packets),
+                    );
+                    last_synced_frames = progress.synced_frames;
+                    last_received_packets = progress.received_packets;
+                    last_crc_error_packets = progress.crc_error_packets;
+
                     if progress.complete {
                         let recovered = decoder.recovered_data();
                         let errs = count_bit_errors_bytes(&payload, recovered);
-                        m.add_frame_event(
-                            progress.synced_frames,
-                            progress.received_packets,
-                            progress.crc_error_packets,
-                        );
                         m.add_recovery_event(
                             m.total_sim_sec - last_reset_sec,
                             errs,
@@ -509,6 +520,9 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
                         decoder.reset_fountain_decoder();
                         last_reset_sec = m.total_sim_sec;
+                        last_synced_frames = 0;
+                        last_received_packets = 0;
+                        last_crc_error_packets = 0;
                     }
                     ControlFlow::Continue
                 },
@@ -523,9 +537,15 @@ pub fn run_trial_dsss_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         decoder.process_samples(&[])
     });
     m.add_frame_event(
-        final_progress.synced_frames,
-        final_progress.received_packets,
-        final_progress.crc_error_packets,
+        final_progress
+            .synced_frames
+            .saturating_sub(last_synced_frames),
+        final_progress
+            .received_packets
+            .saturating_sub(last_received_packets),
+        final_progress
+            .crc_error_packets
+            .saturating_sub(last_crc_error_packets),
     );
 
     let recovered = decoder.recovered_data();
@@ -613,6 +633,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     let mut last_total_llr_rescued = 0usize;
     let mut last_total_post_attempts = 0usize;
     let mut last_total_post_matched = 0usize;
+    let mut last_synced_frames = 0usize;
+    let mut last_received_packets = 0usize;
+    let mut last_crc_error_packets = 0usize;
 
     run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
@@ -688,14 +711,22 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                     last_total_post_attempts = post_attempts;
                     last_total_post_matched = post_matched;
 
+                    m.add_frame_event(
+                        progress.synced_frames.saturating_sub(last_synced_frames),
+                        progress
+                            .received_packets
+                            .saturating_sub(last_received_packets),
+                        progress
+                            .crc_error_packets
+                            .saturating_sub(last_crc_error_packets),
+                    );
+                    last_synced_frames = progress.synced_frames;
+                    last_received_packets = progress.received_packets;
+                    last_crc_error_packets = progress.crc_error_packets;
+
                     if progress.complete {
                         let recovered = decoder.recovered_data();
                         let errs = count_bit_errors_bytes(&payload, recovered);
-                        m.add_frame_event(
-                            progress.synced_frames,
-                            progress.received_packets,
-                            progress.crc_error_packets,
-                        );
                         m.add_recovery_event(
                             m.total_sim_sec - last_reset_sec,
                             errs,
@@ -706,6 +737,9 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                         last_reset_sec = m.total_sim_sec;
                         last_total_llr_attempts = 0;
                         last_total_llr_rescued = 0;
+                        last_synced_frames = 0;
+                        last_received_packets = 0;
+                        last_crc_error_packets = 0;
                         // Note: ber_accum は累積し続ける
                     }
                     ControlFlow::Continue
@@ -721,9 +755,15 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         decoder.process_samples(&[])
     });
     m.add_frame_event(
-        final_progress.synced_frames,
-        final_progress.received_packets,
-        final_progress.crc_error_packets,
+        final_progress
+            .synced_frames
+            .saturating_sub(last_synced_frames),
+        final_progress
+            .received_packets
+            .saturating_sub(last_received_packets),
+        final_progress
+            .crc_error_packets
+            .saturating_sub(last_crc_error_packets),
     );
 
     let recovered = decoder.recovered_data();

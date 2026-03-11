@@ -66,6 +66,7 @@ struct FrameSession {
     pending_warmup_samples: usize,
     pending_warmup_input_samples: usize,
     remaining_samples_in_frame: isize,
+    exhausted_packet_wait_samples: usize,
 }
 
 impl FrameSession {
@@ -77,6 +78,7 @@ impl FrameSession {
             pending_warmup_samples: warmup_samples,
             pending_warmup_input_samples: warmup_samples,
             remaining_samples_in_frame: frame_samples as isize,
+            exhausted_packet_wait_samples: 0,
         }
     }
 
@@ -309,6 +311,7 @@ impl Decoder {
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: -1,
+            exhausted_packet_wait_samples: 0,
         });
         self.equalization
             .replace_test_equalized_buffer(vec![Complex32::new(0.0, 0.0); equalized_len]);
@@ -780,6 +783,12 @@ impl Decoder {
         let to_process = self.feed_unprocessed_samples_to_equalizer();
 
         if !self.perform_sync_handoff_if_needed(spc, sync_word_bits) {
+            // Sync handoff 待ちのまま入力が尽きたフレームは継続不能。
+            // ここで破棄しないと EqualizedDecoding に残留して再同期を阻害する。
+            if self.frame_input_fully_consumed() {
+                self.abort_current_frame();
+                return true;
+            }
             return false;
         }
 
@@ -799,12 +808,26 @@ impl Decoder {
         if self.equalization.equalized_len() < packet_samples + spc {
             // 入力が既に尽きていて次パケット長を満たせない場合は、
             // このフレームは未完了のまま継続不能なので破棄して探索へ戻る。
-            if self.frame_input_fully_consumed() && to_process == 0 {
-                self.abort_current_frame();
-                return true;
+            if self.frame_input_fully_consumed() {
+                if to_process == 0 {
+                    self.abort_current_frame();
+                    return true;
+                }
+                let frame_session = self.frame_session_mut();
+                frame_session.exhausted_packet_wait_samples = frame_session
+                    .exhausted_packet_wait_samples
+                    .saturating_add(to_process);
+                if frame_session.exhausted_packet_wait_samples >= packet_samples {
+                    self.abort_current_frame();
+                    return true;
+                }
+            } else {
+                self.frame_session_mut().exhausted_packet_wait_samples = 0;
             }
             return false;
         }
+
+        self.frame_session_mut().exhausted_packet_wait_samples = 0;
 
         if !self.apply_packet_step(packet_samples) {
             return false;
@@ -1991,6 +2014,7 @@ mod tests {
             pending_warmup_samples: 0,
             pending_warmup_input_samples: 0,
             remaining_samples_in_frame: packet_samples as isize,
+            exhausted_packet_wait_samples: 0,
         });
         decoder.equalization.replace_test_equalized_buffer(vec![
             Complex32::new(0.0, 0.0);
@@ -2003,6 +2027,44 @@ mod tests {
             decoder.current_state(),
             DecoderState::Searching,
             "decoder should fallback to Searching after packet despread underflow"
+        );
+    }
+
+    /// 再現テスト:
+    /// Sync handoff 前に frame input が尽き、必要同期長も満たせない場合は
+    /// フレームを破棄して Searching へ戻るべき。
+    #[test]
+    fn test_decoder_should_fallback_to_searching_on_exhausted_sync_handoff_stall() {
+        let mut decoder = make_decoder();
+        let spc = decoder.config.proc_samples_per_chip().max(1);
+        let required_sync_samples = decoder.config.sync_word_bits * SYNC_SPREAD_FACTOR * spc;
+
+        decoder.config.packets_per_burst = 3;
+        decoder.frame_session = Some(FrameSession {
+            tracking_state: TrackingState::new(),
+            phase: FramePhase::SyncHandoffPending,
+            payload_packets_processed: 0,
+            pending_warmup_samples: 0,
+            pending_warmup_input_samples: 0,
+            remaining_samples_in_frame: -1,
+            exhausted_packet_wait_samples: 0,
+        });
+        decoder.equalization.replace_test_equalized_buffer(vec![
+            Complex32::new(0.0, 0.0);
+            required_sync_samples.saturating_sub(1)
+        ]);
+        decoder.pipeline.sample_buffer_i.clear();
+        decoder.pipeline.sample_buffer_q.clear();
+
+        let advanced = decoder.handle_decoding();
+        assert!(
+            advanced,
+            "exhausted sync-handoff stall should abort frame and continue searching"
+        );
+        assert_eq!(
+            decoder.current_state(),
+            DecoderState::Searching,
+            "decoder should fallback to Searching after sync-handoff stall on exhausted frame"
         );
     }
 
