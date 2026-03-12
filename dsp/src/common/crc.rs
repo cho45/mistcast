@@ -1,11 +1,11 @@
-//! CRC-16 (CRC-CCITT / KERMIT variant)
+//! CRC-16 (Koopman最適多項式, <=241bitでHD=5)
 //!
-//! 多項式: x^16 + x^12 + x^5 + 1 (0x1021)
-//! 初期値: 0x0000
+//! 多項式: x^16 + x^14 + x^12 + x^11 + x^8 + x^5 + x^4 + x^2 + 1 (0x5935)
+//! 初期値: 0xFFFF
 //!
 //! パケットの完全性確認に使用する。
 
-const POLY: u16 = 0x1021;
+const POLY: u16 = 0x5935;
 const INIT: u16 = 0xFFFF;
 
 /// CRC-16テーブル (コンパイル時生成)
@@ -63,12 +63,13 @@ mod tests {
     }
 
     /// 既知ベクタによる確認
-    /// "123456789" の CRC-16/CCITT = 0x29B1
+    /// 実装条件 (poly=0x5935, init=0xFFFF, xorout=0, non-reflected) で
+    /// "123456789" の CRC は 0x772B
     #[test]
     fn test_known_vector() {
         let data = b"123456789";
         let crc = crc16(data);
-        assert_eq!(crc, 0x29B1, "既知ベクタとCRCが一致すること");
+        assert_eq!(crc, 0x772B, "既知ベクタとCRCが一致すること");
     }
 
     /// CRC追加→検証の往復確認
