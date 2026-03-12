@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 
 interface Props {
   analyserNode: AnalyserNode | null;
   title?: string;
 }
+
+const { t } = useI18n();
 
 const props = withDefaults(defineProps<Props>(), {
   title: 'FFT (Linear Frequency Axis)'
@@ -146,7 +149,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="spectrum-panel">
-    <p class="spectrum-title">{{ title }}</p>
+    <p class="spectrum-title">{{ title || t('sender.spectrum.default_title') }}</p>
     <canvas ref="canvas" class="spectrum-canvas"></canvas>
   </div>
 </template>

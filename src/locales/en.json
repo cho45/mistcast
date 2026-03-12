@@ -43,6 +43,11 @@
     "sample": {
       "info": "Built-in sample: {name} ({size} bytes)"
     },
+    "spectrum": {
+      "title_sender": "Sender FFT",
+      "title_receiver": "Receiver FFT",
+      "default_title": "FFT (Linear Frequency Axis)"
+    },
     "toasts": {
       "file_too_large": "File size too large (maximum {max} bytes)",
       "text_too_large": "Text size too large (maximum {max} bytes)",
@@ -116,6 +121,9 @@
       "title": "Decoded Result",
       "size": "Size: {size} bytes",
       "preview": "Image Preview"
+    },
+    "log": {
+      "title": "Rx Log"
     }
   },
   "settings": {

@@ -153,17 +153,6 @@ const contentBytes = computed(() => {
   }
 });
 
-const sendButtonText = computed(() => {
-  switch (sendMode.value) {
-    case 'text':
-      return inputText.value.trim() ? 'Send' : 'Send Text';
-    case 'sample':
-      return 'Send Sample Image';
-    case 'file':
-      return selectedFile.value ? `Send: ${selectedFile.value.name}` : 'Select File';
-  }
-});
-
 const canSend = computed(() => {
   switch (sendMode.value) {
     case 'text':
@@ -539,7 +528,7 @@ defineExpose({
 
     <SpectrumCanvas
       :analyser-node="analyserNode"
-      title="Sender FFT"
+      :title="$t('sender.spectrum.title_sender')"
     />
   </section>
 

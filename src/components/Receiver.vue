@@ -771,7 +771,7 @@ defineExpose({
 
     <SpectrumCanvas
       :analyser-node="rxAnalyserNode"
-      title="Receiver FFT"
+      :title="$t('sender.spectrum.title_receiver')"
     />
 
     <div class="metric-grid" v-if="settings.debugMode">
@@ -807,8 +807,8 @@ defineExpose({
 
     <div class="rx-log" v-if="settings.debugMode && rxLogs.length > 0">
       <div class="rx-log-header">
-        <span>Rx Log</span>
-        <button @click="copyRxLogs" class="btn btn-xs">{{ rxLogCopied ? 'Copied' : 'Copy' }}</button>
+        <span>{{ $t('receiver.log.title') }}</span>
+        <button @click="copyRxLogs" class="btn btn-xs">{{ rxLogCopied ? $t('common.copied') : $t('common.copy') }}</button>
       </div>
       <pre>{{ rxLogs.join('\n') }}</pre>
     </div>

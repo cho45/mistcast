@@ -43,6 +43,11 @@
     "sample": {
       "info": "内蔵サンプル: {name} ({size} バイト)"
     },
+    "spectrum": {
+      "title_sender": "送信側スペクトル",
+      "title_receiver": "受信側スペクトル",
+      "default_title": "FFT (リニア周波数軸)"
+    },
     "toasts": {
       "file_too_large": "ファイルサイズが大きすぎます（最大 {max} バイト）",
       "text_too_large": "テキストサイズが大きすぎます（最大 {max} バイト）",
@@ -116,6 +121,9 @@
       "title": "復号結果",
       "size": "サイズ: {size} バイト",
       "preview": "画像プレビュー"
+    },
+    "log": {
+      "title": "受信ログ"
     }
   },
   "settings": {
