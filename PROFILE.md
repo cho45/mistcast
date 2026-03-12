@@ -135,14 +135,41 @@ SKIP_BUILD=1 npm run profile:wasm:node
 BENCH_ITERS=50 BENCH_WARMUP_MIN_PAIRS=8 BENCH_WARMUP_MAX_PAIRS=30 npm run profile:wasm:node
 ```
 
-## 4. 比較時のポイント
+## 4. FEC List Viterbi マイクロベンチ
+
+`List Viterbi` の `list_size (K)` を増やしたときのスケーリングを確認する。
+ベンチ実装は `dsp/benches/native_dsp.rs` の
+`fec/decode_soft_list_into/packet_llr348/k={1,2,4,8,16,32}`。
+
+### 実行
+
+```bash
+cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- 'fec/decode_soft_list_into'
+```
+
+### 特定 K のみ実行
+
+`criterion` のフィルタは部分一致のため、`k=1` は `k=16` も拾う。
+正確に 1 本だけ回す場合はアンカー付き正規表現を使う。
+
+```bash
+cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- '^fec/decode_soft_list_into/packet_llr348/k=1$'
+```
+
+### 見るべき値
+
+- `time`（1 codeword あたりの処理時間）
+- `thrpt`（bit/s ではなく、ベンチ設定上の elements/s）
+- K 増加時の増え方（線形に近いか、急激に悪化するか）
+
+## 5. 比較時のポイント
 
 - 同じ入力条件（seed / total_sim_sec / payload-bytes / chunk-samples）で比較する
 - CPU は Self % / Total % を見る
 - alloc は `tb`（累積 bytes）と `tbk`（累積 blocks）を関数別に比較する
 - 差分 5% 未満はノイズの可能性があるため、反復して再測定する
 
-## 5. 注意点
+## 6. 注意点
 
 - `alloc-prof-dhat` 有効時は `dhat` が global allocator を使用する
 - そのため `--alloc-profile` は同時利用しても有効な内訳にならない（dhat 計測時は付けない）
