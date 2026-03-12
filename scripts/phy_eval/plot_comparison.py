@@ -125,13 +125,6 @@ def main():
             "phy": "mary",
             "args": {}
         },
-        {
-            "name": "dsss",
-            "phy": "dsss",
-            "args": {
-                "packets_per_frame": "1",
-            }
-        }
     ]
 
     # コマンドライン引数で JSON ファイルが指定されている場合は読み込む
