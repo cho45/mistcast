@@ -7,6 +7,8 @@
 
 const POLY: u16 = 0x5935;
 const INIT: u16 = 0xFFFF;
+const POLY24: u32 = 0x864CFB;
+const INIT24: u32 = 0xB704CE;
 
 /// CRC-16テーブル (コンパイル時生成)
 const TABLE: [u16; 256] = {
@@ -29,6 +31,28 @@ const TABLE: [u16; 256] = {
     table
 };
 
+/// CRC-24テーブル (コンパイル時生成)
+const TABLE24: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = (i as u32) << 16;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 0x80_0000 != 0 {
+                crc = (crc << 1) ^ POLY24;
+            } else {
+                crc <<= 1;
+            }
+            crc &= 0xFF_FFFF;
+            j += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
 /// データ列のCRC-16を計算する
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc = INIT;
@@ -37,6 +61,16 @@ pub fn crc16(data: &[u8]) -> u16 {
         crc = (crc << 8) ^ TABLE[idx];
     }
     crc
+}
+
+/// データ列のCRC-24を計算する (OpenPGP互換: poly=0x864CFB, init=0xB704CE)
+pub fn crc24(data: &[u8]) -> u32 {
+    let mut crc = INIT24;
+    for &byte in data {
+        let idx = ((crc >> 16) ^ byte as u32) as usize & 0xFF;
+        crc = ((crc << 8) & 0xFF_FFFF) ^ TABLE24[idx];
+    }
+    crc & 0xFF_FFFF
 }
 
 /// CRCを含むデータ列が正しいかを検証する
@@ -94,5 +128,12 @@ mod tests {
         // 先頭バイトを反転
         packet[0] ^= 0xFF;
         assert!(!verify(&packet), "破損データのCRC検証が失敗すること");
+    }
+
+    #[test]
+    fn test_crc24_known_vector() {
+        let data = b"123456789";
+        // CRC-24/OpenPGP の既知値
+        assert_eq!(crc24(data), 0x21CF02);
     }
 }

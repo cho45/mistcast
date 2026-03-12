@@ -272,7 +272,10 @@ impl Metrics {
     }
 
     pub fn false_accept_ratio_per_accepted_packet(&self) -> f32 {
-        ratio(self.total_false_accepted_packets, self.total_accepted_packets)
+        ratio(
+            self.total_false_accepted_packets,
+            self.total_accepted_packets,
+        )
     }
 
     pub fn ber(&self) -> f32 {

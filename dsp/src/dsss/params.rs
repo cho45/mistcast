@@ -15,7 +15,7 @@ pub const TAIL_BITS: usize = 6;
 pub const INTERLEAVER_ROWS: usize = 12;
 
 /// DSSS インターリーバ列数
-pub const INTERLEAVER_COLS: usize = 29;
+pub const INTERLEAVER_COLS: usize = fec_bits() / INTERLEAVER_ROWS;
 
 /// FEC入力ビット数（生ビット + テールビット）
 #[inline]

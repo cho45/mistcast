@@ -1,8 +1,8 @@
 //! パケット構造の定義
 //!
-//! # 簡略化パケットフォーマット (21 bytes)
+//! # 簡略化パケットフォーマット (30 bytes)
 //! ```text
-//! [lt_meta: 3byte] [payload: 16bytes] [crc-16: 2bytes]
+//! [lt_meta: 3byte] [payload: 24bytes] [crc-24: 3bytes]
 //!
 //! lt_meta のビット割当:
 //! - 上位8bit: LT k - 1 (1..=255 を表現)
@@ -21,8 +21,8 @@ pub const LT_SEQ_BITS: usize = 16;
 pub const LT_K_MAX: usize = ((1u16 << LT_K_BITS) - 1) as usize; // 255
 pub const LT_SEQ_MAX: u16 = u16::MAX; // 65535
 /// CRCサイズ
-pub const CRC_SIZE: usize = 2;
-/// 1パケットの合計バイト数 (ヘッダ + ペイロード + CRC = 21 bytes)
+pub const CRC_SIZE: usize = 3;
+/// 1パケットの合計バイト数 (ヘッダ + ペイロード + CRC = 30 bytes)
 pub const PACKET_BYTES: usize = HEADER_SIZE + PAYLOAD_SIZE + CRC_SIZE;
 
 /// 音響通信パケット
@@ -39,7 +39,7 @@ pub struct Packet {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PacketParseError {
     InvalidLength { actual: usize },
-    CrcMismatch { expected: u16, actual: u16 },
+    CrcMismatch { expected: u32, actual: u32 },
 }
 
 impl Packet {
@@ -94,7 +94,8 @@ impl Packet {
         let lt_meta = Self::encode_lt_meta(self.lt_seq, self.lt_k as usize);
         out.extend_from_slice(&lt_meta);
         out.extend_from_slice(&self.payload);
-        let crc = crc::crc16(out);
+        let crc = crc::crc24(out);
+        out.push((crc >> 16) as u8);
         out.push((crc >> 8) as u8);
         out.push((crc & 0xFF) as u8);
     }
@@ -107,8 +108,9 @@ impl Packet {
 
         // CRC検証
         let (payload_data, crc_bytes) = data.split_at(PACKET_BYTES - CRC_SIZE);
-        let expected_crc = ((crc_bytes[0] as u16) << 8) | crc_bytes[1] as u16;
-        let actual_crc = crc::crc16(payload_data);
+        let expected_crc =
+            ((crc_bytes[0] as u32) << 16) | ((crc_bytes[1] as u32) << 8) | crc_bytes[2] as u32;
+        let actual_crc = crc::crc24(payload_data);
         if actual_crc != expected_crc {
             return Err(PacketParseError::CrcMismatch {
                 expected: expected_crc,
@@ -164,8 +166,8 @@ mod tests {
     fn test_packet_size() {
         let pkt = Packet::new(0, 10, &[0u8; PAYLOAD_SIZE]);
         let bytes = pkt.serialize();
-        assert_eq!(bytes.len(), 21);
-        assert_eq!(PACKET_BYTES, 21);
+        assert_eq!(bytes.len(), 30);
+        assert_eq!(PACKET_BYTES, 30);
     }
 
     #[test]

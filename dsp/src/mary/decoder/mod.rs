@@ -1176,7 +1176,10 @@ mod tests {
         let observed = Arc::new(Mutex::new(Vec::<(u16, u8)>::new()));
         let observed_cb = Arc::clone(&observed);
         decoder.accepted_packet_callback = Some(Box::new(move |packet: &Packet| {
-            observed_cb.lock().unwrap().push((packet.lt_seq, packet.lt_k));
+            observed_cb
+                .lock()
+                .unwrap()
+                .push((packet.lt_seq, packet.lt_k));
         }));
 
         let packet = Packet::new(123, 10, &[0x42; PAYLOAD_SIZE]);

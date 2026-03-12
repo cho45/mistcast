@@ -255,16 +255,15 @@ pub fn apply_mary_fde_mode(decoder: &mut MaryDecoder, mode: MaryFdeMode) {
 
 pub fn calculate_info_bit_rate(cli: &Cli) -> f32 {
     let chip_rate = cli.chip_rate.max(1e-6);
-    // 情報ビットレートの定義: ユーザーデータ（16バイト）が単位時間にどれだけ送られるか。
+    // 情報ビットレートの定義: ユーザーデータ（PAYLOAD_SIZEバイト）が単位時間にどれだけ送られるか。
     // Eb/N0 の計算においても、通常 Eb は情報ビットあたりのエネルギーを指す。
-    let info_bits_per_packet = (dsp::params::PAYLOAD_SIZE * 8) as f32; // 128 bits
+    let info_bits_per_packet = (dsp::params::PAYLOAD_SIZE * 8) as f32;
 
     match cli.phy {
         Phy::Dsss => {
             // DSSS SF は M系列の長さ (2^order - 1)
             let sf = ((1 << cli.mseq_order) - 1) as f32;
             let bits_per_symbol = 2.0; // DQPSK
-                                       // DSSS インターリーバは 12x29 = 348 bits
             let interleaved_bits = dsp::dsss::params::interleaved_bits() as f32;
 
             let symbol_rate = chip_rate / sf;
@@ -277,8 +276,7 @@ pub fn calculate_info_bit_rate(cli: &Cli) -> f32 {
             // 追加の拡散 (PAYLOAD_SPREAD_FACTOR) は 16 だが、これは Walsh の長さそのもの。
             let chips_per_symbol = 16.0;
             let bits_per_symbol = 6.0;
-            // Mary インターリーバは 29x12 = 348 bits
-            let interleaved_bits = 348.0;
+            let interleaved_bits = dsp::mary::interleaver_config::interleaved_bits() as f32;
 
             let symbol_rate = chip_rate / chips_per_symbol;
             let coded_bit_rate = symbol_rate * bits_per_symbol;
@@ -826,29 +824,37 @@ mod tests {
 
     #[test]
     fn test_calculate_info_bit_rate() {
-        // --- Mary 8000 cps, SF=16, Walsh-16+DQPSK, 128/348 FEC ---
+        // --- Mary 8000 cps, SF=16, Walsh-16+DQPSK, info_bits/interleaved_bits FEC ---
         let mut cli_mary = dummy_cli(Phy::Mary);
         cli_mary.chip_rate = 8000.0;
         let rb_mary = calculate_info_bit_rate(&cli_mary);
 
-        // 期待値: (8000 / 16) * 6 * (128 / 348) = 1103.448 bps
+        let expected_mary = (8000.0 / 16.0)
+            * 6.0
+            * ((dsp::params::PAYLOAD_SIZE * 8) as f32
+                / dsp::mary::interleaver_config::interleaved_bits() as f32);
         assert!(
-            (rb_mary - 1103.448).abs() < 0.01,
-            "Mary bit rate mismatch: expected 1103.448, got {}",
-            rb_mary
+            (rb_mary - expected_mary).abs() < 0.01,
+            "Mary bit rate mismatch: expected {}, got {}",
+            expected_mary,
+            rb_mary,
         );
 
-        // --- DSSS 8000 cps, Order=4 (SF=15), DQPSK, 128/348 FEC ---
+        // --- DSSS 8000 cps, Order=4 (SF=15), DQPSK, info_bits/interleaved_bits FEC ---
         let mut cli_dsss = dummy_cli(Phy::Dsss);
         cli_dsss.chip_rate = 8000.0;
         cli_dsss.mseq_order = 4;
         let rb_dsss = calculate_info_bit_rate(&cli_dsss);
 
-        // 期待値: (8000 / 15) * 2 * (128 / 348) = 392.337 bps
+        let expected_dsss = (8000.0 / 15.0)
+            * 2.0
+            * ((dsp::params::PAYLOAD_SIZE * 8) as f32
+                / dsp::dsss::params::interleaved_bits() as f32);
         assert!(
-            (rb_dsss - 392.337).abs() < 0.01,
-            "DSSS bit rate mismatch: expected 392.337, got {}",
-            rb_dsss
+            (rb_dsss - expected_dsss).abs() < 0.01,
+            "DSSS bit rate mismatch: expected {}, got {}",
+            expected_dsss,
+            rb_dsss,
         );
     }
 
