@@ -2051,7 +2051,8 @@ mod tests {
         });
         decoder.equalization.replace_test_equalized_buffer(vec![
             Complex32::new(0.0, 0.0);
-            required_sync_samples.saturating_sub(1)
+            required_sync_samples
+                .saturating_sub(1)
         ]);
         decoder.pipeline.sample_buffer_i.clear();
         decoder.pipeline.sample_buffer_q.clear();
@@ -2322,7 +2323,10 @@ mod tests {
             "AUTO無効時は常にFDE経路を使うべき"
         );
         let total_selected = progress.fde_selected_frames + progress.raw_selected_frames;
-        assert!(total_selected > 0, "test input must produce at least one frame selection");
+        assert!(
+            total_selected > 0,
+            "test input must produce at least one frame selection"
+        );
         assert_eq!(
             progress.last_path_used, 1,
             "on mode must never switch to raw path"
@@ -2396,11 +2400,11 @@ mod tests {
             "off mode must keep FDE path disabled"
         );
         let total_selected = progress.fde_selected_frames + progress.raw_selected_frames;
-        assert!(total_selected > 0, "test input must produce at least one frame selection");
-        assert_eq!(
-            progress.last_path_used, 0,
-            "off mode must stay on raw path"
+        assert!(
+            total_selected > 0,
+            "test input must produce at least one frame selection"
         );
+        assert_eq!(progress.last_path_used, 0, "off mode must stay on raw path");
         assert_eq!(
             progress.fde_selected_frames, 0,
             "off mode must not select FDE"

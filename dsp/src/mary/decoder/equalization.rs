@@ -120,10 +120,7 @@ fn dominant_tap_count(cir: &[Complex32], alpha: f32) -> usize {
     if cir.is_empty() {
         return 0;
     }
-    let peak = cir
-        .iter()
-        .map(|c| c.norm())
-        .fold(0.0f32, |a, b| a.max(b));
+    let peak = cir.iter().map(|c| c.norm()).fold(0.0f32, |a, b| a.max(b));
     if peak <= 1e-12 {
         return 0;
     }
@@ -732,11 +729,9 @@ mod tests {
         let cir = vec![Complex32::new(1.0, 0.0); 64];
         let fitted = fit_observed_cir_for_fde(&cir);
         assert_eq!(fitted.len(), 64);
-        assert!(
-            fitted
-                .iter()
-                .all(|tap| (*tap - Complex32::new(1.0, 0.0)).norm() < 1e-6)
-        );
+        assert!(fitted
+            .iter()
+            .all(|tap| (*tap - Complex32::new(1.0, 0.0)).norm() < 1e-6));
     }
 
     #[test]
@@ -906,8 +901,8 @@ mod tests {
             mmse,
             chq.cfo_rad_per_sample,
         );
-        let (mse_raw_path, mse_fde_raw) =
-            controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
+        let (mse_raw_path, mse_fde_raw) = controller
+            .evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
                 sync_detector: &detector,
                 cir: &cir_raw,
                 sample_buffer_i: &i_ch,
@@ -1196,19 +1191,17 @@ mod tests {
 
         let mut controller = EqualizationController::new(&config, true);
         controller.set_fde_auto_path_select(false);
-        let _ = controller.evaluate_sync_word_path_mse_with_live_equalizer(
-            SyncWordPathMseInput {
-                sync_detector: &detector,
-                cir: &cir,
-                sample_buffer_i: &i_ch,
-                sample_buffer_q: &q_ch,
-                sync_start_idx: sync_start,
-                sync_end_idx: sync_end,
-                cir_len,
-                mmse: MmseSettings::default(),
-                cfo_rad_per_sample: chq.cfo_rad_per_sample,
-            },
-        );
+        let _ = controller.evaluate_sync_word_path_mse_with_live_equalizer(SyncWordPathMseInput {
+            sync_detector: &detector,
+            cir: &cir,
+            sample_buffer_i: &i_ch,
+            sample_buffer_q: &q_ch,
+            sync_start_idx: sync_start,
+            sync_end_idx: sync_end,
+            cir_len,
+            mmse: MmseSettings::default(),
+            cfo_rad_per_sample: chq.cfo_rad_per_sample,
+        });
 
         assert!(
             controller.selected_fde_cir_for_setup.is_none(),

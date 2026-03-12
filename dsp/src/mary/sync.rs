@@ -2686,11 +2686,8 @@ mod tests {
             Complex32::new(1.0, 0.0),
         ];
         let main_gain = Complex32::new(0.7, -0.25);
-        let (i_ch, q_ch) = synth_preamble_baseband_with_known_chip_iq(
-            &detector,
-            &chip_iq,
-            &[(0usize, main_gain)],
-        );
+        let (i_ch, q_ch) =
+            synth_preamble_baseband_with_known_chip_iq(&detector, &chip_iq, &[(0usize, main_gain)]);
 
         // 2. CIR 推定 (d=0のみ検証)
         let mut est_cir = vec![Complex32::new(0.0, 0.0); 1];
@@ -2990,7 +2987,9 @@ mod tests {
         let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
         for n in 0..cir_len {
             let mut acc = Complex32::new(0.0, 0.0);
-            let k_max = n.min(g.len().saturating_sub(1)).min(eval_len.saturating_sub(1));
+            let k_max = n
+                .min(g.len().saturating_sub(1))
+                .min(eval_len.saturating_sub(1));
             for k in 0..=k_max {
                 acc += h_true[k] * g[n - k];
             }
@@ -3058,7 +3057,9 @@ mod tests {
         let mut cir_obs = vec![Complex32::new(0.0, 0.0); cir_len];
         for n in 0..cir_len {
             let mut acc = Complex32::new(0.0, 0.0);
-            let k_max = n.min(g.len().saturating_sub(1)).min(eval_len.saturating_sub(1));
+            let k_max = n
+                .min(g.len().saturating_sub(1))
+                .min(eval_len.saturating_sub(1));
             for k in 0..=k_max {
                 acc += h_true[k] * g[n - k];
             }

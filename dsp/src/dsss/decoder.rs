@@ -1220,10 +1220,8 @@ mod tests {
         let mut fec_bits = fec::encode(bits);
         let mut scrambler = Scrambler::default();
         scrambler.process_bits(&mut fec_bits);
-        let interleaver = BlockInterleaver::new(
-            dsss_params::INTERLEAVER_ROWS,
-            dsss_params::INTERLEAVER_COLS,
-        );
+        let interleaver =
+            BlockInterleaver::new(dsss_params::INTERLEAVER_ROWS, dsss_params::INTERLEAVER_COLS);
         interleaver
             .interleave(&fec_bits)
             .into_iter()

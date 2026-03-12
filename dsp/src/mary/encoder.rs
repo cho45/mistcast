@@ -363,8 +363,9 @@ mod tests {
         decoder.set_fde_auto_path_select(false);
 
         let spc = config.proc_samples_per_chip().max(1);
-        let packet_samples =
-            crate::mary::interleaver_config::mary_symbols() * crate::mary::params::PAYLOAD_SPREAD_FACTOR * spc;
+        let packet_samples = crate::mary::interleaver_config::mary_symbols()
+            * crate::mary::params::PAYLOAD_SPREAD_FACTOR
+            * spc;
         let insufficient_equalized = packet_samples + spc - 1;
         decoder.test_inject_exhausted_incomplete_frame_state(0, insufficient_equalized);
 
@@ -400,8 +401,14 @@ mod tests {
             .expect("Should encode a baseband frame");
         assert_eq!(bb_i.len(), bb_q.len(), "I/Q length mismatch");
         assert!(!bb_i.is_empty(), "Baseband frame should not be empty");
-        assert!(bb_i.iter().all(|&s| s.is_finite()), "I samples must be finite");
-        assert!(bb_q.iter().all(|&s| s.is_finite()), "Q samples must be finite");
+        assert!(
+            bb_i.iter().all(|&s| s.is_finite()),
+            "I samples must be finite"
+        );
+        assert!(
+            bb_q.iter().all(|&s| s.is_finite()),
+            "Q samples must be finite"
+        );
 
         let energy: f32 = bb_i
             .iter()
