@@ -6,7 +6,7 @@
 use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::common::nco::Nco;
 use crate::common::resample::IqResampler;
-use crate::common::rrc_filter::RrcFilter;
+use crate::common::rrc_filter::IqRrcFilter;
 use crate::DspConfig;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::{f32x4, v128, v128_store};
@@ -14,8 +14,7 @@ use std::arch::wasm32::{f32x4, v128, v128_store};
 /// 信号処理パイプライン
 pub struct SignalPipeline {
     pub iq_resampler: IqResampler,
-    pub rrc_filter_i: RrcFilter,
-    pub rrc_filter_q: RrcFilter,
+    pub iq_rrc_filter: IqRrcFilter,
     pub lo_nco: Nco,
     pub sample_buffer_i: Vec<f32>,
     pub sample_buffer_q: Vec<f32>,
@@ -43,8 +42,7 @@ impl SignalPipeline {
                 cutoff,
                 Some(config.rx_resampler_taps),
             ),
-            rrc_filter_i: RrcFilter::from_config(config),
-            rrc_filter_q: RrcFilter::from_config(config),
+            iq_rrc_filter: IqRrcFilter::from_config(config),
             lo_nco,
             sample_buffer_i: Vec::with_capacity(16_384),
             sample_buffer_q: Vec::with_capacity(16_384),
@@ -59,8 +57,7 @@ impl SignalPipeline {
     }
 
     pub fn reset(&mut self) {
-        self.rrc_filter_i.reset();
-        self.rrc_filter_q.reset();
+        self.iq_rrc_filter.reset();
         self.lo_nco.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
@@ -152,11 +149,13 @@ impl SignalPipeline {
             &mut self.resample_buffer_q,
         );
 
-        // 3. RRCフィルタ（インプレースAPI使用）
-        self.rrc_filter_i
-            .process_block_into(&self.resample_buffer_i, &mut self.rrc_filtered_i);
-        self.rrc_filter_q
-            .process_block_into(&self.resample_buffer_q, &mut self.rrc_filtered_q);
+        // 3. RRCフィルタ（I/Q同時処理）
+        self.iq_rrc_filter.process_block_into(
+            &self.resample_buffer_i,
+            &self.resample_buffer_q,
+            &mut self.rrc_filtered_i,
+            &mut self.rrc_filtered_q,
+        );
 
         // 4. 出力バッファに追加
         self.sample_buffer_i.reserve(self.rrc_filtered_i.len());

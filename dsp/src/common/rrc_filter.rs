@@ -80,6 +80,17 @@ pub struct RrcFilter {
     pos: usize,
 }
 
+/// I/Q 2チャネルを同一係数・同一位相で同時に処理するRRCフィルタ。
+///
+/// 2本の `RrcFilter` を別々に回す場合と比べ、係数参照とループ制御の
+/// オーバーヘッドを削減する。
+pub struct IqRrcFilter {
+    coeffs_rev: Vec<f32>,
+    history_i: Vec<f32>,
+    history_q: Vec<f32>,
+    pos: usize,
+}
+
 /// RRCマッチドフィルタ + デシメーションを統合した逐次フィルタ。
 ///
 /// 入力ごとに状態は更新するが、出力は `decimation` サンプルに1回だけ生成する。
@@ -256,6 +267,169 @@ impl RrcFilter {
 
     pub fn num_taps(&self) -> usize {
         self.coeffs.len()
+    }
+}
+
+impl IqRrcFilter {
+    /// `DspConfig` から I/Q 同時RRCフィルタを作成する
+    pub fn from_config(config: &DspConfig) -> Self {
+        Self::with_params(
+            config.rrc_num_taps(),
+            config.rrc_alpha,
+            config.chip_rate,
+            config.proc_sample_rate(),
+        )
+    }
+
+    /// カスタムパラメータで I/Q 同時RRCフィルタを作成する
+    pub fn with_params(num_taps: usize, alpha: f32, chip_rate: f32, sample_rate: f32) -> Self {
+        let coeffs = rrc_coeffs(num_taps, alpha, chip_rate, sample_rate);
+        let mut coeffs_rev = coeffs;
+        coeffs_rev.reverse();
+        let n = coeffs_rev.len();
+        Self {
+            coeffs_rev,
+            history_i: vec![0.0f32; n * 2],
+            history_q: vec![0.0f32; n * 2],
+            pos: 0,
+        }
+    }
+
+    #[inline]
+    fn push_pair_and_window_start(&mut self, sample_i: f32, sample_q: f32) -> usize {
+        let n = self.coeffs_rev.len();
+        let write = self.pos;
+        self.history_i[write] = sample_i;
+        self.history_q[write] = sample_q;
+        self.history_i[write + n] = sample_i;
+        self.history_q[write + n] = sample_q;
+        self.pos += 1;
+        if self.pos >= n {
+            self.pos = 0;
+        }
+        write + 1
+    }
+
+    #[cfg_attr(
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        allow(dead_code)
+    )]
+    fn process_scalar_pair_path(&mut self, sample_i: f32, sample_q: f32) -> (f32, f32) {
+        let n = self.coeffs_rev.len();
+        let start = self.push_pair_and_window_start(sample_i, sample_q);
+        let mut out_i = 0.0f32;
+        let mut out_q = 0.0f32;
+        for k in 0..n {
+            let h = self.coeffs_rev[k];
+            out_i += h * self.history_i[start + k];
+            out_q += h * self.history_q[start + k];
+        }
+        (out_i, out_q)
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn process_simd_pair_path(&mut self, sample_i: f32, sample_q: f32) -> (f32, f32) {
+        let n = self.coeffs_rev.len();
+        let start = self.push_pair_and_window_start(sample_i, sample_q);
+        let input_i_ptr = self.history_i[start..start + n].as_ptr();
+        let input_q_ptr = self.history_q[start..start + n].as_ptr();
+        let coeff_ptr = self.coeffs_rev.as_ptr();
+        let mut sum4_i = f32x4(0.0, 0.0, 0.0, 0.0);
+        let mut sum4_q = f32x4(0.0, 0.0, 0.0, 0.0);
+        let mut k = 0usize;
+
+        while k + 8 <= n {
+            // SAFETY: `k + 8 <= n` を満たす間のみ進むため、
+            // `input_{i,q}_ptr[k..k+8]` と `coeff_ptr[k..k+8]` は
+            // 連続した有効な `f32` 領域内。
+            let xi0 = unsafe { v128_load(input_i_ptr.add(k) as *const v128) };
+            let xi1 = unsafe { v128_load(input_i_ptr.add(k + 4) as *const v128) };
+            let xq0 = unsafe { v128_load(input_q_ptr.add(k) as *const v128) };
+            let xq1 = unsafe { v128_load(input_q_ptr.add(k + 4) as *const v128) };
+            let h0 = unsafe { v128_load(coeff_ptr.add(k) as *const v128) };
+            let h1 = unsafe { v128_load(coeff_ptr.add(k + 4) as *const v128) };
+            sum4_i = f32x4_add(sum4_i, f32x4_mul(h0, xi0));
+            sum4_i = f32x4_add(sum4_i, f32x4_mul(h1, xi1));
+            sum4_q = f32x4_add(sum4_q, f32x4_mul(h0, xq0));
+            sum4_q = f32x4_add(sum4_q, f32x4_mul(h1, xq1));
+            k += 8;
+        }
+
+        while k + 4 <= n {
+            // SAFETY: `k + 4 <= n` の条件下でのみ読み込むため、
+            // 各ポインタは有効範囲内。
+            let xi = unsafe { v128_load(input_i_ptr.add(k) as *const v128) };
+            let xq = unsafe { v128_load(input_q_ptr.add(k) as *const v128) };
+            let h = unsafe { v128_load(coeff_ptr.add(k) as *const v128) };
+            sum4_i = f32x4_add(sum4_i, f32x4_mul(h, xi));
+            sum4_q = f32x4_add(sum4_q, f32x4_mul(h, xq));
+            k += 4;
+        }
+
+        let mut out_i = RrcFilter::hsum4(sum4_i);
+        let mut out_q = RrcFilter::hsum4(sum4_q);
+        for kk in k..n {
+            let h = self.coeffs_rev[kk];
+            out_i += h * self.history_i[start + kk];
+            out_q += h * self.history_q[start + kk];
+        }
+        (out_i, out_q)
+    }
+
+    pub fn process_pair(&mut self, sample_i: f32, sample_q: f32) -> (f32, f32) {
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            return self.process_simd_pair_path(sample_i, sample_q);
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+        {
+            self.process_scalar_pair_path(sample_i, sample_q)
+        }
+    }
+
+    pub fn process_block_into(
+        &mut self,
+        input_i: &[f32],
+        input_q: &[f32],
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+    ) {
+        assert_eq!(input_i.len(), input_q.len(), "I/Q input length must match");
+        output_i.clear();
+        output_q.clear();
+        if input_i.is_empty() {
+            return;
+        }
+        output_i.reserve(input_i.len());
+        output_q.reserve(input_q.len());
+        for (&si, &sq) in input_i.iter().zip(input_q.iter()) {
+            let (yi, yq) = self.process_pair(si, sq);
+            output_i.push(yi);
+            output_q.push(yq);
+        }
+    }
+
+    pub fn process_block_in_place(&mut self, input_i: &mut [f32], input_q: &mut [f32]) {
+        assert_eq!(input_i.len(), input_q.len(), "I/Q input length must match");
+        for idx in 0..input_i.len() {
+            let (yi, yq) = self.process_pair(input_i[idx], input_q[idx]);
+            input_i[idx] = yi;
+            input_q[idx] = yq;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.history_i.fill(0.0);
+        self.history_q.fill(0.0);
+        self.pos = 0;
+    }
+
+    pub fn delay(&self) -> usize {
+        (self.coeffs_rev.len() - 1) / 2
+    }
+
+    pub fn num_taps(&self) -> usize {
+        self.coeffs_rev.len()
     }
 }
 
@@ -598,6 +772,266 @@ mod tests {
         assert!(max_err < 1e-5, "max_err={}", max_err);
     }
 
+    #[test]
+    fn test_iq_rrc_filter_matches_two_mono_filters_whole_input() {
+        let config = test_config();
+        let mut mono_i = RrcFilter::from_config(&config);
+        let mut mono_q = RrcFilter::from_config(&config);
+        let mut iq = IqRrcFilter::from_config(&config);
+
+        let input_i: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.73 * (2.0 * std::f32::consts::PI * 700.0 * t).sin()
+                    + 0.19 * (2.0 * std::f32::consts::PI * 1900.0 * t).cos()
+                    + 0.08 * (2.0 * std::f32::consts::PI * 3200.0 * t).sin()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.61 * (2.0 * std::f32::consts::PI * 900.0 * t).cos()
+                    + 0.27 * (2.0 * std::f32::consts::PI * 2100.0 * t).sin()
+                    + 0.12 * (2.0 * std::f32::consts::PI * 3700.0 * t).cos()
+            })
+            .collect();
+
+        let expected_i = mono_i.process_block(&input_i);
+        let expected_q = mono_q.process_block(&input_q);
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        iq.process_block_into(&input_i, &input_q, &mut out_i, &mut out_q);
+
+        assert_eq!(out_i.len(), expected_i.len());
+        assert_eq!(out_q.len(), expected_q.len());
+        for (idx, (&a, &e)) in out_i.iter().zip(expected_i.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "I idx={} actual={} expected={}",
+                idx,
+                a,
+                e
+            );
+        }
+        for (idx, (&a, &e)) in out_q.iter().zip(expected_q.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "Q idx={} actual={} expected={}",
+                idx,
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_iq_rrc_filter_matches_two_mono_filters_chunked() {
+        let config = test_config();
+        let mut mono_i = RrcFilter::from_config(&config);
+        let mut mono_q = RrcFilter::from_config(&config);
+        let mut iq = IqRrcFilter::from_config(&config);
+
+        let input_i: Vec<f32> = (0..6000)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.66 * (2.0 * std::f32::consts::PI * 830.0 * t).sin()
+                    + 0.24 * (2.0 * std::f32::consts::PI * 2600.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..6000)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.58 * (2.0 * std::f32::consts::PI * 910.0 * t).cos()
+                    + 0.31 * (2.0 * std::f32::consts::PI * 2400.0 * t).sin()
+            })
+            .collect();
+
+        let mut expected_i = Vec::new();
+        let mut expected_q = Vec::new();
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        let mut pos = 0usize;
+        for &chunk_len in &[1usize, 3, 31, 127, 5, 211, 64, 1024, 77, 4096] {
+            if pos >= input_i.len() {
+                break;
+            }
+            let end = (pos + chunk_len).min(input_i.len());
+            expected_i.extend(mono_i.process_block(&input_i[pos..end]));
+            expected_q.extend(mono_q.process_block(&input_q[pos..end]));
+
+            let mut tmp_i = Vec::new();
+            let mut tmp_q = Vec::new();
+            iq.process_block_into(
+                &input_i[pos..end],
+                &input_q[pos..end],
+                &mut tmp_i,
+                &mut tmp_q,
+            );
+            out_i.extend(tmp_i);
+            out_q.extend(tmp_q);
+            pos = end;
+        }
+        if pos < input_i.len() {
+            expected_i.extend(mono_i.process_block(&input_i[pos..]));
+            expected_q.extend(mono_q.process_block(&input_q[pos..]));
+            let mut tmp_i = Vec::new();
+            let mut tmp_q = Vec::new();
+            iq.process_block_into(&input_i[pos..], &input_q[pos..], &mut tmp_i, &mut tmp_q);
+            out_i.extend(tmp_i);
+            out_q.extend(tmp_q);
+        }
+
+        assert_eq!(out_i.len(), expected_i.len());
+        assert_eq!(out_q.len(), expected_q.len());
+        for (idx, (&a, &e)) in out_i.iter().zip(expected_i.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "I idx={} actual={} expected={}",
+                idx,
+                a,
+                e
+            );
+        }
+        for (idx, (&a, &e)) in out_q.iter().zip(expected_q.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "Q idx={} actual={} expected={}",
+                idx,
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "I/Q input length must match")]
+    fn test_iq_rrc_filter_panics_on_mismatched_input_lengths() {
+        let config = test_config();
+        let mut iq = IqRrcFilter::from_config(&config);
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        iq.process_block_into(&[0.0f32; 8], &[0.0f32; 7], &mut out_i, &mut out_q);
+    }
+
+    #[test]
+    #[should_panic(expected = "I/Q input length must match")]
+    fn test_iq_rrc_filter_in_place_panics_on_mismatched_input_lengths() {
+        let config = test_config();
+        let mut iq = IqRrcFilter::from_config(&config);
+        let mut in_i = [0.0f32; 8];
+        let mut in_q = [0.0f32; 7];
+        iq.process_block_in_place(&mut in_i, &mut in_q);
+    }
+
+    #[test]
+    fn test_iq_rrc_filter_reset_restarts_state_equivalent_to_fresh_instance() {
+        let config = test_config();
+        let mut under_test = IqRrcFilter::from_config(&config);
+        let mut fresh = IqRrcFilter::from_config(&config);
+
+        let input_i: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.72 * (2.0 * std::f32::consts::PI * 820.0 * t).sin()
+                    + 0.22 * (2.0 * std::f32::consts::PI * 1730.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.64 * (2.0 * std::f32::consts::PI * 910.0 * t).cos()
+                    + 0.28 * (2.0 * std::f32::consts::PI * 2010.0 * t).sin()
+            })
+            .collect();
+
+        let mut throwaway_i = Vec::new();
+        let mut throwaway_q = Vec::new();
+        under_test.process_block_into(
+            &input_i[..333],
+            &input_q[..333],
+            &mut throwaway_i,
+            &mut throwaway_q,
+        );
+        under_test.reset();
+
+        let mut out_i_reset = Vec::new();
+        let mut out_q_reset = Vec::new();
+        under_test.process_block_into(&input_i, &input_q, &mut out_i_reset, &mut out_q_reset);
+
+        let mut out_i_fresh = Vec::new();
+        let mut out_q_fresh = Vec::new();
+        fresh.process_block_into(&input_i, &input_q, &mut out_i_fresh, &mut out_q_fresh);
+
+        assert_eq!(out_i_reset.len(), out_i_fresh.len());
+        assert_eq!(out_q_reset.len(), out_q_fresh.len());
+        for (idx, (&a, &e)) in out_i_reset.iter().zip(out_i_fresh.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "I idx={} reset={} fresh={}",
+                idx,
+                a,
+                e
+            );
+        }
+        for (idx, (&a, &e)) in out_q_reset.iter().zip(out_q_fresh.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "Q idx={} reset={} fresh={}",
+                idx,
+                a,
+                e
+            );
+        }
+    }
+
+    #[test]
+    fn test_iq_rrc_filter_process_block_in_place_matches_block_into() {
+        let config = test_config();
+        let mut filter1 = IqRrcFilter::from_config(&config);
+        let mut filter2 = IqRrcFilter::from_config(&config);
+
+        let mut input_i: Vec<f32> = (0..2000)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.7 * (2.0 * std::f32::consts::PI * 800.0 * t).sin()
+                    + 0.2 * (2.0 * std::f32::consts::PI * 2300.0 * t).cos()
+            })
+            .collect();
+        let mut input_q: Vec<f32> = (0..2000)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.55 * (2.0 * std::f32::consts::PI * 1100.0 * t).cos()
+                    + 0.3 * (2.0 * std::f32::consts::PI * 1700.0 * t).sin()
+            })
+            .collect();
+
+        let mut expected_i = Vec::new();
+        let mut expected_q = Vec::new();
+        filter1.process_block_into(&input_i, &input_q, &mut expected_i, &mut expected_q);
+
+        filter2.process_block_in_place(&mut input_i, &mut input_q);
+        assert_eq!(input_i.len(), expected_i.len());
+        assert_eq!(input_q.len(), expected_q.len());
+        for (idx, (&a, &e)) in input_i.iter().zip(expected_i.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "I idx={} actual={} expected={}",
+                idx,
+                a,
+                e
+            );
+        }
+        for (idx, (&a, &e)) in input_q.iter().zip(expected_q.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "Q idx={} actual={} expected={}",
+                idx,
+                a,
+                e
+            );
+        }
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[wasm_bindgen_test]
     fn test_rrc_filter_simd_matches_scalar_path() {
@@ -697,6 +1131,335 @@ mod tests {
                 i,
                 y_scalar,
                 y_simd
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_rrc_filter_simd_matches_scalar_path() {
+        let config = test_config();
+        let mut scalar = IqRrcFilter::from_config(&config);
+        let mut simd = IqRrcFilter::from_config(&config);
+
+        for i in 0..2048 {
+            let t = i as f32 / config.proc_sample_rate();
+            let x_i = 0.73 * (2.0 * std::f32::consts::PI * 700.0 * t).sin()
+                + 0.19 * (2.0 * std::f32::consts::PI * 1900.0 * t).cos()
+                + 0.08 * (2.0 * std::f32::consts::PI * 3200.0 * t).sin();
+            let x_q = 0.61 * (2.0 * std::f32::consts::PI * 900.0 * t).cos()
+                + 0.27 * (2.0 * std::f32::consts::PI * 2100.0 * t).sin()
+                + 0.12 * (2.0 * std::f32::consts::PI * 3700.0 * t).cos();
+            let (y_i_scalar, y_q_scalar) = scalar.process_scalar_pair_path(x_i, x_q);
+            let (y_i_simd, y_q_simd) = simd.process_simd_pair_path(x_i, x_q);
+            assert!(
+                (y_i_scalar - y_i_simd).abs() < 1e-5,
+                "I i={} scalar={} simd={}",
+                i,
+                y_i_scalar,
+                y_i_simd
+            );
+            assert!(
+                (y_q_scalar - y_q_simd).abs() < 1e-5,
+                "Q i={} scalar={} simd={}",
+                i,
+                y_q_scalar,
+                y_q_simd
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_rrc_filter_simd_tap_remainder_boundaries() {
+        for &taps in &[17usize, 19usize] {
+            let mut scalar = IqRrcFilter::with_params(taps, 0.3, 8_000.0, 24_000.0);
+            let mut simd = IqRrcFilter::with_params(taps, 0.3, 8_000.0, 24_000.0);
+            for i in 0..(taps * 8 + 5) {
+                let t = i as f32 / 24_000.0;
+                let x_i = 0.61 * (2.0 * std::f32::consts::PI * 900.0 * t).sin()
+                    + 0.27 * (2.0 * std::f32::consts::PI * 2100.0 * t).cos();
+                let x_q = 0.55 * (2.0 * std::f32::consts::PI * 700.0 * t).cos()
+                    + 0.31 * (2.0 * std::f32::consts::PI * 1700.0 * t).sin();
+                let (y_i_scalar, y_q_scalar) = scalar.process_scalar_pair_path(x_i, x_q);
+                let (y_i_simd, y_q_simd) = simd.process_simd_pair_path(x_i, x_q);
+                assert!(
+                    (y_i_scalar - y_i_simd).abs() < 1e-5,
+                    "I taps={} i={} scalar={} simd={}",
+                    taps,
+                    i,
+                    y_i_scalar,
+                    y_i_simd
+                );
+                assert!(
+                    (y_q_scalar - y_q_simd).abs() < 1e-5,
+                    "Q taps={} i={} scalar={} simd={}",
+                    taps,
+                    i,
+                    y_q_scalar,
+                    y_q_simd
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_rrc_filter_simd_tap_remainder_paths_after_unroll8() {
+        for &taps in &[21usize, 23usize] {
+            let mut scalar = IqRrcFilter::with_params(taps, 0.35, 8_000.0, 24_000.0);
+            let mut simd = IqRrcFilter::with_params(taps, 0.35, 8_000.0, 24_000.0);
+            for i in 0..(taps * 10 + 3) {
+                let t = i as f32 / 24_000.0;
+                let x_i = 0.57 * (2.0 * std::f32::consts::PI * 1100.0 * t).sin()
+                    + 0.29 * (2.0 * std::f32::consts::PI * 2900.0 * t).cos()
+                    + 0.14 * (2.0 * std::f32::consts::PI * 3700.0 * t).sin();
+                let x_q = 0.52 * (2.0 * std::f32::consts::PI * 1000.0 * t).cos()
+                    + 0.33 * (2.0 * std::f32::consts::PI * 2500.0 * t).sin()
+                    + 0.15 * (2.0 * std::f32::consts::PI * 3400.0 * t).cos();
+                let (y_i_scalar, y_q_scalar) = scalar.process_scalar_pair_path(x_i, x_q);
+                let (y_i_simd, y_q_simd) = simd.process_simd_pair_path(x_i, x_q);
+                assert!(
+                    (y_i_scalar - y_i_simd).abs() < 1e-5,
+                    "I taps={} i={} scalar={} simd={}",
+                    taps,
+                    i,
+                    y_i_scalar,
+                    y_i_simd
+                );
+                assert!(
+                    (y_q_scalar - y_q_simd).abs() < 1e-5,
+                    "Q taps={} i={} scalar={} simd={}",
+                    taps,
+                    i,
+                    y_q_scalar,
+                    y_q_simd
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_rrc_filter_simd_ring_wrap_boundary() {
+        let taps = 17usize;
+        let mut scalar = IqRrcFilter::with_params(taps, 0.25, 8_000.0, 24_000.0);
+        let mut simd = IqRrcFilter::with_params(taps, 0.25, 8_000.0, 24_000.0);
+
+        for i in 0..(taps * 20) {
+            let x_i = ((i % 11) as f32 - 5.0) * 0.07;
+            let x_q = (((i + 3) % 13) as f32 - 6.0) * 0.05;
+            let (y_i_scalar, y_q_scalar) = scalar.process_scalar_pair_path(x_i, x_q);
+            let (y_i_simd, y_q_simd) = simd.process_simd_pair_path(x_i, x_q);
+            assert!(
+                (y_i_scalar - y_i_simd).abs() < 1e-5,
+                "I i={} scalar={} simd={}",
+                i,
+                y_i_scalar,
+                y_i_simd
+            );
+            assert!(
+                (y_q_scalar - y_q_simd).abs() < 1e-5,
+                "Q i={} scalar={} simd={}",
+                i,
+                y_q_scalar,
+                y_q_simd
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_rrc_filter_simd_block_into_chunk_and_empty_boundaries() {
+        let config = test_config();
+        let mut scalar = IqRrcFilter::from_config(&config);
+        let mut simd = IqRrcFilter::from_config(&config);
+
+        let input_i: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.68 * (2.0 * std::f32::consts::PI * 1200.0 * t).sin()
+                    + 0.22 * (2.0 * std::f32::consts::PI * 2800.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.57 * (2.0 * std::f32::consts::PI * 900.0 * t).cos()
+                    + 0.31 * (2.0 * std::f32::consts::PI * 2300.0 * t).sin()
+            })
+            .collect();
+
+        let mut out_i_scalar = Vec::new();
+        let mut out_q_scalar = Vec::new();
+        let mut out_i_simd = Vec::new();
+        let mut out_q_simd = Vec::new();
+
+        // 空入力
+        scalar.process_block_into(&[], &[], &mut out_i_scalar, &mut out_q_scalar);
+        simd.process_block_into(&[], &[], &mut out_i_simd, &mut out_q_simd);
+        assert!(out_i_scalar.is_empty());
+        assert!(out_q_scalar.is_empty());
+        assert!(out_i_simd.is_empty());
+        assert!(out_q_simd.is_empty());
+
+        let mut pos = 0usize;
+        for &chunk_len in &[1usize, 2, 17, 33, 5, 257, 19, 1024, 11, 2048] {
+            if pos >= input_i.len() {
+                break;
+            }
+            let end = (pos + chunk_len).min(input_i.len());
+            let mut tmp_i_scalar = Vec::new();
+            let mut tmp_q_scalar = Vec::new();
+            let mut tmp_i_simd = Vec::new();
+            let mut tmp_q_simd = Vec::new();
+            scalar.process_block_into(
+                &input_i[pos..end],
+                &input_q[pos..end],
+                &mut tmp_i_scalar,
+                &mut tmp_q_scalar,
+            );
+            simd.process_block_into(
+                &input_i[pos..end],
+                &input_q[pos..end],
+                &mut tmp_i_simd,
+                &mut tmp_q_simd,
+            );
+            out_i_scalar.extend(tmp_i_scalar);
+            out_q_scalar.extend(tmp_q_scalar);
+            out_i_simd.extend(tmp_i_simd);
+            out_q_simd.extend(tmp_q_simd);
+            pos = end;
+        }
+        if pos < input_i.len() {
+            let mut tmp_i_scalar = Vec::new();
+            let mut tmp_q_scalar = Vec::new();
+            let mut tmp_i_simd = Vec::new();
+            let mut tmp_q_simd = Vec::new();
+            scalar.process_block_into(
+                &input_i[pos..],
+                &input_q[pos..],
+                &mut tmp_i_scalar,
+                &mut tmp_q_scalar,
+            );
+            simd.process_block_into(
+                &input_i[pos..],
+                &input_q[pos..],
+                &mut tmp_i_simd,
+                &mut tmp_q_simd,
+            );
+            out_i_scalar.extend(tmp_i_scalar);
+            out_q_scalar.extend(tmp_q_scalar);
+            out_i_simd.extend(tmp_i_simd);
+            out_q_simd.extend(tmp_q_simd);
+        }
+
+        assert_eq!(out_i_scalar.len(), out_i_simd.len());
+        assert_eq!(out_q_scalar.len(), out_q_simd.len());
+        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "I idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
+        }
+        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Q idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_rrc_filter_simd_in_place_chunk_and_empty_boundaries() {
+        let config = test_config();
+        let mut scalar = IqRrcFilter::from_config(&config);
+        let mut simd = IqRrcFilter::from_config(&config);
+
+        let input_i: Vec<f32> = (0..3000)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.63 * (2.0 * std::f32::consts::PI * 1300.0 * t).sin()
+                    + 0.27 * (2.0 * std::f32::consts::PI * 2600.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..3000)
+            .map(|i| {
+                let t = i as f32 / config.proc_sample_rate();
+                0.59 * (2.0 * std::f32::consts::PI * 1000.0 * t).cos()
+                    + 0.29 * (2.0 * std::f32::consts::PI * 2200.0 * t).sin()
+            })
+            .collect();
+
+        // 空入力
+        let mut empty_i: [f32; 0] = [];
+        let mut empty_q: [f32; 0] = [];
+        scalar.process_block_in_place(&mut empty_i, &mut empty_q);
+        simd.process_block_in_place(&mut empty_i, &mut empty_q);
+
+        let mut out_i_scalar = Vec::new();
+        let mut out_q_scalar = Vec::new();
+        let mut out_i_simd = Vec::new();
+        let mut out_q_simd = Vec::new();
+        let mut pos = 0usize;
+        for &chunk_len in &[1usize, 7, 29, 3, 101, 5, 511, 13, 2048] {
+            if pos >= input_i.len() {
+                break;
+            }
+            let end = (pos + chunk_len).min(input_i.len());
+
+            let mut chunk_i_scalar = input_i[pos..end].to_vec();
+            let mut chunk_q_scalar = input_q[pos..end].to_vec();
+            scalar.process_block_in_place(&mut chunk_i_scalar, &mut chunk_q_scalar);
+            out_i_scalar.extend(chunk_i_scalar);
+            out_q_scalar.extend(chunk_q_scalar);
+
+            let mut chunk_i_simd = input_i[pos..end].to_vec();
+            let mut chunk_q_simd = input_q[pos..end].to_vec();
+            simd.process_block_in_place(&mut chunk_i_simd, &mut chunk_q_simd);
+            out_i_simd.extend(chunk_i_simd);
+            out_q_simd.extend(chunk_q_simd);
+            pos = end;
+        }
+        if pos < input_i.len() {
+            let mut chunk_i_scalar = input_i[pos..].to_vec();
+            let mut chunk_q_scalar = input_q[pos..].to_vec();
+            scalar.process_block_in_place(&mut chunk_i_scalar, &mut chunk_q_scalar);
+            out_i_scalar.extend(chunk_i_scalar);
+            out_q_scalar.extend(chunk_q_scalar);
+
+            let mut chunk_i_simd = input_i[pos..].to_vec();
+            let mut chunk_q_simd = input_q[pos..].to_vec();
+            simd.process_block_in_place(&mut chunk_i_simd, &mut chunk_q_simd);
+            out_i_simd.extend(chunk_i_simd);
+            out_q_simd.extend(chunk_q_simd);
+        }
+
+        assert_eq!(out_i_scalar.len(), out_i_simd.len());
+        assert_eq!(out_q_scalar.len(), out_q_simd.len());
+        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "I idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
+        }
+        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Q idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
             );
         }
     }

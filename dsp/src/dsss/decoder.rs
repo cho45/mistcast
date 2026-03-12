@@ -8,7 +8,7 @@ use crate::{
     coding::interleaver::BlockInterleaver,
     common::nco::Nco,
     common::resample::IqResampler,
-    common::rrc_filter::RrcFilter,
+    common::rrc_filter::IqRrcFilter,
     dsss::params as dsss_params,
     dsss::sync::{SyncDetector, SyncResult},
     frame::packet::{Packet, PacketParseError, PACKET_BYTES},
@@ -65,8 +65,7 @@ pub type LlrCallback = Box<dyn Fn(&[f32]) + Send + Sync>;
 pub struct Decoder {
     pub config: DspConfig,
     iq_resampler: IqResampler,
-    rrc_filter_i: RrcFilter,
-    rrc_filter_q: RrcFilter,
+    iq_rrc_filter: IqRrcFilter,
     sample_buffer_i: Vec<f32>,
     sample_buffer_q: Vec<f32>,
     sample_buffer_start: usize,
@@ -229,8 +228,7 @@ impl Decoder {
                 cutoff,
                 Some(dsp_config.rx_resampler_taps),
             ),
-            rrc_filter_i: RrcFilter::from_config(&dsp_config),
-            rrc_filter_q: RrcFilter::from_config(&dsp_config),
+            iq_rrc_filter: IqRrcFilter::from_config(&dsp_config),
             sample_buffer_i: Vec::new(),
             sample_buffer_q: Vec::new(),
             sample_buffer_start: 0,
@@ -301,9 +299,9 @@ impl Decoder {
         self.iq_resampler
             .process_pair(&i_mixed, &q_mixed, &mut i_resampled, &mut q_resampled);
 
-        // 3. マッチドフィルタリング (at fs_proc)
-        self.rrc_filter_i.process_block_in_place(&mut i_resampled);
-        self.rrc_filter_q.process_block_in_place(&mut q_resampled);
+        // 3. マッチドフィルタリング (at fs_proc, I/Q同時処理)
+        self.iq_rrc_filter
+            .process_block_in_place(&mut i_resampled, &mut q_resampled);
 
         // 4. 処理用バッファへ追加
         self.sample_buffer_i.extend_from_slice(&i_resampled);
@@ -958,8 +956,7 @@ impl Decoder {
             Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
             Some(self.config.rx_resampler_taps),
         );
-        self.rrc_filter_i.reset();
-        self.rrc_filter_q.reset();
+        self.iq_rrc_filter.reset();
         self.sample_buffer_i.clear();
         self.sample_buffer_q.clear();
         self.sample_buffer_start = 0;
@@ -1514,8 +1511,14 @@ mod tests {
             .iq_resampler
             .process_pair(&i_mixed, &q_mixed, &mut i_resampled, &mut q_resampled);
 
-        let i_filtered = decoder.rrc_filter_i.process_block(&i_resampled);
-        let q_filtered = decoder.rrc_filter_q.process_block(&q_resampled);
+        let mut i_filtered = Vec::new();
+        let mut q_filtered = Vec::new();
+        decoder.iq_rrc_filter.process_block_into(
+            &i_resampled,
+            &q_resampled,
+            &mut i_filtered,
+            &mut q_filtered,
+        );
         decoder.sample_buffer_i.extend_from_slice(&i_filtered);
         decoder.sample_buffer_q.extend_from_slice(&q_filtered);
     }
