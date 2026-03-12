@@ -67,7 +67,7 @@ describe('Reproduction: 10/10 Verification', () => {
             const frame = encoder.pull_frame();
             if (!frame) break;
 
-            // systematic seq 5..9 に相当するフレームを意図的にドロップ。
+            // seq 5..9 に相当するフレームを意図的にドロップ。
             if (i >= 5 && i <= 9) {
                 const silence = encoder.modulate_silence(4800);
                 decoder.process_samples(silence);
@@ -104,9 +104,10 @@ describe('Reproduction: 10/10 Verification', () => {
         expect(recovered?.slice(0, data.length)).toEqual(data);
     });
 
-    it('should recover for k=2 even when both systematic packets are missed', async () => {
-        const text = "Hello Acoustic World!"; // 21 bytes -> k=2
-        const data = new TextEncoder().encode(text);
+    it('should recover for k=2 even when first two packets are missed', async () => {
+        // PAYLOAD_SIZE=24 のため、25 bytes で k=2 を強制する。
+        const data = new Uint8Array(25);
+        for (let i = 0; i < data.length; i++) data[i] = 65 + (i % 26);
 
         const sampleRate = 48000;
         const encoder = new WasmDsssEncoder(sampleRate, 1);
@@ -122,7 +123,7 @@ describe('Reproduction: 10/10 Verification', () => {
             const frame = encoder.pull_frame();
             if (!frame) break;
 
-            // seq=0,1 (systematic) を意図的に欠落させる。
+            // seq=0,1 の先頭2パケットを意図的に欠落させる。
             if (i < 2) continue;
 
             const signal = new Float32Array(frame.length + 4800);
@@ -141,7 +142,7 @@ describe('Reproduction: 10/10 Verification', () => {
 
         expect(last).not.toBeNull();
         expect(last!.needed_packets).toBe(2);
-        expect(complete, "k=2 で systematic 全欠落でも完了すべき").toBe(true);
+        expect(complete, "k=2 で先頭2パケット欠落でも完了すべき").toBe(true);
         expect(Math.max(...seenRanks), "rank=2 まで到達するはず").toBe(2);
     });
 
