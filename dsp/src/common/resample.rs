@@ -1,5 +1,5 @@
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-use std::arch::wasm32::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_mul};
+use std::arch::wasm32::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_mul, v128, v128_load};
 
 #[derive(Clone, Copy)]
 #[cfg_attr(
@@ -97,14 +97,28 @@ impl Resampler {
         let input = &self.history[start..start + coeffs.len()];
         let mut sum4 = f32x4(0.0, 0.0, 0.0, 0.0);
         let mut tap = 0usize;
-        while tap + 4 <= coeffs.len() {
-            let x = f32x4(input[tap], input[tap + 1], input[tap + 2], input[tap + 3]);
-            let h = f32x4(
-                coeffs[tap],
-                coeffs[tap + 1],
-                coeffs[tap + 2],
-                coeffs[tap + 3],
-            );
+        let input_ptr = input.as_ptr();
+        let coeff_ptr = coeffs.as_ptr();
+        let taps = coeffs.len();
+
+        while tap + 8 <= taps {
+            // SAFETY: `tap + 8 <= taps` を満たす間だけ進めるため、
+            // `input_ptr.add(tap..tap+8)` と `coeff_ptr.add(tap..tap+8)` は
+            // どちらも有効な `f32` 連続領域内にあり、`v128_load` 可能。
+            let x0 = unsafe { v128_load(input_ptr.add(tap) as *const v128) };
+            let h0 = unsafe { v128_load(coeff_ptr.add(tap) as *const v128) };
+            let x1 = unsafe { v128_load(input_ptr.add(tap + 4) as *const v128) };
+            let h1 = unsafe { v128_load(coeff_ptr.add(tap + 4) as *const v128) };
+            sum4 = f32x4_add(sum4, f32x4_mul(x0, h0));
+            sum4 = f32x4_add(sum4, f32x4_mul(x1, h1));
+            tap += 8;
+        }
+
+        while tap + 4 <= taps {
+            // SAFETY: `tap + 4 <= taps` の条件下でのみ読み込むため、
+            // `input_ptr.add(tap..tap+4)` と `coeff_ptr.add(tap..tap+4)` は有効範囲内。
+            let x = unsafe { v128_load(input_ptr.add(tap) as *const v128) };
+            let h = unsafe { v128_load(coeff_ptr.add(tap) as *const v128) };
             sum4 = f32x4_add(sum4, f32x4_mul(x, h));
             tap += 4;
         }
@@ -129,7 +143,8 @@ impl Resampler {
                 || remaining < self.taps_per_phase + 8);
 
         if should_compact {
-            self.history.drain(0..self.history_start);
+            self.history.copy_within(self.history_start.., 0);
+            self.history.truncate(remaining);
             self.history_start = 0;
         }
     }
@@ -245,14 +260,12 @@ impl Resampler {
             output.reserve(est.saturating_add(1));
         }
 
+        let num_phases_f64 = self.num_phases as f64;
         while self.phase < limit {
             let base = self.phase.floor() as usize;
             let frac = self.phase - base as f64;
 
-            let mut phase_idx = (frac * self.num_phases as f64).floor() as usize;
-            if phase_idx >= self.num_phases {
-                phase_idx = self.num_phases - 1;
-            }
+            let phase_idx = ((frac * num_phases_f64) as usize).min(self.num_phases - 1);
 
             let coeffs = self.phase_coeffs(phase_idx);
 
@@ -308,8 +321,8 @@ impl Resampler {
 
         // history の中にある有効なサンプルをすべて窓に通すために、必要な分のゼロを追加
         let padding_len = self.taps_per_phase - 1;
-        let padding = vec![0.0f32; padding_len];
-        self.process_with_backend(&padding, output, backend);
+        let padding = [0.0f32; Self::MAX_TAPS_PER_PHASE - 1];
+        self.process_with_backend(&padding[..padding_len], output, backend);
 
         // 状態リセット
         self.history = vec![0.0; self.taps_per_phase - 1];
@@ -947,6 +960,85 @@ mod tests {
                     b
                 );
             }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_resampler_simd_tap_remainder_paths_after_unroll8() {
+        // taps=21 (mod8=5), taps=23 (mod8=7) で
+        // 8要素ループ -> 4要素ループ -> 端数ループ の全経路を通す。
+        for &taps in &[21usize, 23usize] {
+            let mut scalar = Resampler::new_with_cutoff(50_000, 48_000, Some(19_000.0), Some(taps));
+            let mut simd = Resampler::new_with_cutoff(50_000, 48_000, Some(19_000.0), Some(taps));
+
+            let input: Vec<f32> = (0..7000)
+                .map(|i| {
+                    let t = i as f32 / 50_000.0;
+                    0.65 * (2.0 * PI * 1400.0 * t).sin()
+                        + 0.25 * (2.0 * PI * 5200.0 * t).cos()
+                        + 0.10 * (2.0 * PI * 9100.0 * t).sin()
+                })
+                .collect();
+
+            let mut out_scalar = Vec::new();
+            let mut out_simd = Vec::new();
+            for chunk in input.chunks(211) {
+                scalar.process_with_backend(chunk, &mut out_scalar, ResampleBackend::Scalar);
+                simd.process_with_backend(chunk, &mut out_simd, ResampleBackend::Simd);
+            }
+            scalar.flush_with_backend(&mut out_scalar, ResampleBackend::Scalar);
+            simd.flush_with_backend(&mut out_simd, ResampleBackend::Simd);
+
+            assert_eq!(out_scalar.len(), out_simd.len(), "taps={}", taps);
+            for (idx, (&a, &b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "taps={} idx={} scalar={} simd={}",
+                    taps,
+                    idx,
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_resampler_simd_matches_scalar_with_repeated_history_compaction() {
+        // 50k -> 48k は毎回ほぼ全入力を消費し、history compaction が起きやすい。
+        let mut scalar = Resampler::new_with_cutoff(50_000, 48_000, Some(20_000.0), Some(73));
+        let mut simd = Resampler::new_with_cutoff(50_000, 48_000, Some(20_000.0), Some(73));
+
+        let mut out_scalar = Vec::new();
+        let mut out_simd = Vec::new();
+
+        let mut sample_index = 0usize;
+        for round in 0..4 {
+            let segment: Vec<f32> = (0..20_000)
+                .map(|k| {
+                    let i = sample_index + k;
+                    let t = i as f32 / 50_000.0;
+                    0.8 * (2.0 * PI * 1700.0 * t).sin() + 0.2 * (2.0 * PI * 6200.0 * t).cos()
+                })
+                .collect();
+            sample_index += segment.len();
+
+            scalar.process_with_backend(&segment, &mut out_scalar, ResampleBackend::Scalar);
+            simd.process_with_backend(&segment, &mut out_simd, ResampleBackend::Simd);
+
+            // compaction後は先頭消費オフセットがリセットされること。
+            assert_eq!(scalar.history_start, 0, "round={} scalar", round);
+            assert_eq!(simd.history_start, 0, "round={} simd", round);
+        }
+
+        scalar.flush_with_backend(&mut out_scalar, ResampleBackend::Scalar);
+        simd.flush_with_backend(&mut out_simd, ResampleBackend::Simd);
+
+        assert_eq!(out_scalar.len(), out_simd.len());
+        for (idx, (&a, &b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "idx={} scalar={} simd={}", idx, a, b);
         }
     }
 
