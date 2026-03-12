@@ -1,13 +1,16 @@
-//! CRC-16 (Koopman最適多項式, <=241bitでHD=5)
+//! CRC 実装（CRC-16 / CRC-24）
 //!
-//! 多項式: x^16 + x^14 + x^12 + x^11 + x^8 + x^5 + x^4 + x^2 + 1 (0x5935)
-//! 初期値: 0xFFFF
+//! - CRC-16: poly=0x5935, init=0xFFFF
+//! - CRC-24: poly=0x1101DCD, init=0xB704CE
 //!
-//! パケットの完全性確認に使用する。
+//! CRC-24 多項式は、Mistcast の固定パケット長（保護対象 27B=216bit）を主眼に
+//! 短尺領域での誤り検出距離を優先して選定している。
 
 const POLY: u16 = 0x5935;
 const INIT: u16 = 0xFFFF;
-const POLY24: u32 = 0x864CFB;
+// CRC-24 polynomial (full form: 0x1101DCD)
+// 27B(216bit)前後の固定長パケットでの検出性能を重視して採用。
+const POLY24: u32 = 0x101DCD;
 const INIT24: u32 = 0xB704CE;
 
 /// CRC-16テーブル (コンパイル時生成)
@@ -63,7 +66,7 @@ pub fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// データ列のCRC-24を計算する (OpenPGP互換: poly=0x864CFB, init=0xB704CE)
+/// データ列のCRC-24を計算する (poly=0x1101DCD, init=0xB704CE)
 pub fn crc24(data: &[u8]) -> u32 {
     let mut crc = INIT24;
     for &byte in data {
@@ -133,7 +136,6 @@ mod tests {
     #[test]
     fn test_crc24_known_vector() {
         let data = b"123456789";
-        // CRC-24/OpenPGP の既知値
-        assert_eq!(crc24(data), 0x21CF02);
+        assert_eq!(crc24(data), 0xEAE922);
     }
 }
