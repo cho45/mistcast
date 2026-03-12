@@ -342,6 +342,265 @@ impl Resampler {
     }
 }
 
+/// I/Q の2チャネルを同一位相で同時リサンプルするためのリサンプラ。
+///
+/// 位相計算と係数参照をI/Qで共有することで、2本の `Resampler` を個別に
+/// 回す場合に比べてオーバーヘッドを削減する。
+pub struct IqResampler {
+    pub source_rate: u32,
+    pub target_rate: u32,
+    step: f64,
+    phase: f64,
+    num_phases: usize,
+    taps_per_phase: usize,
+    coeffs: Vec<f32>,
+    history_i: Vec<f32>,
+    history_q: Vec<f32>,
+    history_start: usize,
+}
+
+impl IqResampler {
+    #[inline]
+    fn phase_coeffs(&self, phase: usize) -> &[f32] {
+        let start = phase * self.taps_per_phase;
+        &self.coeffs[start..start + self.taps_per_phase]
+    }
+
+    #[inline]
+    fn convolve_scalar_pair(&self, base: usize, coeffs: &[f32]) -> (f32, f32) {
+        let start = self.history_start + base;
+        let input_i = &self.history_i[start..start + coeffs.len()];
+        let input_q = &self.history_q[start..start + coeffs.len()];
+        let mut sum_i = 0.0f32;
+        let mut sum_q = 0.0f32;
+        for ((&xi, &xq), &h) in input_i.iter().zip(input_q.iter()).zip(coeffs.iter()) {
+            sum_i += xi * h;
+            sum_q += xq * h;
+        }
+        (sum_i, sum_q)
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline]
+    fn convolve_simd_pair(&self, base: usize, coeffs: &[f32]) -> (f32, f32) {
+        let start = self.history_start + base;
+        let input_i = &self.history_i[start..start + coeffs.len()];
+        let input_q = &self.history_q[start..start + coeffs.len()];
+        let mut sum4_i = f32x4(0.0, 0.0, 0.0, 0.0);
+        let mut sum4_q = f32x4(0.0, 0.0, 0.0, 0.0);
+        let mut tap = 0usize;
+        let input_i_ptr = input_i.as_ptr();
+        let input_q_ptr = input_q.as_ptr();
+        let coeff_ptr = coeffs.as_ptr();
+        let taps = coeffs.len();
+
+        while tap + 8 <= taps {
+            // SAFETY: `tap + 8 <= taps` の範囲でのみ進むため、
+            // 各 `add` は `f32` 有効領域内を指す。
+            let xi0 = unsafe { v128_load(input_i_ptr.add(tap) as *const v128) };
+            let xi1 = unsafe { v128_load(input_i_ptr.add(tap + 4) as *const v128) };
+            let xq0 = unsafe { v128_load(input_q_ptr.add(tap) as *const v128) };
+            let xq1 = unsafe { v128_load(input_q_ptr.add(tap + 4) as *const v128) };
+            let h0 = unsafe { v128_load(coeff_ptr.add(tap) as *const v128) };
+            let h1 = unsafe { v128_load(coeff_ptr.add(tap + 4) as *const v128) };
+            sum4_i = f32x4_add(sum4_i, f32x4_mul(xi0, h0));
+            sum4_i = f32x4_add(sum4_i, f32x4_mul(xi1, h1));
+            sum4_q = f32x4_add(sum4_q, f32x4_mul(xq0, h0));
+            sum4_q = f32x4_add(sum4_q, f32x4_mul(xq1, h1));
+            tap += 8;
+        }
+
+        while tap + 4 <= taps {
+            // SAFETY: `tap + 4 <= taps` の条件下でのみ読み込むため、
+            // 各 `add` は `f32` 有効領域内を指す。
+            let xi = unsafe { v128_load(input_i_ptr.add(tap) as *const v128) };
+            let xq = unsafe { v128_load(input_q_ptr.add(tap) as *const v128) };
+            let h = unsafe { v128_load(coeff_ptr.add(tap) as *const v128) };
+            sum4_i = f32x4_add(sum4_i, f32x4_mul(xi, h));
+            sum4_q = f32x4_add(sum4_q, f32x4_mul(xq, h));
+            tap += 4;
+        }
+
+        let mut sum_i = Resampler::hsum4(sum4_i);
+        let mut sum_q = Resampler::hsum4(sum4_q);
+        for (i, &h) in coeffs[tap..].iter().enumerate() {
+            sum_i += input_i[tap + i] * h;
+            sum_q += input_q[tap + i] * h;
+        }
+        (sum_i, sum_q)
+    }
+
+    #[inline]
+    fn maybe_compact_history(&mut self) {
+        if self.history_start == 0 {
+            return;
+        }
+
+        let remaining = self.history_i.len().saturating_sub(self.history_start);
+        let should_compact = self.history_start >= self.taps_per_phase * 2
+            && (self.history_start * 2 >= self.history_i.len()
+                || self.history_start >= 16_384
+                || remaining < self.taps_per_phase + 8);
+
+        if should_compact {
+            self.history_i.copy_within(self.history_start.., 0);
+            self.history_q.copy_within(self.history_start.., 0);
+            self.history_i.truncate(remaining);
+            self.history_q.truncate(remaining);
+            self.history_start = 0;
+        }
+    }
+
+    pub fn new_with_cutoff(
+        source_rate: u32,
+        target_rate: u32,
+        cutoff_hz: Option<f32>,
+        taps_per_phase: Option<usize>,
+    ) -> Self {
+        let base = Resampler::new_with_cutoff(source_rate, target_rate, cutoff_hz, taps_per_phase);
+        let taps = base.taps_per_phase;
+        Self {
+            source_rate: base.source_rate,
+            target_rate: base.target_rate,
+            step: base.step,
+            phase: base.phase,
+            num_phases: base.num_phases,
+            taps_per_phase: taps,
+            coeffs: base.coeffs,
+            history_i: vec![0.0; taps - 1],
+            history_q: vec![0.0; taps - 1],
+            history_start: 0,
+        }
+    }
+
+    fn process_pair_with_backend(
+        &mut self,
+        input_i: &[f32],
+        input_q: &[f32],
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+        backend: ResampleBackend,
+    ) {
+        assert_eq!(input_i.len(), input_q.len(), "I/Q input length must match");
+        if input_i.is_empty() {
+            return;
+        }
+
+        self.history_i.extend_from_slice(input_i);
+        self.history_q.extend_from_slice(input_q);
+
+        let available = self.history_i.len().saturating_sub(self.history_start);
+        if available < self.taps_per_phase {
+            return;
+        }
+
+        let limit = (available as isize - self.taps_per_phase as isize + 1).max(0) as f64;
+        if self.phase < limit {
+            let est = ((limit - self.phase) / self.step).ceil().max(0.0) as usize;
+            let reserve = est.saturating_add(1);
+            output_i.reserve(reserve);
+            output_q.reserve(reserve);
+        }
+
+        let num_phases_f64 = self.num_phases as f64;
+        while self.phase < limit {
+            let base = self.phase.floor() as usize;
+            let frac = self.phase - base as f64;
+            let phase_idx = ((frac * num_phases_f64) as usize).min(self.num_phases - 1);
+            let coeffs = self.phase_coeffs(phase_idx);
+
+            let (sum_i, sum_q) = match backend {
+                ResampleBackend::Scalar => self.convolve_scalar_pair(base, coeffs),
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                ResampleBackend::Simd => self.convolve_simd_pair(base, coeffs),
+            };
+
+            output_i.push(sum_i);
+            output_q.push(sum_q);
+            self.phase += self.step;
+        }
+
+        let consumed = self.phase.floor() as usize;
+        if consumed > 0 {
+            self.history_start = (self.history_start + consumed).min(self.history_i.len());
+            self.phase -= consumed as f64;
+            self.maybe_compact_history();
+        }
+
+        if self.phase < 0.0 {
+            self.phase = 0.0;
+        }
+    }
+
+    pub fn process_pair(
+        &mut self,
+        input_i: &[f32],
+        input_q: &[f32],
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+    ) {
+        self.process_pair_with_backend(
+            input_i,
+            input_q,
+            output_i,
+            output_q,
+            Resampler::default_backend(),
+        );
+    }
+
+    fn flush_pair_with_backend(
+        &mut self,
+        output_i: &mut Vec<f32>,
+        output_q: &mut Vec<f32>,
+        backend: ResampleBackend,
+    ) {
+        if self.history_i.len().saturating_sub(self.history_start) == 0 {
+            return;
+        }
+        let padding_len = self.taps_per_phase - 1;
+        let padding = [0.0f32; Resampler::MAX_TAPS_PER_PHASE - 1];
+        self.process_pair_with_backend(
+            &padding[..padding_len],
+            &padding[..padding_len],
+            output_i,
+            output_q,
+            backend,
+        );
+
+        self.history_i = vec![0.0; self.taps_per_phase - 1];
+        self.history_q = vec![0.0; self.taps_per_phase - 1];
+        self.history_start = 0;
+        self.phase = 0.0;
+    }
+
+    pub fn flush_pair(&mut self, output_i: &mut Vec<f32>, output_q: &mut Vec<f32>) {
+        self.flush_pair_with_backend(output_i, output_q, Resampler::default_backend());
+    }
+
+    pub fn reset(&mut self) {
+        self.history_i = vec![0.0; self.taps_per_phase - 1];
+        self.history_q = vec![0.0; self.taps_per_phase - 1];
+        self.history_start = 0;
+        self.phase = 0.0;
+    }
+
+    pub fn reconfigure(
+        &mut self,
+        source_rate: u32,
+        target_rate: u32,
+        cutoff_hz: Option<f32>,
+        taps_per_phase: Option<usize>,
+    ) {
+        *self = Self::new_with_cutoff(source_rate, target_rate, cutoff_hz, taps_per_phase);
+    }
+
+    pub fn delay(&self) -> usize {
+        let center = (self.taps_per_phase as f64 - 1.0) / 2.0;
+        let ratio = self.target_rate as f64 / self.source_rate as f64;
+        (center * ratio).ceil() as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +1122,188 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_iq_resampler_matches_two_mono_resamplers_whole_input() {
+        let source_rate = 50_000u32;
+        let target_rate = 48_000u32;
+        let taps = Some(73usize);
+        let cutoff = Some(20_000.0f32);
+        let input_i: Vec<f32> = (0..6000)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                0.8 * (2.0 * PI * 1100.0 * t).sin() + 0.2 * (2.0 * PI * 5100.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..6000)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                0.7 * (2.0 * PI * 900.0 * t).cos() + 0.3 * (2.0 * PI * 4600.0 * t).sin()
+            })
+            .collect();
+
+        let mut rs_i = Resampler::new_with_cutoff(source_rate, target_rate, cutoff, taps);
+        let mut rs_q = Resampler::new_with_cutoff(source_rate, target_rate, cutoff, taps);
+        let mut iq = IqResampler::new_with_cutoff(source_rate, target_rate, cutoff, taps);
+
+        let mut out_i_ref = Vec::new();
+        let mut out_q_ref = Vec::new();
+        rs_i.process(&input_i, &mut out_i_ref);
+        rs_q.process(&input_q, &mut out_q_ref);
+        rs_i.flush(&mut out_i_ref);
+        rs_q.flush(&mut out_q_ref);
+
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        iq.process_pair(&input_i, &input_q, &mut out_i, &mut out_q);
+        iq.flush_pair(&mut out_i, &mut out_q);
+
+        assert_eq!(out_i_ref.len(), out_i.len());
+        assert_eq!(out_q_ref.len(), out_q.len());
+        for (idx, (&a, &b)) in out_i_ref.iter().zip(out_i.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "I idx={} ref={} got={}", idx, a, b);
+        }
+        for (idx, (&a, &b)) in out_q_ref.iter().zip(out_q.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "Q idx={} ref={} got={}", idx, a, b);
+        }
+    }
+
+    #[test]
+    fn test_iq_resampler_matches_two_mono_resamplers_chunked_input() {
+        let source_rate = 44_100u32;
+        let target_rate = 48_000u32;
+        let cutoff = Some(18_000.0f32);
+        let input_i: Vec<f32> = (0..9000)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                0.85 * (2.0 * PI * 1300.0 * t).sin() + 0.15 * (2.0 * PI * 6200.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..9000)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                0.6 * (2.0 * PI * 1700.0 * t).cos() + 0.4 * (2.0 * PI * 7300.0 * t).sin()
+            })
+            .collect();
+
+        let mut rs_i = Resampler::new_with_cutoff(source_rate, target_rate, cutoff, None);
+        let mut rs_q = Resampler::new_with_cutoff(source_rate, target_rate, cutoff, None);
+        let mut iq = IqResampler::new_with_cutoff(source_rate, target_rate, cutoff, None);
+
+        let mut out_i_ref = Vec::new();
+        let mut out_q_ref = Vec::new();
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        let mut pos = 0usize;
+        for &chunk_len in &[1usize, 31, 127, 521, 2048, 13, 4096, 263] {
+            if pos >= input_i.len() {
+                break;
+            }
+            let end = (pos + chunk_len).min(input_i.len());
+            rs_i.process(&input_i[pos..end], &mut out_i_ref);
+            rs_q.process(&input_q[pos..end], &mut out_q_ref);
+            iq.process_pair(
+                &input_i[pos..end],
+                &input_q[pos..end],
+                &mut out_i,
+                &mut out_q,
+            );
+            pos = end;
+        }
+        if pos < input_i.len() {
+            rs_i.process(&input_i[pos..], &mut out_i_ref);
+            rs_q.process(&input_q[pos..], &mut out_q_ref);
+            iq.process_pair(&input_i[pos..], &input_q[pos..], &mut out_i, &mut out_q);
+        }
+
+        rs_i.flush(&mut out_i_ref);
+        rs_q.flush(&mut out_q_ref);
+        iq.flush_pair(&mut out_i, &mut out_q);
+
+        assert_eq!(out_i_ref.len(), out_i.len());
+        assert_eq!(out_q_ref.len(), out_q.len());
+        for (idx, (&a, &b)) in out_i_ref.iter().zip(out_i.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "I idx={} ref={} got={}", idx, a, b);
+        }
+        for (idx, (&a, &b)) in out_q_ref.iter().zip(out_q.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "Q idx={} ref={} got={}", idx, a, b);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "I/Q input length must match")]
+    fn test_iq_resampler_panics_on_mismatched_input_lengths() {
+        let mut iq = IqResampler::new_with_cutoff(48_000, 24_000, Some(10_000.0), Some(73));
+        let input_i = [0.0f32; 8];
+        let input_q = [0.0f32; 7];
+        let mut out_i = Vec::new();
+        let mut out_q = Vec::new();
+        iq.process_pair(&input_i, &input_q, &mut out_i, &mut out_q);
+    }
+
+    #[test]
+    fn test_iq_resampler_reset_restarts_state_equivalent_to_fresh_instance() {
+        let source_rate = 50_000u32;
+        let target_rate = 48_000u32;
+        let taps = Some(73usize);
+        let cutoff = Some(20_000.0f32);
+        let input_i: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                0.8 * (2.0 * PI * 1200.0 * t).sin() + 0.2 * (2.0 * PI * 5400.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..4096)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                0.7 * (2.0 * PI * 900.0 * t).cos() + 0.3 * (2.0 * PI * 4600.0 * t).sin()
+            })
+            .collect();
+
+        let mut under_test = IqResampler::new_with_cutoff(source_rate, target_rate, cutoff, taps);
+        let mut fresh = IqResampler::new_with_cutoff(source_rate, target_rate, cutoff, taps);
+
+        let mut out_i_reset = Vec::new();
+        let mut out_q_reset = Vec::new();
+        under_test.process_pair(
+            &input_i[..512],
+            &input_q[..512],
+            &mut out_i_reset,
+            &mut out_q_reset,
+        );
+        under_test.reset();
+        out_i_reset.clear();
+        out_q_reset.clear();
+
+        under_test.process_pair(&input_i, &input_q, &mut out_i_reset, &mut out_q_reset);
+        under_test.flush_pair(&mut out_i_reset, &mut out_q_reset);
+
+        let mut out_i_fresh = Vec::new();
+        let mut out_q_fresh = Vec::new();
+        fresh.process_pair(&input_i, &input_q, &mut out_i_fresh, &mut out_q_fresh);
+        fresh.flush_pair(&mut out_i_fresh, &mut out_q_fresh);
+
+        assert_eq!(out_i_reset.len(), out_i_fresh.len());
+        assert_eq!(out_q_reset.len(), out_q_fresh.len());
+        for (idx, (&a, &b)) in out_i_reset.iter().zip(out_i_fresh.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "I idx={} reset={} fresh={}",
+                idx,
+                a,
+                b
+            );
+        }
+        for (idx, (&a, &b)) in out_q_reset.iter().zip(out_q_fresh.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Q idx={} reset={} fresh={}",
+                idx,
+                a,
+                b
+            );
+        }
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[wasm_bindgen_test]
     fn test_resampler_simd_matches_scalar_whole_input() {
@@ -1075,6 +1516,341 @@ mod tests {
         assert_eq!(out_scalar.len(), out_simd.len());
         for (idx, (&a, &b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
             assert!((a - b).abs() < 1e-5, "idx={} scalar={} simd={}", idx, a, b);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_resampler_simd_matches_scalar_chunked() {
+        let mut scalar = IqResampler::new_with_cutoff(50_000, 48_000, Some(20_000.0), Some(73));
+        let mut simd = IqResampler::new_with_cutoff(50_000, 48_000, Some(20_000.0), Some(73));
+
+        let input_i: Vec<f32> = (0..8000)
+            .map(|i| {
+                let t = i as f32 / 50_000.0;
+                0.75 * (2.0 * PI * 1400.0 * t).sin() + 0.25 * (2.0 * PI * 5200.0 * t).cos()
+            })
+            .collect();
+        let input_q: Vec<f32> = (0..8000)
+            .map(|i| {
+                let t = i as f32 / 50_000.0;
+                0.65 * (2.0 * PI * 900.0 * t).cos() + 0.35 * (2.0 * PI * 6800.0 * t).sin()
+            })
+            .collect();
+
+        let mut out_i_scalar = Vec::new();
+        let mut out_q_scalar = Vec::new();
+        let mut out_i_simd = Vec::new();
+        let mut out_q_simd = Vec::new();
+
+        for ((chunk_i, chunk_q), idx) in input_i.chunks(211).zip(input_q.chunks(211)).zip(0usize..)
+        {
+            if idx % 5 == 0 {
+                scalar.process_pair_with_backend(
+                    &[],
+                    &[],
+                    &mut out_i_scalar,
+                    &mut out_q_scalar,
+                    ResampleBackend::Scalar,
+                );
+                simd.process_pair_with_backend(
+                    &[],
+                    &[],
+                    &mut out_i_simd,
+                    &mut out_q_simd,
+                    ResampleBackend::Simd,
+                );
+            }
+            scalar.process_pair_with_backend(
+                chunk_i,
+                chunk_q,
+                &mut out_i_scalar,
+                &mut out_q_scalar,
+                ResampleBackend::Scalar,
+            );
+            simd.process_pair_with_backend(
+                chunk_i,
+                chunk_q,
+                &mut out_i_simd,
+                &mut out_q_simd,
+                ResampleBackend::Simd,
+            );
+        }
+
+        scalar.flush_pair_with_backend(
+            &mut out_i_scalar,
+            &mut out_q_scalar,
+            ResampleBackend::Scalar,
+        );
+        simd.flush_pair_with_backend(&mut out_i_simd, &mut out_q_simd, ResampleBackend::Simd);
+
+        assert_eq!(out_i_scalar.len(), out_i_simd.len());
+        assert_eq!(out_q_scalar.len(), out_q_simd.len());
+        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "I idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
+        }
+        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Q idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_resampler_simd_tap_remainder_boundaries() {
+        // taps=17 (mod4=1), taps=19 (mod4=3) の端数経路を検証
+        for &taps in &[17usize, 19usize] {
+            let mut scalar =
+                IqResampler::new_with_cutoff(48_000, 44_100, Some(17_000.0), Some(taps));
+            let mut simd = IqResampler::new_with_cutoff(48_000, 44_100, Some(17_000.0), Some(taps));
+
+            let input_i: Vec<f32> = (0..5000)
+                .map(|i| {
+                    let t = i as f32 / 48_000.0;
+                    0.7 * (2.0 * PI * 1200.0 * t).sin() + 0.25 * (2.0 * PI * 5100.0 * t).cos()
+                })
+                .collect();
+            let input_q: Vec<f32> = (0..5000)
+                .map(|i| {
+                    let t = i as f32 / 48_000.0;
+                    0.65 * (2.0 * PI * 1700.0 * t).cos() + 0.20 * (2.0 * PI * 3900.0 * t).sin()
+                })
+                .collect();
+
+            let mut out_i_scalar = Vec::new();
+            let mut out_q_scalar = Vec::new();
+            scalar.process_pair_with_backend(
+                &input_i,
+                &input_q,
+                &mut out_i_scalar,
+                &mut out_q_scalar,
+                ResampleBackend::Scalar,
+            );
+            scalar.flush_pair_with_backend(
+                &mut out_i_scalar,
+                &mut out_q_scalar,
+                ResampleBackend::Scalar,
+            );
+
+            let mut out_i_simd = Vec::new();
+            let mut out_q_simd = Vec::new();
+            simd.process_pair_with_backend(
+                &input_i,
+                &input_q,
+                &mut out_i_simd,
+                &mut out_q_simd,
+                ResampleBackend::Simd,
+            );
+            simd.flush_pair_with_backend(&mut out_i_simd, &mut out_q_simd, ResampleBackend::Simd);
+
+            assert_eq!(out_i_scalar.len(), out_i_simd.len(), "I taps={}", taps);
+            assert_eq!(out_q_scalar.len(), out_q_simd.len(), "Q taps={}", taps);
+            for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "I taps={} idx={} scalar={} simd={}",
+                    taps,
+                    idx,
+                    a,
+                    b
+                );
+            }
+            for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "Q taps={} idx={} scalar={} simd={}",
+                    taps,
+                    idx,
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_resampler_simd_tap_remainder_paths_after_unroll8() {
+        // taps=21 (mod8=5), taps=23 (mod8=7) で
+        // 8要素ループ -> 4要素ループ -> 端数ループを検証
+        for &taps in &[21usize, 23usize] {
+            let mut scalar =
+                IqResampler::new_with_cutoff(50_000, 48_000, Some(19_000.0), Some(taps));
+            let mut simd = IqResampler::new_with_cutoff(50_000, 48_000, Some(19_000.0), Some(taps));
+
+            let input_i: Vec<f32> = (0..7000)
+                .map(|i| {
+                    let t = i as f32 / 50_000.0;
+                    0.65 * (2.0 * PI * 1400.0 * t).sin()
+                        + 0.25 * (2.0 * PI * 5200.0 * t).cos()
+                        + 0.10 * (2.0 * PI * 9100.0 * t).sin()
+                })
+                .collect();
+            let input_q: Vec<f32> = (0..7000)
+                .map(|i| {
+                    let t = i as f32 / 50_000.0;
+                    0.55 * (2.0 * PI * 1800.0 * t).cos()
+                        + 0.30 * (2.0 * PI * 4300.0 * t).sin()
+                        + 0.15 * (2.0 * PI * 7600.0 * t).cos()
+                })
+                .collect();
+
+            let mut out_i_scalar = Vec::new();
+            let mut out_q_scalar = Vec::new();
+            let mut out_i_simd = Vec::new();
+            let mut out_q_simd = Vec::new();
+            for ((chunk_i, chunk_q), idx) in
+                input_i.chunks(211).zip(input_q.chunks(211)).zip(0usize..)
+            {
+                if idx % 7 == 0 {
+                    scalar.process_pair_with_backend(
+                        &[],
+                        &[],
+                        &mut out_i_scalar,
+                        &mut out_q_scalar,
+                        ResampleBackend::Scalar,
+                    );
+                    simd.process_pair_with_backend(
+                        &[],
+                        &[],
+                        &mut out_i_simd,
+                        &mut out_q_simd,
+                        ResampleBackend::Simd,
+                    );
+                }
+                scalar.process_pair_with_backend(
+                    chunk_i,
+                    chunk_q,
+                    &mut out_i_scalar,
+                    &mut out_q_scalar,
+                    ResampleBackend::Scalar,
+                );
+                simd.process_pair_with_backend(
+                    chunk_i,
+                    chunk_q,
+                    &mut out_i_simd,
+                    &mut out_q_simd,
+                    ResampleBackend::Simd,
+                );
+            }
+            scalar.flush_pair_with_backend(
+                &mut out_i_scalar,
+                &mut out_q_scalar,
+                ResampleBackend::Scalar,
+            );
+            simd.flush_pair_with_backend(&mut out_i_simd, &mut out_q_simd, ResampleBackend::Simd);
+
+            assert_eq!(out_i_scalar.len(), out_i_simd.len(), "I taps={}", taps);
+            assert_eq!(out_q_scalar.len(), out_q_simd.len(), "Q taps={}", taps);
+            for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "I taps={} idx={} scalar={} simd={}",
+                    taps,
+                    idx,
+                    a,
+                    b
+                );
+            }
+            for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "Q taps={} idx={} scalar={} simd={}",
+                    taps,
+                    idx,
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_iq_resampler_simd_matches_scalar_with_repeated_history_compaction() {
+        // 50k -> 48k で compaction が起きやすい条件を反復
+        let mut scalar = IqResampler::new_with_cutoff(50_000, 48_000, Some(20_000.0), Some(73));
+        let mut simd = IqResampler::new_with_cutoff(50_000, 48_000, Some(20_000.0), Some(73));
+
+        let mut out_i_scalar = Vec::new();
+        let mut out_q_scalar = Vec::new();
+        let mut out_i_simd = Vec::new();
+        let mut out_q_simd = Vec::new();
+
+        let mut sample_index = 0usize;
+        for round in 0..4 {
+            let segment_i: Vec<f32> = (0..20_000)
+                .map(|k| {
+                    let i = sample_index + k;
+                    let t = i as f32 / 50_000.0;
+                    0.8 * (2.0 * PI * 1700.0 * t).sin() + 0.2 * (2.0 * PI * 6200.0 * t).cos()
+                })
+                .collect();
+            let segment_q: Vec<f32> = (0..20_000)
+                .map(|k| {
+                    let i = sample_index + k;
+                    let t = i as f32 / 50_000.0;
+                    0.6 * (2.0 * PI * 1300.0 * t).cos() + 0.3 * (2.0 * PI * 5700.0 * t).sin()
+                })
+                .collect();
+            sample_index += segment_i.len();
+
+            scalar.process_pair_with_backend(
+                &segment_i,
+                &segment_q,
+                &mut out_i_scalar,
+                &mut out_q_scalar,
+                ResampleBackend::Scalar,
+            );
+            simd.process_pair_with_backend(
+                &segment_i,
+                &segment_q,
+                &mut out_i_simd,
+                &mut out_q_simd,
+                ResampleBackend::Simd,
+            );
+
+            assert_eq!(scalar.history_start, 0, "round={} scalar", round);
+            assert_eq!(simd.history_start, 0, "round={} simd", round);
+        }
+
+        scalar.flush_pair_with_backend(
+            &mut out_i_scalar,
+            &mut out_q_scalar,
+            ResampleBackend::Scalar,
+        );
+        simd.flush_pair_with_backend(&mut out_i_simd, &mut out_q_simd, ResampleBackend::Simd);
+
+        assert_eq!(out_i_scalar.len(), out_i_simd.len());
+        assert_eq!(out_q_scalar.len(), out_q_simd.len());
+        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "I idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
+        }
+        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Q idx={} scalar={} simd={}",
+                idx,
+                a,
+                b
+            );
         }
     }
 }

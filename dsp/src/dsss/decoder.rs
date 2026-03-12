@@ -7,7 +7,7 @@ use crate::{
     coding::fountain::{FountainDecoder, FountainParams, ReceiveOutcome},
     coding::interleaver::BlockInterleaver,
     common::nco::Nco,
-    common::resample::Resampler,
+    common::resample::IqResampler,
     common::rrc_filter::RrcFilter,
     dsss::params as dsss_params,
     dsss::sync::{SyncDetector, SyncResult},
@@ -64,8 +64,7 @@ pub type LlrCallback = Box<dyn Fn(&[f32]) + Send + Sync>;
 
 pub struct Decoder {
     pub config: DspConfig,
-    resampler_i: Resampler,
-    resampler_q: Resampler,
+    iq_resampler: IqResampler,
     rrc_filter_i: RrcFilter,
     rrc_filter_q: RrcFilter,
     sample_buffer_i: Vec<f32>,
@@ -224,13 +223,7 @@ impl Decoder {
         fec_workspace.preallocate_for_llr_len(fec_bits, 1);
 
         Decoder {
-            resampler_i: Resampler::new_with_cutoff(
-                dsp_config.sample_rate as u32,
-                proc_sample_rate as u32,
-                cutoff,
-                Some(dsp_config.rx_resampler_taps),
-            ),
-            resampler_q: Resampler::new_with_cutoff(
+            iq_resampler: IqResampler::new_with_cutoff(
                 dsp_config.sample_rate as u32,
                 proc_sample_rate as u32,
                 cutoff,
@@ -305,8 +298,8 @@ impl Decoder {
         let mut q_resampled = std::mem::take(&mut self.resample_buffer_q);
         i_resampled.clear();
         q_resampled.clear();
-        self.resampler_i.process(&i_mixed, &mut i_resampled);
-        self.resampler_q.process(&q_mixed, &mut q_resampled);
+        self.iq_resampler
+            .process_pair(&i_mixed, &q_mixed, &mut i_resampled, &mut q_resampled);
 
         // 3. マッチドフィルタリング (at fs_proc)
         self.rrc_filter_i.process_block_in_place(&mut i_resampled);
@@ -959,13 +952,7 @@ impl Decoder {
 
     pub fn reset(&mut self) {
         self.interleaver.reset();
-        self.resampler_i.reconfigure(
-            self.config.sample_rate as u32,
-            self.config.proc_sample_rate() as u32,
-            Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
-            Some(self.config.rx_resampler_taps),
-        );
-        self.resampler_q.reconfigure(
+        self.iq_resampler.reconfigure(
             self.config.sample_rate as u32,
             self.config.proc_sample_rate() as u32,
             Some(self.config.chip_rate * (1.0 + self.config.rrc_alpha) * 0.5),
@@ -1523,8 +1510,9 @@ mod tests {
 
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
-        decoder.resampler_i.process(&i_mixed, &mut i_resampled);
-        decoder.resampler_q.process(&q_mixed, &mut q_resampled);
+        decoder
+            .iq_resampler
+            .process_pair(&i_mixed, &q_mixed, &mut i_resampled, &mut q_resampled);
 
         let i_filtered = decoder.rrc_filter_i.process_block(&i_resampled);
         let q_filtered = decoder.rrc_filter_q.process_block(&q_resampled);

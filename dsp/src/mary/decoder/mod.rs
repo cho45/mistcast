@@ -1416,14 +1416,12 @@ mod tests {
         // リサンプリング
         let mut i_resampled = Vec::new();
         let mut q_resampled = Vec::new();
-        decoder
-            .pipeline
-            .resampler_i
-            .process(&decoder.pipeline.mix_buffer_i, &mut i_resampled);
-        decoder
-            .pipeline
-            .resampler_q
-            .process(&decoder.pipeline.mix_buffer_q, &mut q_resampled);
+        decoder.pipeline.iq_resampler.process_pair(
+            &decoder.pipeline.mix_buffer_i,
+            &decoder.pipeline.mix_buffer_q,
+            &mut i_resampled,
+            &mut q_resampled,
+        );
 
         // RRCフィルタ（インプレースAPI使用）
         let mut i_filtered = i_resampled.clone();
@@ -1447,7 +1445,7 @@ mod tests {
             // peak_sample_idx は同期語 0 番目の最初のチップの中央
             // 期待値 = (プリアンブル終了点) + (チップ 0 の半分) + (受信側遅延) + (送信側遅延)
             let rx_delay =
-                decoder.pipeline.resampler_i.delay() + decoder.pipeline.rrc_filter_i.delay();
+                decoder.pipeline.iq_resampler.delay() + decoder.pipeline.rrc_filter_i.delay();
             let detector_delay = decoder.sync_detector.filter_delay();
             // 同期位置は「送信側RRC群遅延」ではなく、TX resampler の遅延寄与で整合する。
             let tx_rrc_bw = config.chip_rate * (1.0 + config.rrc_alpha) * 0.5;

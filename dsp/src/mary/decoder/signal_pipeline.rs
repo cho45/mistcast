@@ -5,7 +5,7 @@
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use crate::common::nco::complex_mul_interleaved2_simd;
 use crate::common::nco::Nco;
-use crate::common::resample::Resampler;
+use crate::common::resample::IqResampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::DspConfig;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -13,8 +13,7 @@ use std::arch::wasm32::{f32x4, v128, v128_store};
 
 /// 信号処理パイプライン
 pub struct SignalPipeline {
-    pub resampler_i: Resampler,
-    pub resampler_q: Resampler,
+    pub iq_resampler: IqResampler,
     pub rrc_filter_i: RrcFilter,
     pub rrc_filter_q: RrcFilter,
     pub lo_nco: Nco,
@@ -38,13 +37,7 @@ impl SignalPipeline {
         let cutoff = Some(rrc_bw);
 
         Self {
-            resampler_i: Resampler::new_with_cutoff(
-                config.sample_rate as u32,
-                proc_sample_rate as u32,
-                cutoff,
-                Some(config.rx_resampler_taps),
-            ),
-            resampler_q: Resampler::new_with_cutoff(
+            iq_resampler: IqResampler::new_with_cutoff(
                 config.sample_rate as u32,
                 proc_sample_rate as u32,
                 cutoff,
@@ -152,10 +145,12 @@ impl SignalPipeline {
         self.resample_buffer_i.clear();
         self.resample_buffer_q.clear();
 
-        self.resampler_i
-            .process(&self.mix_buffer_i, &mut self.resample_buffer_i);
-        self.resampler_q
-            .process(&self.mix_buffer_q, &mut self.resample_buffer_q);
+        self.iq_resampler.process_pair(
+            &self.mix_buffer_i,
+            &self.mix_buffer_q,
+            &mut self.resample_buffer_i,
+            &mut self.resample_buffer_q,
+        );
 
         // 3. RRCフィルタ（インプレースAPI使用）
         self.rrc_filter_i
