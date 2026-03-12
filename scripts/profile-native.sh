@@ -11,6 +11,7 @@ PROFILE_PHY="${PROFILE_PHY:-mary}" # mary|dsss
 TOTAL_SIM_SEC="${TOTAL_SIM_SEC:-300}"
 MIN_SAMPLE_COUNT="${MIN_SAMPLE_COUNT:-1500}"
 SAMPLY_SAVE_ONLY="${SAMPLY_SAVE_ONLY:-1}"
+SAMPLY_PRESYMBOLICATE="${SAMPLY_PRESYMBOLICATE:-1}"
 ALLOC_PROFILE="${ALLOC_PROFILE:-1}"
 
 mkdir -p "$OUT_DIR"
@@ -63,6 +64,13 @@ case "$TOOL" in
     SAMPLY_ARGS=(-o "$OUT_FILE")
     if [ "$SAMPLY_SAVE_ONLY" = "1" ]; then
       SAMPLY_ARGS+=(-s)
+    fi
+    if [ "$SAMPLY_PRESYMBOLICATE" = "1" ]; then
+      if samply record --help 2>/dev/null | grep -q -- "--unstable-presymbolicate"; then
+        SAMPLY_ARGS+=(--unstable-presymbolicate)
+      else
+        echo "[profile-native] warning: this samply does not support --unstable-presymbolicate; continuing without sidecar" >&2
+      fi
     fi
     samply record "${SAMPLY_ARGS[@]}" -- "$BIN" "${ARGS[@]}"
     SAMPLE_COUNT="$(jq '.threads[0].samples.stack | map(select(. != null and . >= 0)) | length' "$OUT_FILE")"

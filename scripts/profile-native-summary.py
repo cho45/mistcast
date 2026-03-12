@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import bisect
 import json
 import subprocess
 from collections import defaultdict
@@ -37,6 +38,134 @@ def symbolize_macho(binary_path: Path, rel_addr: int) -> str | None:
     return out.splitlines()[0].strip()
 
 
+def sidecar_path_for(profile_path: Path) -> Path | None:
+    name = profile_path.name
+    candidates: list[Path] = []
+    if name.endswith(".json.gz"):
+        base = name[: -len(".json.gz")]
+        candidates.append(profile_path.with_name(f"{base}.syms.json"))
+    if name.endswith(".json"):
+        base = name[: -len(".json")]
+        candidates.append(profile_path.with_name(f"{base}.syms.json"))
+    candidates.append(profile_path.with_name(f"{name}.syms.json"))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+class SymsResolver:
+    def __init__(
+        self,
+        range_tables: dict[str, tuple[list[int], list[tuple[int, int, str]]]],
+        exact_tables: dict[str, dict[int, str]],
+    ) -> None:
+        self.range_tables = range_tables
+        self.exact_tables = exact_tables
+
+    @classmethod
+    def from_sidecar(cls, syms_path: Path) -> "SymsResolver | None":
+        try:
+            with syms_path.open("r", encoding="utf-8") as f:
+                sidecar = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        string_table = sidecar.get("string_table")
+        data = sidecar.get("data")
+        if not isinstance(string_table, list) or not isinstance(data, list):
+            return None
+
+        range_tables: dict[str, tuple[list[int], list[tuple[int, int, str]]]] = {}
+        exact_tables: dict[str, dict[int, str]] = {}
+
+        for image in data:
+            if not isinstance(image, dict):
+                continue
+            lib_name = image.get("debug_name")
+            symtab = image.get("symbol_table")
+            known = image.get("known_addresses")
+            if not isinstance(lib_name, str) or not isinstance(symtab, list):
+                continue
+
+            ranges: list[tuple[int, int, str]] = []
+            symbols_by_idx: list[str | None] = []
+            for sym in symtab:
+                if not isinstance(sym, dict):
+                    symbols_by_idx.append(None)
+                    continue
+                rva = sym.get("rva")
+                size = sym.get("size")
+                sym_idx = sym.get("symbol")
+                if (
+                    not isinstance(rva, int)
+                    or not isinstance(size, int)
+                    or not isinstance(sym_idx, int)
+                    or sym_idx < 0
+                    or sym_idx >= len(string_table)
+                ):
+                    symbols_by_idx.append(None)
+                    continue
+                sym_name = string_table[sym_idx]
+                if not isinstance(sym_name, str):
+                    symbols_by_idx.append(None)
+                    continue
+                end = rva + size if size > 0 else rva + 1
+                ranges.append((rva, end, sym_name))
+                symbols_by_idx.append(sym_name)
+
+            if ranges:
+                ranges.sort(key=lambda x: x[0])
+                starts = [r[0] for r in ranges]
+                range_tables[lib_name] = (starts, ranges)
+
+            if isinstance(known, list) and symbols_by_idx:
+                exact: dict[int, str] = {}
+                for row in known:
+                    if (
+                        isinstance(row, list)
+                        and len(row) >= 2
+                        and isinstance(row[0], int)
+                        and isinstance(row[1], int)
+                    ):
+                        addr = row[0]
+                        sym_row_idx = row[1]
+                        if 0 <= sym_row_idx < len(symbols_by_idx):
+                            sym_name = symbols_by_idx[sym_row_idx]
+                            if isinstance(sym_name, str):
+                                exact[addr] = sym_name
+                if exact:
+                    exact_tables[lib_name] = exact
+
+        if not range_tables and not exact_tables:
+            return None
+        return cls(range_tables, exact_tables)
+
+    def resolve(self, lib_name: str, rel_addr: int) -> str | None:
+        exact = self.exact_tables.get(lib_name)
+        if exact is not None:
+            sym = exact.get(rel_addr)
+            if sym:
+                return sym
+
+        table = self.range_tables.get(lib_name)
+        if table is None:
+            return None
+        starts, ranges = table
+        idx = bisect.bisect_right(starts, rel_addr) - 1
+        if idx < 0:
+            return None
+        start, end, name = ranges[idx]
+        if start <= rel_addr < end:
+            return name
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("profile", type=Path)
@@ -45,6 +174,8 @@ def main() -> int:
 
     with args.profile.open("r", encoding="utf-8") as f:
         profile = json.load(f)
+    syms_path = sidecar_path_for(args.profile)
+    syms_resolver = SymsResolver.from_sidecar(syms_path) if syms_path else None
 
     thread = profile["threads"][0]
     libs = profile.get("libs", [])
@@ -96,6 +227,11 @@ def main() -> int:
 
     print(f"[profile-summary] file={args.profile}")
     print(f"[profile-summary] samples={int(total_weight)}")
+    if syms_path:
+        state = "loaded" if syms_resolver is not None else "invalid"
+        print(f"[profile-summary] syms={syms_path} ({state})")
+    else:
+        print("[profile-summary] syms=<none>")
 
     top_libs = sorted(self_by_lib.items(), key=lambda x: x[1], reverse=True)[:8]
     print("[profile-summary] top self libs:")
@@ -113,10 +249,19 @@ def main() -> int:
     for (lib_name, rel_addr), w in top_frames:
         pct = 100.0 * w / total_weight
         label = f"{lib_name} + 0x{rel_addr:x}"
-        if lib_name == "dsss_e2e_eval" and binary_path and rel_addr >= 0:
-            sym = symbolize_macho(binary_path, rel_addr)
-            if sym:
-                label = sym
+        if rel_addr >= 0:
+            if syms_resolver is not None:
+                sym = syms_resolver.resolve(lib_name, rel_addr)
+                if sym:
+                    label = sym
+            if (
+                label == f"{lib_name} + 0x{rel_addr:x}"
+                and lib_name == "dsss_e2e_eval"
+                and binary_path
+            ):
+                sym = symbolize_macho(binary_path, rel_addr)
+                if sym:
+                    label = sym
         print(f"  {pct:6.2f}%  {label}")
 
     return 0
