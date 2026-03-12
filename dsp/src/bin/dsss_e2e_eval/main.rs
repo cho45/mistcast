@@ -40,6 +40,7 @@ define_metrics! {
     crc_pass_ratio,                "CRC 通過率 = accepted_packets / (accepted + crc_error)",|_, m| m.crc_pass_ratio().into(), default;
     llr_second_pass_trigger_ratio, "LLR 2nd pass 起動率 = 2nd pass試行 / (accepted + crc_error)",|_, m| m.llr_second_pass_trigger_ratio().into(), default;
     llr_second_pass_rescue_ratio,  "LLR 2nd pass 救済率 = rescued / 2nd pass試行",  |_, m| m.llr_second_pass_rescue_ratio().into(), default;
+    viterbi_crc_candidates_mean,   "1 packet復号試行あたりのCRC候補評価数",          |_, m| m.viterbi_crc_candidates_mean().into();
     phase_gate_on_ratio,           "位相更新ゲート ON 比率",                        |_, m| m.phase_gate_on_ratio().into(), default;
     phase_innovation_reject_ratio, "位相更新候補の棄却比率",                        |_, m| m.phase_innovation_reject_ratio().into(), default;
     phase_err_abs_mean_rad,        "位相誤差絶対値の平均 [rad]",                    |_, m| m.phase_err_abs_mean_rad().into(), default;

@@ -37,6 +37,8 @@ pub struct Metrics {
     pub post_codeword_error_weights: Vec<usize>,
     pub total_post_decode_attempts: usize,
     pub total_post_decode_matched: usize,
+    pub total_viterbi_packet_decode_attempts: usize,
+    pub total_viterbi_crc_candidate_checks: usize,
     pub sum_last_est_snr_db: f64,
     pub count_last_est_snr_db: usize,
     pub total_phase_gate_on_symbols: usize,
@@ -222,6 +224,11 @@ impl Metrics {
         self.total_post_decode_matched += matched;
     }
 
+    pub fn add_mary_viterbi_stats(&mut self, packet_attempts: usize, crc_candidate_checks: usize) {
+        self.total_viterbi_packet_decode_attempts += packet_attempts;
+        self.total_viterbi_crc_candidate_checks += crc_candidate_checks;
+    }
+
     pub fn packet_accept_ratio(&self) -> f32 {
         let total_packets_sent = self.total_frame_attempts * self.packets_per_frame;
         ratio(self.total_accepted_packets, total_packets_sent)
@@ -249,6 +256,13 @@ impl Metrics {
         ratio(
             self.total_llr_second_pass_rescued,
             self.total_llr_second_pass_attempts,
+        )
+    }
+
+    pub fn viterbi_crc_candidates_mean(&self) -> f32 {
+        ratio(
+            self.total_viterbi_crc_candidate_checks,
+            self.total_viterbi_packet_decode_attempts,
         )
     }
 
@@ -622,6 +636,11 @@ mod tests {
         assert_eq!(m.llr_second_pass_trigger_ratio(), 20.0 / 240.0);
         assert_eq!(m.llr_second_pass_rescue_ratio(), 5.0 / 20.0);
 
+        // 6.5 Viterbi CRC candidate checks
+        m.total_viterbi_packet_decode_attempts = 8;
+        m.total_viterbi_crc_candidate_checks = 20;
+        assert_eq!(m.viterbi_crc_candidates_mean(), 20.0 / 8.0);
+
         // 7. Phase
         m.total_phase_gate_on_symbols = 700;
         m.total_phase_gate_off_symbols = 300;
@@ -644,5 +663,11 @@ mod tests {
         let usizes = vec![0, 10, 20, 30, 40];
         assert_eq!(quantile_usize(&usizes, 0.9).unwrap(), 40.0);
         assert_eq!(quantile_usize(&usizes, 0.1).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_viterbi_crc_candidates_mean_handles_zero_attempts() {
+        let m = Metrics::new(1);
+        assert_eq!(m.viterbi_crc_candidates_mean(), 0.0);
     }
 }

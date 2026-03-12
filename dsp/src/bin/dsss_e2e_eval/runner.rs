@@ -638,6 +638,8 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     let mut last_synced_frames = 0usize;
     let mut last_received_packets = 0usize;
     let mut last_crc_error_packets = 0usize;
+    let mut last_total_viterbi_packet_attempts = 0usize;
+    let mut last_total_viterbi_crc_checks = 0usize;
 
     run_warmup(&mut encoder, &mut decoder, &mut m, &mut sim_cfg);
 
@@ -713,6 +715,17 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                     last_total_post_attempts = post_attempts;
                     last_total_post_matched = post_matched;
 
+                    m.add_mary_viterbi_stats(
+                        progress
+                            .viterbi_packet_decode_attempts
+                            .saturating_sub(last_total_viterbi_packet_attempts),
+                        progress
+                            .viterbi_crc_candidate_checks
+                            .saturating_sub(last_total_viterbi_crc_checks),
+                    );
+                    last_total_viterbi_packet_attempts = progress.viterbi_packet_decode_attempts;
+                    last_total_viterbi_crc_checks = progress.viterbi_crc_candidate_checks;
+
                     m.add_frame_event(
                         progress.synced_frames.saturating_sub(last_synced_frames),
                         progress
@@ -742,6 +755,8 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                         last_synced_frames = 0;
                         last_received_packets = 0;
                         last_crc_error_packets = 0;
+                        last_total_viterbi_packet_attempts = 0;
+                        last_total_viterbi_crc_checks = 0;
                         // Note: ber_accum は累積し続ける
                     }
                     ControlFlow::Continue
@@ -766,6 +781,14 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         final_progress
             .crc_error_packets
             .saturating_sub(last_crc_error_packets),
+    );
+    m.add_mary_viterbi_stats(
+        final_progress
+            .viterbi_packet_decode_attempts
+            .saturating_sub(last_total_viterbi_packet_attempts),
+        final_progress
+            .viterbi_crc_candidate_checks
+            .saturating_sub(last_total_viterbi_crc_checks),
     );
 
     let recovered = decoder.recovered_data();
@@ -969,6 +992,14 @@ mod tests {
         assert!(m.total_post_decode_attempts > 0);
         assert_eq!(m.total_post_decode_matched, m.total_post_decode_attempts);
         assert_eq!(m.total_llr_second_pass_attempts, 0);
+        assert!(m.total_viterbi_packet_decode_attempts > 0);
+        assert!(
+            m.total_viterbi_crc_candidate_checks >= m.total_viterbi_packet_decode_attempts,
+            "CRC候補評価数は packet decode 試行数以上であること"
+        );
+        let mean_crc_candidates = m.viterbi_crc_candidates_mean();
+        assert!(mean_crc_candidates >= 1.0);
+        assert!(mean_crc_candidates <= cli.mary_viterbi_list as f32);
 
         // 4. 位相統計 (理想条件)
         assert!(m.total_phase_gate_on_symbols > 0);
@@ -983,6 +1014,32 @@ mod tests {
 
         // SNR
         assert!(m.avg_last_est_snr_db().unwrap() > 20.0);
+    }
+
+    #[test]
+    fn test_run_trial_mary_e2e_viterbi_stats_accumulate_across_multiple_completions() {
+        let mut cli = dummy_cli(Phy::Mary);
+        cli.total_sim_sec = 6.0;
+        cli.payload_bytes = 16;
+        cli.packets_per_frame = 3;
+        let imp = cli.base_impairment(); // AWGN(0)
+        let m = run_trial_mary_e2e(&imp, &cli, cli.seed);
+
+        assert!(
+            m.total_successes >= 2,
+            "test precondition: expected multiple completion events, got {}",
+            m.total_successes
+        );
+        assert!(m.total_accepted_packets > 0);
+        assert!(
+            m.total_viterbi_packet_decode_attempts
+                >= m.total_accepted_packets + m.total_crc_error_packets,
+            "viterbi packet decode attempts must include all accepted/crc-failed packets"
+        );
+        assert!(
+            m.total_viterbi_crc_candidate_checks >= m.total_viterbi_packet_decode_attempts,
+            "CRC candidate checks must be >= packet decode attempts"
+        );
     }
 
     #[test]

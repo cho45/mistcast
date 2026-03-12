@@ -42,6 +42,8 @@ pub struct DecodeProgress {
     pub phase_err_abs_ge_1p0_ratio: f32,
     pub llr_second_pass_attempts: usize,
     pub llr_second_pass_rescued: usize,
+    pub viterbi_packet_decode_attempts: usize,
+    pub viterbi_crc_candidate_checks: usize,
     pub ebn0_approx_db: f32,
     pub basis_matrix: Vec<u8>,
 }
@@ -82,6 +84,8 @@ pub struct DecoderStats {
     // LLR第二パス統計
     pub(crate) llr_second_pass_attempts: usize,
     pub(crate) llr_second_pass_rescued: usize,
+    pub(crate) viterbi_packet_decode_attempts: usize,
+    pub(crate) viterbi_crc_candidate_checks: usize,
 
     // 全体統計
     pub stats_total_samples: usize,
@@ -115,6 +119,8 @@ impl DecoderStats {
             phase_err_abs_ge_1p0_symbols: 0,
             llr_second_pass_attempts: 0,
             llr_second_pass_rescued: 0,
+            viterbi_packet_decode_attempts: 0,
+            viterbi_crc_candidate_checks: 0,
             stats_total_samples: 0,
         }
     }
@@ -135,6 +141,8 @@ impl DecoderStats {
         self.invalid_neighbor_packets = 0;
         self.last_packet_seq = None;
         self.last_rank_up_seq = None;
+        self.viterbi_packet_decode_attempts = 0;
+        self.viterbi_crc_candidate_checks = 0;
     }
 
     /// DecodeProgress構造体を生成
@@ -203,6 +211,8 @@ impl DecoderStats {
             phase_err_abs_ge_1p0_ratio,
             llr_second_pass_attempts: self.llr_second_pass_attempts,
             llr_second_pass_rescued: self.llr_second_pass_rescued,
+            viterbi_packet_decode_attempts: self.viterbi_packet_decode_attempts,
+            viterbi_crc_candidate_checks: self.viterbi_crc_candidate_checks,
             ebn0_approx_db,
             basis_matrix: fountain_decoder.get_basis_matrix(),
         }
@@ -234,6 +244,7 @@ fn estimate_ebn0_approx_db(config: &DspConfig, est_snr_db_internal: f32) -> f32 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coding::fountain::FountainParams;
 
     #[test]
     fn test_decoder_stats_creation() {
@@ -263,6 +274,8 @@ mod tests {
         stats.last_est_snr_db = 12.0;
         stats.last_path_used = 1;
         stats.fde_selected_frames = 3;
+        stats.viterbi_packet_decode_attempts = 5;
+        stats.viterbi_crc_candidate_checks = 9;
 
         stats.reset_fountain_session();
 
@@ -275,6 +288,8 @@ mod tests {
         assert_eq!(stats.last_est_snr_db, 12.0);
         assert_eq!(stats.last_path_used, 1);
         assert_eq!(stats.fde_selected_frames, 3);
+        assert_eq!(stats.viterbi_packet_decode_attempts, 0);
+        assert_eq!(stats.viterbi_crc_candidate_checks, 0);
     }
 
     #[test]
@@ -308,5 +323,19 @@ mod tests {
         let high = estimate_ebn0_approx_db(&config, 8.25);
 
         assert!(((high - low) - (8.25 - -3.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_to_progress_includes_viterbi_counters() {
+        let mut stats = DecoderStats::new();
+        stats.viterbi_packet_decode_attempts = 7;
+        stats.viterbi_crc_candidate_checks = 11;
+        let fountain_decoder = FountainDecoder::new(FountainParams::new(4, 16));
+        let config = DspConfig::default_48k();
+
+        let progress = stats.to_progress(&fountain_decoder, &config, false);
+
+        assert_eq!(progress.viterbi_packet_decode_attempts, 7);
+        assert_eq!(progress.viterbi_crc_candidate_checks, 11);
     }
 }

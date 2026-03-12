@@ -338,6 +338,7 @@ fn decode_single_llr_candidate(
     layout: &DecodeLayout,
     context: &mut DecodeCandidateContext<'_>,
 ) -> Result<Packet, PacketDecodeError> {
+    context.stats.viterbi_packet_decode_attempts += 1;
     let interleaver = BlockInterleaver::new(layout.rows, layout.cols);
     context
         .buffers
@@ -366,6 +367,7 @@ fn decode_single_llr_candidate(
         &mut context.buffers.fec_candidate_bits_buffer,
         &mut context.buffers.decoded_bytes_buffer,
         &mut context.buffers.fec_workspace,
+        context.stats,
     );
     if let Ok(packet) = first_attempt {
         return Ok(packet);
@@ -393,6 +395,7 @@ fn decode_single_llr_candidate(
             &mut context.buffers.fec_candidate_bits_buffer,
             &mut context.buffers.decoded_bytes_buffer,
             &mut context.buffers.fec_workspace,
+            context.stats,
         ) {
             Ok(packet) => {
                 context.stats.llr_second_pass_rescued += 1;
@@ -417,6 +420,7 @@ fn try_decode_soft_list_llrs(
     candidate_bits_scratch: &mut Vec<u8>,
     decoded_bytes: &mut Vec<u8>,
     fec_workspace: &mut fec::FecDecodeWorkspace,
+    stats: &mut DecoderStats,
 ) -> Result<Packet, PacketDecodeError> {
     let mut saw_crc = false;
     let mut saw_parse = false;
@@ -429,6 +433,7 @@ fn try_decode_soft_list_llrs(
                 saw_parse = true;
                 return None;
             }
+            stats.viterbi_crc_candidate_checks += 1;
             match decode_packet(&decoded_bits[..p_bits_len], decoded_bytes) {
                 Ok(packet) => Some(packet),
                 Err(PacketDecodeError::Crc) => {
@@ -668,6 +673,7 @@ mod tests {
         let mut candidate_bits = Vec::new();
         let mut decoded_bytes = Vec::new();
         let mut workspace = fec::FecDecodeWorkspace::new();
+        let mut stats = DecoderStats::new();
         let decoded = try_decode_soft_list_llrs(
             &llrs,
             1,
@@ -675,10 +681,12 @@ mod tests {
             &mut candidate_bits,
             &mut decoded_bytes,
             &mut workspace,
+            &mut stats,
         )
         .unwrap();
 
         assert_eq!(decoded, packet);
+        assert_eq!(stats.viterbi_crc_candidate_checks, 1);
     }
 
     #[test]
@@ -693,6 +701,7 @@ mod tests {
         let mut candidate_bits = Vec::new();
         let mut decoded_bytes = Vec::new();
         let mut workspace = fec::FecDecodeWorkspace::new();
+        let mut stats = DecoderStats::new();
         let crc_err = try_decode_soft_list_llrs(
             &crc_llrs,
             1,
@@ -700,6 +709,7 @@ mod tests {
             &mut candidate_bits,
             &mut decoded_bytes,
             &mut workspace,
+            &mut stats,
         );
         assert!(matches!(crc_err, Err(PacketDecodeError::Crc)));
 
@@ -711,8 +721,10 @@ mod tests {
             &mut candidate_bits,
             &mut decoded_bytes,
             &mut workspace,
+            &mut stats,
         );
         assert!(matches!(parse_err, Err(PacketDecodeError::Parse)));
+        assert_eq!(stats.viterbi_crc_candidate_checks, 2);
     }
 
     #[test]
@@ -772,6 +784,8 @@ mod tests {
         assert_eq!(observed, expected_callback_llrs);
         assert_eq!(stats.llr_second_pass_attempts, 0);
         assert_eq!(stats.llr_second_pass_rescued, 0);
+        assert_eq!(stats.viterbi_packet_decode_attempts, 1);
+        assert_eq!(stats.viterbi_crc_candidate_checks, 1);
     }
 
     #[test]
@@ -798,6 +812,8 @@ mod tests {
         assert!(matches!(result, Err(PacketDecodeError::Crc)));
         assert_eq!(stats.llr_second_pass_attempts, 0);
         assert_eq!(stats.llr_second_pass_rescued, 0);
+        assert_eq!(stats.viterbi_packet_decode_attempts, 1);
+        assert_eq!(stats.viterbi_crc_candidate_checks, 1);
     }
 
     #[test]
