@@ -6,7 +6,7 @@ import * as path from 'node:path';
 async function loadWasm() {
     const wasmPath = path.resolve(__dirname, '../pkg/dsp_bg.wasm');
     const wasmBuffer = fs.readFileSync(wasmPath);
-    await init(wasmBuffer);
+    await init({ module_or_path: wasmBuffer });
 }
 
 describe('Reproduction: 10/10 Verification', () => {
