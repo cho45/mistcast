@@ -198,7 +198,7 @@ async function handleFileSelect(event: Event) {
   const file = target.files?.[0];
   if (file) {
     if (!validateFileSize(file.size)) {
-      showToast(`ファイルサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
+      showToast(t('sender.toasts.file_too_large', { max: MAX_FILE_SIZE }));
       target.value = '';
       return;
     }
@@ -237,7 +237,7 @@ async function handleDrop(event: DragEvent) {
   const file = event.dataTransfer?.files?.[0];
   if (file) {
     if (!validateFileSize(file.size)) {
-      showToast(`ファイルサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
+      showToast(t('sender.toasts.file_too_large', { max: MAX_FILE_SIZE }));
       return;
     }
     selectedFile.value = file;
@@ -341,7 +341,7 @@ async function startSendingData(data: Uint8Array) {
 async function startSendingText() {
   const data = new TextEncoder().encode(inputText.value);
   if (!validateFileSize(data.length)) {
-    showToast(`テキストサイズが大きすぎます（最大 ${MAX_FILE_SIZE} バイト）`);
+    showToast(t('sender.toasts.text_too_large', { max: MAX_FILE_SIZE }));
     return;
   }
   await startSendingData(data);

@@ -44,8 +44,8 @@
       "info": "Built-in sample: {name} ({size} bytes)"
     },
     "toasts": {
-      "file_too_large": "File too large! Maximum is {max} KB.",
-      "text_too_large": "Text too large! Maximum is {max} bytes.",
+      "file_too_large": "File size too large (maximum {max} bytes)",
+      "text_too_large": "Text size too large (maximum {max} bytes)",
       "file_selected": "File selected: {name}",
       "text_copied": "Decoded text copied to clipboard!"
     }

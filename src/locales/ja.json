@@ -44,8 +44,8 @@
       "info": "内蔵サンプル: {name} ({size} バイト)"
     },
     "toasts": {
-      "file_too_large": "ファイルが大きすぎます！最大 {max} KB です。",
-      "text_too_large": "テキストが長すぎます！最大 {max} バイトです。",
+      "file_too_large": "ファイルサイズが大きすぎます（最大 {max} バイト）",
+      "text_too_large": "テキストサイズが大きすぎます（最大 {max} バイト）",
       "file_selected": "選択中: {name}",
       "text_copied": "復号されたテキストをクリップボードにコピーしました！"
     }
