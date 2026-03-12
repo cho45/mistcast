@@ -15,7 +15,7 @@
 
 use crate::DspConfig;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-use std::arch::wasm32::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_mul};
+use std::arch::wasm32::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_mul, v128, v128_load};
 
 /// RRCフィルタ係数を計算する
 ///
@@ -168,19 +168,25 @@ impl RrcFilter {
         let start = self.push_and_window_start(sample);
         let mut sum4 = f32x4(0.0, 0.0, 0.0, 0.0);
         let mut k = 0usize;
+        let input_ptr = self.history[start..start + n].as_ptr();
+        let coeff_ptr = self.coeffs_rev.as_ptr();
+        while k + 8 <= n {
+            // SAFETY: `k + 8 <= n` の範囲でのみ進むため、
+            // `input_ptr[k..k+8]` と `coeff_ptr[k..k+8]` は有効領域内。
+            let x0 = unsafe { v128_load(input_ptr.add(k) as *const v128) };
+            let h0 = unsafe { v128_load(coeff_ptr.add(k) as *const v128) };
+            let x1 = unsafe { v128_load(input_ptr.add(k + 4) as *const v128) };
+            let h1 = unsafe { v128_load(coeff_ptr.add(k + 4) as *const v128) };
+            sum4 = f32x4_add(sum4, f32x4_mul(h0, x0));
+            sum4 = f32x4_add(sum4, f32x4_mul(h1, x1));
+            k += 8;
+        }
+
         while k + 4 <= n {
-            let x = f32x4(
-                self.history[start + k],
-                self.history[start + k + 1],
-                self.history[start + k + 2],
-                self.history[start + k + 3],
-            );
-            let h = f32x4(
-                self.coeffs_rev[k],
-                self.coeffs_rev[k + 1],
-                self.coeffs_rev[k + 2],
-                self.coeffs_rev[k + 3],
-            );
+            // SAFETY: `k + 4 <= n` の条件下でのみ読み込むため、
+            // `input_ptr[k..k+4]` と `coeff_ptr[k..k+4]` は有効範囲内。
+            let x = unsafe { v128_load(input_ptr.add(k) as *const v128) };
+            let h = unsafe { v128_load(coeff_ptr.add(k) as *const v128) };
             sum4 = f32x4_add(sum4, f32x4_mul(h, x));
             k += 4;
         }
@@ -205,7 +211,21 @@ impl RrcFilter {
 
     /// サンプル列をまとめて処理する
     pub fn process_block(&mut self, samples: &[f32]) -> Vec<f32> {
-        samples.iter().map(|&s| self.process(s)).collect()
+        let mut output = Vec::with_capacity(samples.len());
+        self.process_block_into(samples, &mut output);
+        output
+    }
+
+    /// サンプル列を出力バッファへ処理する（バッファ再利用）
+    pub fn process_block_into(&mut self, samples: &[f32], output: &mut Vec<f32>) {
+        output.clear();
+        if samples.is_empty() {
+            return;
+        }
+        output.reserve(samples.len());
+        for &s in samples {
+            output.push(self.process(s));
+        }
     }
 
     /// サンプル列をインプレースで処理する（ゼロアロケーション）
@@ -517,6 +537,37 @@ mod tests {
     }
 
     #[test]
+    fn test_process_block_into_matches_process_block() {
+        let config = test_config();
+        let mut filter1 = RrcFilter::from_config(&config.clone());
+        let mut filter2 = RrcFilter::from_config(&config);
+
+        let input: Vec<f32> = (0..1500)
+            .map(|i| {
+                let t = i as f32 / config.sample_rate;
+                0.55 * (2.0 * std::f32::consts::PI * 1200.0 * t).sin()
+                    + 0.33 * (2.0 * std::f32::consts::PI * 2600.0 * t).cos()
+            })
+            .collect();
+
+        let expected = filter1.process_block(&input);
+
+        let mut output = vec![123.0f32; 8];
+        filter2.process_block_into(&input, &mut output);
+
+        assert_eq!(output.len(), expected.len());
+        for (i, (&actual, &exp)) in output.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - exp).abs() < 1e-5,
+                "index {}: {} != {}",
+                i,
+                actual,
+                exp
+            );
+        }
+    }
+
+    #[test]
     fn test_decimating_rrc_matches_subsampled_rrc() {
         let config = test_config();
         let decimation = 3usize;
@@ -587,6 +638,33 @@ mod tests {
                 let t = i as f32 / 24_000.0;
                 let x = 0.61 * (2.0 * std::f32::consts::PI * 900.0 * t).sin()
                     + 0.27 * (2.0 * std::f32::consts::PI * 2100.0 * t).cos();
+                let y_scalar = scalar.process_scalar_path(x);
+                let y_simd = simd.process_simd_path(x);
+                assert!(
+                    (y_scalar - y_simd).abs() < 1e-5,
+                    "taps={} i={} scalar={} simd={}",
+                    taps,
+                    i,
+                    y_scalar,
+                    y_simd
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[wasm_bindgen_test]
+    fn test_rrc_filter_simd_tap_remainder_paths_after_unroll8() {
+        // taps=21 (mod8=5), taps=23 (mod8=7) で
+        // 8要素ループ -> 4要素ループ -> 端数ループの全経路を通す。
+        for &taps in &[21usize, 23usize] {
+            let mut scalar = RrcFilter::with_params(taps, 0.35, 8_000.0, 24_000.0);
+            let mut simd = RrcFilter::with_params(taps, 0.35, 8_000.0, 24_000.0);
+            for i in 0..(taps * 10 + 3) {
+                let t = i as f32 / 24_000.0;
+                let x = 0.57 * (2.0 * std::f32::consts::PI * 1100.0 * t).sin()
+                    + 0.29 * (2.0 * std::f32::consts::PI * 2900.0 * t).cos()
+                    + 0.14 * (2.0 * std::f32::consts::PI * 3700.0 * t).sin();
                 let y_scalar = scalar.process_scalar_path(x);
                 let y_simd = simd.process_simd_path(x);
                 assert!(

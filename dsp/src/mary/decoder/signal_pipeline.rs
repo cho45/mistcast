@@ -158,16 +158,10 @@ impl SignalPipeline {
             .process(&self.mix_buffer_q, &mut self.resample_buffer_q);
 
         // 3. RRCフィルタ（インプレースAPI使用）
-        self.rrc_filtered_i
-            .resize(self.resample_buffer_i.len(), 0.0);
-        self.rrc_filtered_q
-            .resize(self.resample_buffer_q.len(), 0.0);
-        self.rrc_filtered_i.copy_from_slice(&self.resample_buffer_i);
-        self.rrc_filtered_q.copy_from_slice(&self.resample_buffer_q);
         self.rrc_filter_i
-            .process_block_in_place(&mut self.rrc_filtered_i);
+            .process_block_into(&self.resample_buffer_i, &mut self.rrc_filtered_i);
         self.rrc_filter_q
-            .process_block_in_place(&mut self.rrc_filtered_q);
+            .process_block_into(&self.resample_buffer_q, &mut self.rrc_filtered_q);
 
         // 4. 出力バッファに追加
         self.sample_buffer_i.reserve(self.rrc_filtered_i.len());
