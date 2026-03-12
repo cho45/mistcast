@@ -1273,7 +1273,7 @@ mod tests {
     fn test_iq_rrc_filter_simd_block_into_chunk_and_empty_boundaries() {
         let config = test_config();
         let mut scalar = IqRrcFilter::from_config(&config);
-        let mut simd = IqRrcFilter::from_config(&config);
+        let mut api = IqRrcFilter::from_config(&config);
 
         let input_i: Vec<f32> = (0..4096)
             .map(|i| {
@@ -1292,16 +1292,15 @@ mod tests {
 
         let mut out_i_scalar = Vec::new();
         let mut out_q_scalar = Vec::new();
-        let mut out_i_simd = Vec::new();
-        let mut out_q_simd = Vec::new();
+        let mut out_i_api = Vec::new();
+        let mut out_q_api = Vec::new();
 
         // 空入力
-        scalar.process_block_into(&[], &[], &mut out_i_scalar, &mut out_q_scalar);
-        simd.process_block_into(&[], &[], &mut out_i_simd, &mut out_q_simd);
+        api.process_block_into(&[], &[], &mut out_i_api, &mut out_q_api);
         assert!(out_i_scalar.is_empty());
         assert!(out_q_scalar.is_empty());
-        assert!(out_i_simd.is_empty());
-        assert!(out_q_simd.is_empty());
+        assert!(out_i_api.is_empty());
+        assert!(out_q_api.is_empty());
 
         let mut pos = 0usize;
         for &chunk_len in &[1usize, 2, 17, 33, 5, 257, 19, 1024, 11, 2048] {
@@ -1309,66 +1308,70 @@ mod tests {
                 break;
             }
             let end = (pos + chunk_len).min(input_i.len());
-            let mut tmp_i_scalar = Vec::new();
-            let mut tmp_q_scalar = Vec::new();
-            let mut tmp_i_simd = Vec::new();
-            let mut tmp_q_simd = Vec::new();
-            scalar.process_block_into(
+            let mut tmp_i_scalar = Vec::with_capacity(end - pos);
+            let mut tmp_q_scalar = Vec::with_capacity(end - pos);
+            let mut tmp_i_api = Vec::new();
+            let mut tmp_q_api = Vec::new();
+
+            for idx in pos..end {
+                let (y_i_scalar, y_q_scalar) =
+                    scalar.process_scalar_pair_path(input_i[idx], input_q[idx]);
+                tmp_i_scalar.push(y_i_scalar);
+                tmp_q_scalar.push(y_q_scalar);
+            }
+
+            api.process_block_into(
                 &input_i[pos..end],
                 &input_q[pos..end],
-                &mut tmp_i_scalar,
-                &mut tmp_q_scalar,
-            );
-            simd.process_block_into(
-                &input_i[pos..end],
-                &input_q[pos..end],
-                &mut tmp_i_simd,
-                &mut tmp_q_simd,
+                &mut tmp_i_api,
+                &mut tmp_q_api,
             );
             out_i_scalar.extend(tmp_i_scalar);
             out_q_scalar.extend(tmp_q_scalar);
-            out_i_simd.extend(tmp_i_simd);
-            out_q_simd.extend(tmp_q_simd);
+            out_i_api.extend(tmp_i_api);
+            out_q_api.extend(tmp_q_api);
             pos = end;
         }
         if pos < input_i.len() {
-            let mut tmp_i_scalar = Vec::new();
-            let mut tmp_q_scalar = Vec::new();
-            let mut tmp_i_simd = Vec::new();
-            let mut tmp_q_simd = Vec::new();
-            scalar.process_block_into(
+            let mut tmp_i_scalar = Vec::with_capacity(input_i.len() - pos);
+            let mut tmp_q_scalar = Vec::with_capacity(input_i.len() - pos);
+            let mut tmp_i_api = Vec::new();
+            let mut tmp_q_api = Vec::new();
+
+            for idx in pos..input_i.len() {
+                let (y_i_scalar, y_q_scalar) =
+                    scalar.process_scalar_pair_path(input_i[idx], input_q[idx]);
+                tmp_i_scalar.push(y_i_scalar);
+                tmp_q_scalar.push(y_q_scalar);
+            }
+
+            api.process_block_into(
                 &input_i[pos..],
                 &input_q[pos..],
-                &mut tmp_i_scalar,
-                &mut tmp_q_scalar,
-            );
-            simd.process_block_into(
-                &input_i[pos..],
-                &input_q[pos..],
-                &mut tmp_i_simd,
-                &mut tmp_q_simd,
+                &mut tmp_i_api,
+                &mut tmp_q_api,
             );
             out_i_scalar.extend(tmp_i_scalar);
             out_q_scalar.extend(tmp_q_scalar);
-            out_i_simd.extend(tmp_i_simd);
-            out_q_simd.extend(tmp_q_simd);
+            out_i_api.extend(tmp_i_api);
+            out_q_api.extend(tmp_q_api);
         }
 
-        assert_eq!(out_i_scalar.len(), out_i_simd.len());
-        assert_eq!(out_q_scalar.len(), out_q_simd.len());
-        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+        assert_eq!(out_i_scalar.len(), out_i_api.len());
+        assert_eq!(out_q_scalar.len(), out_q_api.len());
+        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_api.iter()).enumerate() {
             assert!(
                 (a - b).abs() < 1e-5,
-                "I idx={} scalar={} simd={}",
+                "I idx={} scalar={} api={}",
                 idx,
                 a,
                 b
             );
         }
-        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_api.iter()).enumerate() {
             assert!(
                 (a - b).abs() < 1e-5,
-                "Q idx={} scalar={} simd={}",
+                "Q idx={} scalar={} api={}",
                 idx,
                 a,
                 b
@@ -1381,7 +1384,7 @@ mod tests {
     fn test_iq_rrc_filter_simd_in_place_chunk_and_empty_boundaries() {
         let config = test_config();
         let mut scalar = IqRrcFilter::from_config(&config);
-        let mut simd = IqRrcFilter::from_config(&config);
+        let mut api = IqRrcFilter::from_config(&config);
 
         let input_i: Vec<f32> = (0..3000)
             .map(|i| {
@@ -1401,13 +1404,12 @@ mod tests {
         // 空入力
         let mut empty_i: [f32; 0] = [];
         let mut empty_q: [f32; 0] = [];
-        scalar.process_block_in_place(&mut empty_i, &mut empty_q);
-        simd.process_block_in_place(&mut empty_i, &mut empty_q);
+        api.process_block_in_place(&mut empty_i, &mut empty_q);
 
         let mut out_i_scalar = Vec::new();
         let mut out_q_scalar = Vec::new();
-        let mut out_i_simd = Vec::new();
-        let mut out_q_simd = Vec::new();
+        let mut out_i_api = Vec::new();
+        let mut out_q_api = Vec::new();
         let mut pos = 0usize;
         for &chunk_len in &[1usize, 7, 29, 3, 101, 5, 511, 13, 2048] {
             if pos >= input_i.len() {
@@ -1415,48 +1417,58 @@ mod tests {
             }
             let end = (pos + chunk_len).min(input_i.len());
 
-            let mut chunk_i_scalar = input_i[pos..end].to_vec();
-            let mut chunk_q_scalar = input_q[pos..end].to_vec();
-            scalar.process_block_in_place(&mut chunk_i_scalar, &mut chunk_q_scalar);
+            let mut chunk_i_scalar = Vec::with_capacity(end - pos);
+            let mut chunk_q_scalar = Vec::with_capacity(end - pos);
+            for idx in pos..end {
+                let (y_i_scalar, y_q_scalar) =
+                    scalar.process_scalar_pair_path(input_i[idx], input_q[idx]);
+                chunk_i_scalar.push(y_i_scalar);
+                chunk_q_scalar.push(y_q_scalar);
+            }
             out_i_scalar.extend(chunk_i_scalar);
             out_q_scalar.extend(chunk_q_scalar);
 
-            let mut chunk_i_simd = input_i[pos..end].to_vec();
-            let mut chunk_q_simd = input_q[pos..end].to_vec();
-            simd.process_block_in_place(&mut chunk_i_simd, &mut chunk_q_simd);
-            out_i_simd.extend(chunk_i_simd);
-            out_q_simd.extend(chunk_q_simd);
+            let mut chunk_i_api = input_i[pos..end].to_vec();
+            let mut chunk_q_api = input_q[pos..end].to_vec();
+            api.process_block_in_place(&mut chunk_i_api, &mut chunk_q_api);
+            out_i_api.extend(chunk_i_api);
+            out_q_api.extend(chunk_q_api);
             pos = end;
         }
         if pos < input_i.len() {
-            let mut chunk_i_scalar = input_i[pos..].to_vec();
-            let mut chunk_q_scalar = input_q[pos..].to_vec();
-            scalar.process_block_in_place(&mut chunk_i_scalar, &mut chunk_q_scalar);
+            let mut chunk_i_scalar = Vec::with_capacity(input_i.len() - pos);
+            let mut chunk_q_scalar = Vec::with_capacity(input_i.len() - pos);
+            for idx in pos..input_i.len() {
+                let (y_i_scalar, y_q_scalar) =
+                    scalar.process_scalar_pair_path(input_i[idx], input_q[idx]);
+                chunk_i_scalar.push(y_i_scalar);
+                chunk_q_scalar.push(y_q_scalar);
+            }
             out_i_scalar.extend(chunk_i_scalar);
             out_q_scalar.extend(chunk_q_scalar);
 
-            let mut chunk_i_simd = input_i[pos..].to_vec();
-            let mut chunk_q_simd = input_q[pos..].to_vec();
-            simd.process_block_in_place(&mut chunk_i_simd, &mut chunk_q_simd);
-            out_i_simd.extend(chunk_i_simd);
-            out_q_simd.extend(chunk_q_simd);
+            let mut chunk_i_api = input_i[pos..].to_vec();
+            let mut chunk_q_api = input_q[pos..].to_vec();
+            api.process_block_in_place(&mut chunk_i_api, &mut chunk_q_api);
+            out_i_api.extend(chunk_i_api);
+            out_q_api.extend(chunk_q_api);
         }
 
-        assert_eq!(out_i_scalar.len(), out_i_simd.len());
-        assert_eq!(out_q_scalar.len(), out_q_simd.len());
-        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_simd.iter()).enumerate() {
+        assert_eq!(out_i_scalar.len(), out_i_api.len());
+        assert_eq!(out_q_scalar.len(), out_q_api.len());
+        for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_api.iter()).enumerate() {
             assert!(
                 (a - b).abs() < 1e-5,
-                "I idx={} scalar={} simd={}",
+                "I idx={} scalar={} api={}",
                 idx,
                 a,
                 b
             );
         }
-        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_simd.iter()).enumerate() {
+        for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_api.iter()).enumerate() {
             assert!(
                 (a - b).abs() < 1e-5,
-                "Q idx={} scalar={} simd={}",
+                "Q idx={} scalar={} api={}",
                 idx,
                 a,
                 b
