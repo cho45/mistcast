@@ -9,6 +9,7 @@ use crate::frame::packet::Packet;
 
 pub(crate) struct PacketReceiveResult {
     pub recovered_data: Option<Vec<u8>>,
+    pub accepted: bool,
 }
 
 pub(crate) fn receive_packet(
@@ -43,6 +44,10 @@ pub(crate) fn receive_packet(
 
     PacketReceiveResult {
         recovered_data: fountain_decoder.decode(),
+        accepted: matches!(
+            outcome,
+            ReceiveOutcome::AcceptedRankUp | ReceiveOutcome::AcceptedNoRankUp
+        ),
     }
 }
 

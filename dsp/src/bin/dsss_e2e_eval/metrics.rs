@@ -39,6 +39,7 @@ pub struct Metrics {
     pub total_post_decode_matched: usize,
     pub total_viterbi_packet_decode_attempts: usize,
     pub total_viterbi_crc_candidate_checks: usize,
+    pub total_false_accepted_packets: usize,
     pub sum_last_est_snr_db: f64,
     pub count_last_est_snr_db: usize,
     pub total_phase_gate_on_symbols: usize,
@@ -229,6 +230,10 @@ impl Metrics {
         self.total_viterbi_crc_candidate_checks += crc_candidate_checks;
     }
 
+    pub fn add_false_accepted_packets(&mut self, false_accepted_packets: usize) {
+        self.total_false_accepted_packets += false_accepted_packets;
+    }
+
     pub fn packet_accept_ratio(&self) -> f32 {
         let total_packets_sent = self.total_frame_attempts * self.packets_per_frame;
         ratio(self.total_accepted_packets, total_packets_sent)
@@ -264,6 +269,10 @@ impl Metrics {
             self.total_viterbi_crc_candidate_checks,
             self.total_viterbi_packet_decode_attempts,
         )
+    }
+
+    pub fn false_accept_ratio_per_accepted_packet(&self) -> f32 {
+        ratio(self.total_false_accepted_packets, self.total_accepted_packets)
     }
 
     pub fn ber(&self) -> f32 {
@@ -640,6 +649,8 @@ mod tests {
         m.total_viterbi_packet_decode_attempts = 8;
         m.total_viterbi_crc_candidate_checks = 20;
         assert_eq!(m.viterbi_crc_candidates_mean(), 20.0 / 8.0);
+        m.total_false_accepted_packets = 4;
+        assert_eq!(m.false_accept_ratio_per_accepted_packet(), 4.0 / 200.0);
 
         // 7. Phase
         m.total_phase_gate_on_symbols = 700;

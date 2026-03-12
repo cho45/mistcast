@@ -38,6 +38,7 @@ define_metrics! {
     avg_proc_ns_sample,            "入力 1 sample あたりの平均処理時間 [ns/sample]",|_, m| m.avg_process_time_per_sample_ns().into(), default;
     synced_frame_ratio,            "フレーム同期率 = synced_frames / 送信frame数",   |_, m| m.synced_frame_ratio().into(), default;
     crc_pass_ratio,                "CRC 通過率 = accepted_packets / (accepted + crc_error)",|_, m| m.crc_pass_ratio().into(), default;
+    false_accept_ratio_per_accepted_packet, "受理パケットに占める false accept 比率", |_, m| m.false_accept_ratio_per_accepted_packet().into();
     llr_second_pass_trigger_ratio, "LLR 2nd pass 起動率 = 2nd pass試行 / (accepted + crc_error)",|_, m| m.llr_second_pass_trigger_ratio().into(), default;
     llr_second_pass_rescue_ratio,  "LLR 2nd pass 救済率 = rescued / 2nd pass試行",  |_, m| m.llr_second_pass_rescue_ratio().into(), default;
     viterbi_crc_candidates_mean,   "1 packet復号試行あたりのCRC候補評価数",          |_, m| m.viterbi_crc_candidates_mean().into();

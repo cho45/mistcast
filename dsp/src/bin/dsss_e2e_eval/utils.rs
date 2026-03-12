@@ -132,6 +132,7 @@ fn packet_seq_from_bits(packet_bits: &[u8]) -> Option<u16> {
 pub struct BerAccumulator {
     expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
     expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+    expected_packet_bytes: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
     register_packet_bytes: Arc<Mutex<Vec<u8>>>,
     register_bits: Arc<Mutex<Vec<u8>>>,
     register_fec_bits: Arc<Mutex<Vec<u8>>>,
@@ -149,6 +150,8 @@ pub struct BerAccumulator {
     post_codeword_error_weights: Arc<Mutex<Vec<usize>>>,
     post_decode_attempts: Arc<Mutex<usize>>,
     post_decode_matched: Arc<Mutex<usize>>,
+    accepted_packets: Arc<Mutex<usize>>,
+    false_accepted_packets: Arc<Mutex<usize>>,
 }
 
 impl Default for BerAccumulator {
@@ -162,6 +165,7 @@ impl BerAccumulator {
         Self {
             expected_fec_bits: Arc::new(Mutex::new(HashMap::new())),
             expected_packet_bits: Arc::new(Mutex::new(HashMap::new())),
+            expected_packet_bytes: Arc::new(Mutex::new(HashMap::new())),
             register_packet_bytes: Arc::new(Mutex::new(Vec::with_capacity(PACKET_BYTES))),
             register_bits: Arc::new(Mutex::new(Vec::with_capacity(PACKET_BYTES * 8))),
             register_fec_bits: Arc::new(Mutex::new(Vec::with_capacity((PACKET_BYTES * 8 + 6) * 2))),
@@ -179,6 +183,8 @@ impl BerAccumulator {
             post_codeword_error_weights: Arc::new(Mutex::new(Vec::new())),
             post_decode_attempts: Arc::new(Mutex::new(0)),
             post_decode_matched: Arc::new(Mutex::new(0)),
+            accepted_packets: Arc::new(Mutex::new(0)),
+            false_accepted_packets: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -201,10 +207,37 @@ impl BerAccumulator {
             .lock()
             .unwrap()
             .insert(seq, bits.clone());
+        self.expected_packet_bytes
+            .lock()
+            .unwrap()
+            .insert(seq, packet_bytes.clone());
         self.expected_fec_bits
             .lock()
             .unwrap()
             .insert(seq, fec_encoded.clone());
+    }
+
+    /// CRC 通過後に受理されたパケットの観測コールバックを生成
+    pub fn accepted_packet_callback(&self) -> Box<dyn FnMut(&Packet) + Send> {
+        let expected_packet_bytes = Arc::clone(&self.expected_packet_bytes);
+        let accepted_packets = Arc::clone(&self.accepted_packets);
+        let false_accepted_packets = Arc::clone(&self.false_accepted_packets);
+        Box::new(move |packet: &Packet| {
+            *accepted_packets.lock().unwrap() += 1;
+            let expected = {
+                expected_packet_bytes
+                    .lock()
+                    .unwrap()
+                    .get(&packet.lt_seq)
+                    .cloned()
+            };
+            let Some(expected_bytes) = expected else {
+                return;
+            };
+            if packet.serialize() != expected_bytes {
+                *false_accepted_packets.lock().unwrap() += 1;
+            }
+        })
     }
 
     /// LLRコールバックを生成
@@ -329,6 +362,13 @@ impl BerAccumulator {
         let post_decode_attempts = *self.post_decode_attempts.lock().unwrap();
         let post_decode_matched = *self.post_decode_matched.lock().unwrap();
         (post_decode_attempts, post_decode_matched)
+    }
+
+    /// 受理パケットに対する false accept 統計を取得
+    pub fn extract_false_accept_stats(&self) -> (usize, usize) {
+        let accepted_packets = *self.accepted_packets.lock().unwrap();
+        let false_accepted_packets = *self.false_accepted_packets.lock().unwrap();
+        (accepted_packets, false_accepted_packets)
     }
 }
 
@@ -543,5 +583,35 @@ mod tests {
             .map(|&b| if b == 0 { 1.0 } else { -1.0 })
             .collect::<Vec<_>>());
         assert_eq!(accum.extract_pre_fec().codeword_count, 3);
+    }
+
+    #[test]
+    fn test_accepted_packet_callback_false_accept_stats() {
+        let accum = BerAccumulator::new();
+        let k = 2usize;
+        let seq = 77u16;
+        let data = vec![0x11; PAYLOAD_SIZE];
+        accum.register_packet(
+            seq,
+            &FountainPacket {
+                seq: seq as u32,
+                data: data.clone(),
+                coefficients: vec![],
+            },
+            k,
+        );
+
+        let mut cb = accum.accepted_packet_callback();
+        let ok_packet = Packet::new(seq, k, &data);
+        cb(&ok_packet);
+
+        let mut wrong_payload = data.clone();
+        wrong_payload[0] ^= 0x80;
+        let bad_packet = Packet::new(seq, k, &wrong_payload);
+        cb(&bad_packet);
+
+        let (accepted, false_accepted) = accum.extract_false_accept_stats();
+        assert_eq!(accepted, 2);
+        assert_eq!(false_accepted, 1);
     }
 }

@@ -888,10 +888,7 @@ impl Decoder {
     }
 
     fn receive_decoded_packet(&mut self, packet: Packet) {
-        if let Some(callback) = self.accepted_packet_callback.as_mut() {
-            callback(&packet);
-        }
-
+        let packet_for_callback = packet.clone();
         let pkt_k = packet.lt_k as usize;
         if pkt_k != self.fountain_decoder.params().k {
             self.rebuild_fountain_decoder(pkt_k);
@@ -899,6 +896,11 @@ impl Decoder {
 
         let result =
             fountain_receiver::receive_packet(&mut self.fountain_decoder, &mut self.stats, packet);
+        if result.accepted {
+            if let Some(callback) = self.accepted_packet_callback.as_mut() {
+                callback(&packet_for_callback);
+            }
+        }
         if let Some(data) = result.recovered_data {
             self.recovered_data = Some(data);
         }

@@ -624,6 +624,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
 
     let ber_accum = BerAccumulator::new();
     decoder.llr_callback = Some(ber_accum.llr_callback());
+    decoder.accepted_packet_callback = Some(ber_accum.accepted_packet_callback());
     let packet_count_per_frame = cli.packets_per_frame.max(1);
     let mut packets = Vec::with_capacity(packet_count_per_frame);
     if cli.alloc_profile {
@@ -635,6 +636,7 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
     let mut last_total_llr_rescued = 0usize;
     let mut last_total_post_attempts = 0usize;
     let mut last_total_post_matched = 0usize;
+    let mut last_total_false_accepted_packets = 0usize;
     let mut last_synced_frames = 0usize;
     let mut last_received_packets = 0usize;
     let mut last_crc_error_packets = 0usize;
@@ -714,6 +716,12 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
                     );
                     last_total_post_attempts = post_attempts;
                     last_total_post_matched = post_matched;
+                    let (_accepted_packets, false_accepted_packets) =
+                        ber_accum.extract_false_accept_stats();
+                    m.add_false_accepted_packets(
+                        false_accepted_packets.saturating_sub(last_total_false_accepted_packets),
+                    );
+                    last_total_false_accepted_packets = false_accepted_packets;
 
                     m.add_mary_viterbi_stats(
                         progress
@@ -789,6 +797,10 @@ pub fn run_trial_mary_e2e(imp: &ChannelImpairment, cli: &Cli, seed: u64) -> Metr
         final_progress
             .viterbi_crc_candidate_checks
             .saturating_sub(last_total_viterbi_crc_checks),
+    );
+    let (_accepted_packets, false_accepted_packets) = ber_accum.extract_false_accept_stats();
+    m.add_false_accepted_packets(
+        false_accepted_packets.saturating_sub(last_total_false_accepted_packets),
     );
 
     let recovered = decoder.recovered_data();
@@ -1000,6 +1012,8 @@ mod tests {
         let mean_crc_candidates = m.viterbi_crc_candidates_mean();
         assert!(mean_crc_candidates >= 1.0);
         assert!(mean_crc_candidates <= cli.mary_viterbi_list as f32);
+        assert_eq!(m.total_false_accepted_packets, 0);
+        assert_eq!(m.false_accept_ratio_per_accepted_packet(), 0.0);
 
         // 4. 位相統計 (理想条件)
         assert!(m.total_phase_gate_on_symbols > 0);
