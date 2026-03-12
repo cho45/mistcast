@@ -298,11 +298,12 @@ impl Metrics {
         quantile(&self.completion_secs, 0.95)
     }
 
-    pub fn goodput_effective_bps(&self, payload_bits: usize) -> f32 {
+    pub fn goodput_effective_bps(&self) -> f32 {
         if self.total_sim_sec <= 0.0 {
             0.0
         } else {
-            (payload_bits * self.total_successes) as f32 / self.total_sim_sec
+            let packet_payload_bits = (dsp::params::PAYLOAD_SIZE * 8) as f32;
+            packet_payload_bits * self.total_accepted_packets as f32 / self.total_sim_sec
         }
     }
 
@@ -310,12 +311,11 @@ impl Metrics {
         if self.completion_secs.is_empty() {
             return None;
         }
-        let sum = self
-            .completion_secs
-            .iter()
-            .map(|&t| payload_bits as f32 / t.max(1e-6))
-            .sum::<f32>();
-        Some(sum / self.completion_secs.len() as f32)
+        let completion_sum_sec = self.completion_secs.iter().sum::<f32>();
+        if completion_sum_sec <= 0.0 {
+            return None;
+        }
+        Some((payload_bits * self.total_successes) as f32 / completion_sum_sec)
     }
 
     pub fn tx_signal_power(&self) -> Option<f32> {
@@ -621,13 +621,13 @@ mod tests {
 
         assert_eq!(m.total_successes, 3);
         assert_eq!(m.mean_completion_sec().unwrap(), (2.0 + 4.0 + 6.0) / 3.0);
-        // goodput_effective_bps = (512 * 3) / 10.0 = 153.6
-        assert_eq!(m.goodput_effective_bps(payload_bits), 153.6);
-        // goodput_success_mean_bps = (512/2 + 512/4 + 512/6) / 3 = (256 + 128 + 85.33) / 3 = 156.444
-        let expected_mean_bps = (512.0 / 2.0 + 512.0 / 4.0 + 512.0 / 6.0) / 3.0;
-        assert!(
-            (m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4
-        );
+        // goodput_effective_bps = (PAYLOAD_SIZE*8 * accepted_packets) / total_sim_sec
+        let expected_effective =
+            (dsp::params::PAYLOAD_SIZE * 8 * m.total_accepted_packets) as f32 / 10.0;
+        assert_eq!(m.goodput_effective_bps(), expected_effective);
+        // goodput_success_mean_bps = (payload_bits * total_successes) / sum(completion_secs)
+        let expected_mean_bps = (512.0 * 3.0) / (2.0 + 4.0 + 6.0);
+        assert!((m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4);
 
         // 4. Power and SNR
         m.total_tx_signal_energy = 1000.0;

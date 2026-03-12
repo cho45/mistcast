@@ -967,7 +967,7 @@ mod tests {
         assert!(m.total_tx_signal_samples > 0);
         assert!(m.total_process_time_ns > 0);
         assert!(m.mean_completion_sec().is_some());
-        assert!(m.goodput_effective_bps(16 * 8) > 0.0);
+        assert!(m.goodput_effective_bps() > 0.0);
     }
 
     #[test]
@@ -1125,11 +1125,10 @@ mod tests {
             m_off.packet_accept_ratio()
         );
         assert!(
-            m_on.goodput_effective_bps(cli.payload_bytes * 8)
-                > m_off.goodput_effective_bps(cli.payload_bytes * 8) + 80.0,
+            m_on.goodput_effective_bps() > m_off.goodput_effective_bps() + 30.0,
             "FDE on should clearly improve goodput in high-SNR multipath: on_gb={} off_gb={}",
-            m_on.goodput_effective_bps(cli.payload_bytes * 8),
-            m_off.goodput_effective_bps(cli.payload_bytes * 8)
+            m_on.goodput_effective_bps(),
+            m_off.goodput_effective_bps()
         );
     }
 }
