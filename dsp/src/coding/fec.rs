@@ -216,7 +216,6 @@ pub fn decode_soft(llrs: &[f32]) -> Vec<u8> {
 
 #[derive(Clone, Copy)]
 struct ListSurvivor {
-    valid: bool,
     prev_state: u8,
     prev_rank: usize,
     bit: u8,
@@ -226,7 +225,6 @@ impl ListSurvivor {
     #[inline]
     fn invalid() -> Self {
         Self {
-            valid: false,
             prev_state: 0,
             prev_rank: 0,
             bit: 0,
@@ -238,6 +236,7 @@ pub struct FecDecodeWorkspace {
     path_metrics: Vec<f32>,
     new_metrics: Vec<f32>,
     survivor_history: Vec<ListSurvivor>,
+    survivor_valid_counts: Vec<usize>,
     ranked: Vec<(usize, f32)>,
     reusable_candidate_bits: Vec<u8>,
 }
@@ -254,6 +253,7 @@ impl FecDecodeWorkspace {
             path_metrics: Vec::new(),
             new_metrics: Vec::new(),
             survivor_history: Vec::new(),
+            survivor_valid_counts: Vec::new(),
             ranked: Vec::new(),
             reusable_candidate_bits: Vec::new(),
         }
@@ -271,6 +271,10 @@ impl FecDecodeWorkspace {
         if self.survivor_history.len() < survivor_len {
             self.survivor_history
                 .resize(survivor_len, ListSurvivor::invalid());
+        }
+        let valid_count_len = num_symbols.saturating_mul(NUM_STATES);
+        if self.survivor_valid_counts.len() < valid_count_len {
+            self.survivor_valid_counts.resize(valid_count_len, 0);
         }
     }
 
@@ -356,8 +360,8 @@ impl FecDecodeWorkspace {
             let l1 = llrs[sym_idx * 2 + 1];
             let branch_scores = [l0 + l1, l0 - l1, -l0 + l1, -l0 - l1];
             let step_base = sym_idx * state_stride;
-            self.survivor_history[step_base..step_base + state_stride]
-                .fill(ListSurvivor::invalid());
+            let step_valid_base = sym_idx * NUM_STATES;
+            self.survivor_valid_counts[step_valid_base..step_valid_base + NUM_STATES].fill(0);
             self.new_metrics.fill(NEG_INF);
 
             let tail_only_zero = sym_idx >= data_len;
@@ -398,7 +402,6 @@ impl FecDecodeWorkspace {
                     if score0 >= score1 {
                         self.new_metrics[base + rank] = score0;
                         self.survivor_history[step_base + base + rank] = ListSurvivor {
-                            valid: true,
                             prev_state: pred0.prev_state,
                             prev_rank: i0,
                             bit: pred0.bit,
@@ -407,7 +410,6 @@ impl FecDecodeWorkspace {
                     } else {
                         self.new_metrics[base + rank] = score1;
                         self.survivor_history[step_base + base + rank] = ListSurvivor {
-                            valid: true,
                             prev_state: pred1.prev_state,
                             prev_rank: i1,
                             bit: pred1.bit,
@@ -416,6 +418,7 @@ impl FecDecodeWorkspace {
                     }
                     rank += 1;
                 }
+                self.survivor_valid_counts[step_valid_base + state] = rank;
             }
 
             std::mem::swap(&mut self.path_metrics, &mut self.new_metrics);
@@ -451,11 +454,12 @@ impl FecDecodeWorkspace {
                 decoded.clear();
                 return false;
             }
-            let sv = self.survivor_history[t * state_stride + state * list_size + rank];
-            if !sv.valid {
+            let valid_rank_count = self.survivor_valid_counts[t * NUM_STATES + state];
+            if rank >= valid_rank_count {
                 decoded.clear();
                 return false;
             }
+            let sv = self.survivor_history[t * state_stride + state * list_size + rank];
             if t < data_len {
                 decoded[t] = sv.bit;
             }
