@@ -1360,22 +1360,10 @@ mod tests {
         assert_eq!(out_i_scalar.len(), out_i_api.len());
         assert_eq!(out_q_scalar.len(), out_q_api.len());
         for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_api.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "I idx={} scalar={} api={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "I idx={} scalar={} api={}", idx, a, b);
         }
         for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_api.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "Q idx={} scalar={} api={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "Q idx={} scalar={} api={}", idx, a, b);
         }
     }
 
@@ -1457,22 +1445,10 @@ mod tests {
         assert_eq!(out_i_scalar.len(), out_i_api.len());
         assert_eq!(out_q_scalar.len(), out_q_api.len());
         for (idx, (&a, &b)) in out_i_scalar.iter().zip(out_i_api.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "I idx={} scalar={} api={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "I idx={} scalar={} api={}", idx, a, b);
         }
         for (idx, (&a, &b)) in out_q_scalar.iter().zip(out_q_api.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "Q idx={} scalar={} api={}",
-                idx,
-                a,
-                b
-            );
+            assert!((a - b).abs() < 1e-5, "Q idx={} scalar={} api={}", idx, a, b);
         }
     }
 }
