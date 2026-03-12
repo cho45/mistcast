@@ -69,6 +69,40 @@ function trimTrailingZeroBytes(data: Uint8Array): Uint8Array {
     return data.slice(0, last);
 }
 
+const BENCH_WARMUP_RUNS = 1;
+const BENCH_MEASURE_RUNS = 5;
+
+function median(values: number[]): number {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted[mid];
+}
+
+function measureDecoderProcessingTime(
+    createDecoder: () => { process_samples(samples: Float32Array): { complete: boolean } },
+    allSamples: Float32Array,
+): { medianMs: number; minMs: number; maxMs: number } {
+    for (let i = 0; i < BENCH_WARMUP_RUNS; i++) {
+        const decoder = createDecoder();
+        decoder.process_samples(allSamples);
+    }
+
+    const measurementsMs: number[] = [];
+    for (let i = 0; i < BENCH_MEASURE_RUNS; i++) {
+        const decoder = createDecoder();
+        const startTime = performance.now();
+        decoder.process_samples(allSamples);
+        const endTime = performance.now();
+        measurementsMs.push(endTime - startTime);
+    }
+
+    return {
+        medianMs: median(measurementsMs),
+        minMs: Math.min(...measurementsMs),
+        maxMs: Math.max(...measurementsMs),
+    };
+}
+
 beforeAll(async () => {
     for (const binding of BINDINGS) {
         await loadWasm(binding);
@@ -162,18 +196,17 @@ describe('Performance Benchmark', () => {
                 }
             }
 
-            const decoder = new binding.WasmDsssDecoder(sampleRate, 1);
-            const startTime = performance.now();
-            decoder.process_samples(allSamples);
-            const endTime = performance.now();
-
-            const processingTimeMs = endTime - startTime;
+            const processingTime = measureDecoderProcessingTime(
+                () => new binding.WasmDsssDecoder(sampleRate, 1),
+                allSamples,
+            );
             const audioDurationMs = (allSamples.length / sampleRate) * 1000;
-            const margin = audioDurationMs / processingTimeMs;
+            const margin = audioDurationMs / processingTime.medianMs;
 
             console.log(`[Benchmark DSSS][${binding.flavor}]`);
             console.log(`  Audio Duration: ${audioDurationMs.toFixed(2)} ms`);
-            console.log(`  Processing Time: ${processingTimeMs.toFixed(2)} ms`);
+            console.log(`  Processing Time (median/${BENCH_MEASURE_RUNS} runs): ${processingTime.medianMs.toFixed(2)} ms`);
+            console.log(`  Processing Time Range: ${processingTime.minMs.toFixed(2)} - ${processingTime.maxMs.toFixed(2)} ms`);
             console.log(`  Real-time Margin: ${margin.toFixed(2)}x`);
 
             expect(margin, `[${binding.flavor}] margin`).toBeGreaterThan(1.0);
@@ -196,18 +229,17 @@ describe('Performance Benchmark', () => {
                 }
             }
 
-            const decoder = new binding.WasmMaryDecoder(sampleRate, 3);
-            const startTime = performance.now();
-            decoder.process_samples(allSamples);
-            const endTime = performance.now();
-
-            const processingTimeMs = endTime - startTime;
+            const processingTime = measureDecoderProcessingTime(
+                () => new binding.WasmMaryDecoder(sampleRate, 3),
+                allSamples,
+            );
             const audioDurationMs = (allSamples.length / sampleRate) * 1000;
-            const margin = audioDurationMs / processingTimeMs;
+            const margin = audioDurationMs / processingTime.medianMs;
 
             console.log(`[Benchmark Mary][${binding.flavor}]`);
             console.log(`  Audio Duration: ${audioDurationMs.toFixed(2)} ms`);
-            console.log(`  Processing Time: ${processingTimeMs.toFixed(2)} ms`);
+            console.log(`  Processing Time (median/${BENCH_MEASURE_RUNS} runs): ${processingTime.medianMs.toFixed(2)} ms`);
+            console.log(`  Processing Time Range: ${processingTime.minMs.toFixed(2)} - ${processingTime.maxMs.toFixed(2)} ms`);
             console.log(`  Real-time Margin: ${margin.toFixed(2)}x`);
 
             expect(margin, `[${binding.flavor}] margin`).toBeGreaterThan(1.0);
