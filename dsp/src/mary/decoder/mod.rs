@@ -34,7 +34,7 @@ use crate::DspConfig;
 use num_complex::Complex32;
 
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
-pub const VITERBI_LIST_SIZE_DEFAULT: usize = 32;
+pub const VITERBI_LIST_SIZE_DEFAULT: usize = 8;
 pub const LLR_ERASURE_SECOND_PASS_DEFAULT: bool = true;
 pub const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.10;
 pub const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
