@@ -239,7 +239,7 @@ pub struct FecDecodeWorkspace {
     new_metrics: Vec<f32>,
     survivor_history: Vec<ListSurvivor>,
     ranked: Vec<(usize, f32)>,
-    reusable_candidates: Vec<Vec<u8>>,
+    reusable_candidate_bits: Vec<u8>,
 }
 
 impl Default for FecDecodeWorkspace {
@@ -255,7 +255,7 @@ impl FecDecodeWorkspace {
             new_metrics: Vec::new(),
             survivor_history: Vec::new(),
             ranked: Vec::new(),
-            reusable_candidates: Vec::new(),
+            reusable_candidate_bits: Vec::new(),
         }
     }
 
@@ -283,13 +283,13 @@ impl FecDecodeWorkspace {
     }
 
     pub fn decode_soft_into(&mut self, llrs: &[f32], out_bits: &mut Vec<u8>) {
-        let mut reusable = std::mem::take(&mut self.reusable_candidates);
-        self.decode_soft_list_into(llrs, 1, &mut reusable);
+        let mut candidate_bits = std::mem::take(&mut self.reusable_candidate_bits);
         out_bits.clear();
-        if let Some(first) = reusable.first() {
-            out_bits.extend_from_slice(first);
-        }
-        self.reusable_candidates = reusable;
+        let _ = self.decode_soft_list_try(llrs, 1, &mut candidate_bits, |bits, _rank, _score| {
+            out_bits.extend_from_slice(bits);
+            Some(())
+        });
+        self.reusable_candidate_bits = candidate_bits;
     }
 
     pub fn decode_soft_list_into(
@@ -298,6 +298,48 @@ impl FecDecodeWorkspace {
         list_size: usize,
         out_candidates: &mut Vec<Vec<u8>>,
     ) {
+        out_candidates.clear();
+        let mut candidate_bits = std::mem::take(&mut self.reusable_candidate_bits);
+        let _ = self.decode_soft_list_try(llrs, list_size, &mut candidate_bits, |bits, _, _| {
+            if !out_candidates.iter().any(|v| v == bits) {
+                out_candidates.push(bits.to_vec());
+            }
+            None::<()>
+        });
+        self.reusable_candidate_bits = candidate_bits;
+    }
+
+    pub fn decode_soft_list_try<T, F>(
+        &mut self,
+        llrs: &[f32],
+        list_size: usize,
+        candidate_bits_scratch: &mut Vec<u8>,
+        mut eval: F,
+    ) -> Option<T>
+    where
+        F: FnMut(&[u8], usize, f32) -> Option<T>,
+    {
+        let (list_size, num_symbols, state_stride, data_len) =
+            self.run_list_viterbi(llrs, list_size);
+        for (rank0, score) in self.ranked.iter().copied().take(list_size) {
+            if !self.traceback_candidate_into(
+                num_symbols,
+                state_stride,
+                list_size,
+                data_len,
+                rank0,
+                candidate_bits_scratch,
+            ) {
+                continue;
+            }
+            if let Some(accepted) = eval(candidate_bits_scratch, rank0, score) {
+                return Some(accepted);
+            }
+        }
+        None
+    }
+
+    fn run_list_viterbi(&mut self, llrs: &[f32], list_size: usize) -> (usize, usize, usize, usize) {
         assert!(llrs.len().is_multiple_of(2), "LLR列は偶数長であること");
         let list_size = list_size.max(1);
         let num_symbols = llrs.len() / 2;
@@ -387,52 +429,40 @@ impl FecDecodeWorkspace {
             }
         }
         self.ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        (list_size, num_symbols, state_stride, data_len)
+    }
 
-        let mut out_len = 0usize;
-        for (rank0, _) in self.ranked.iter().copied().take(list_size) {
-            if out_len >= out_candidates.len() {
-                out_candidates.push(Vec::new());
-            }
-            {
-                let decoded = &mut out_candidates[out_len];
+    fn traceback_candidate_into(
+        &self,
+        num_symbols: usize,
+        state_stride: usize,
+        list_size: usize,
+        data_len: usize,
+        rank0: usize,
+        decoded: &mut Vec<u8>,
+    ) -> bool {
+        decoded.clear();
+        decoded.resize(data_len, 0u8);
+
+        let mut state = 0usize;
+        let mut rank = rank0;
+        for t in (0..num_symbols).rev() {
+            if rank >= list_size {
                 decoded.clear();
-                decoded.resize(data_len, 0u8);
-
-                let mut state = 0usize;
-                let mut rank = rank0;
-                let mut valid_path = true;
-                for t in (0..num_symbols).rev() {
-                    if rank >= list_size {
-                        valid_path = false;
-                        break;
-                    }
-                    let sv = self.survivor_history[t * state_stride + state * list_size + rank];
-                    if !sv.valid {
-                        valid_path = false;
-                        break;
-                    }
-                    if t < data_len {
-                        decoded[t] = sv.bit;
-                    }
-                    state = sv.prev_state as usize;
-                    rank = sv.prev_rank;
-                }
-                if !valid_path {
-                    decoded.clear();
-                }
+                return false;
             }
-
-            if out_candidates[out_len].is_empty() {
-                continue;
+            let sv = self.survivor_history[t * state_stride + state * list_size + rank];
+            if !sv.valid {
+                decoded.clear();
+                return false;
             }
-            let is_dup = out_candidates[..out_len]
-                .iter()
-                .any(|v| v == &out_candidates[out_len]);
-            if !is_dup {
-                out_len += 1;
+            if t < data_len {
+                decoded[t] = sv.bit;
             }
+            state = sv.prev_state as usize;
+            rank = sv.prev_rank;
         }
-        out_candidates.truncate(out_len);
+        true
     }
 }
 
@@ -654,6 +684,55 @@ mod tests {
         let list = decode_soft_list(&llrs, 4);
         assert!(!list.is_empty());
         assert_eq!(list[0], best);
+    }
+
+    #[test]
+    fn test_soft_decode_list_try_k1_matches_decode_soft() {
+        let original: Vec<u8> = (0..80u32).map(|i| ((i * 31 + 3) % 2) as u8).collect();
+        let coded = encode(&original);
+        let llrs: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 1.2 } else { -1.2 })
+            .collect();
+        let expected = decode_soft(&llrs);
+
+        let mut workspace = FecDecodeWorkspace::new();
+        let mut candidate_bits = Vec::new();
+        let mut observed_rank = None;
+        let decoded = workspace
+            .decode_soft_list_try(&llrs, 1, &mut candidate_bits, |bits, rank, _score| {
+                observed_rank = Some(rank);
+                Some(bits.to_vec())
+            })
+            .unwrap();
+
+        assert_eq!(decoded, expected);
+        assert_eq!(observed_rank, Some(0));
+    }
+
+    #[test]
+    fn test_soft_decode_list_try_stops_when_callback_accepts() {
+        let original: Vec<u8> = (0..80u32).map(|i| ((i * 23 + 17) % 2) as u8).collect();
+        let coded = encode(&original);
+        let llrs: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 0.9 } else { -0.9 })
+            .collect();
+        let mut workspace = FecDecodeWorkspace::new();
+        let mut candidate_bits = Vec::new();
+        let mut call_count = 0usize;
+        let accepted = workspace.decode_soft_list_try(
+            &llrs,
+            8,
+            &mut candidate_bits,
+            |_bits, _rank, _score| {
+                call_count += 1;
+                Some(())
+            },
+        );
+
+        assert_eq!(accepted, Some(()));
+        assert_eq!(call_count, 1, "accept後に追加候補を評価しないこと");
     }
 
     #[test]

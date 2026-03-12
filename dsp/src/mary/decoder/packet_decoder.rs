@@ -42,7 +42,7 @@ pub(crate) struct PacketDecodeBuffers {
     pub deinterleave_buffer: Vec<f32>,
     pub erasure_llr_buffer: Vec<f32>,
     pub llr_abs_scratch: Vec<f32>,
-    pub fec_candidates_buffer: Vec<Vec<u8>>,
+    pub fec_candidate_bits_buffer: Vec<u8>,
     pub decoded_bytes_buffer: Vec<u8>,
     pub fec_workspace: fec::FecDecodeWorkspace,
 }
@@ -57,7 +57,7 @@ impl PacketDecodeBuffers {
             deinterleave_buffer: Vec::with_capacity(cap),
             erasure_llr_buffer: Vec::with_capacity(cap),
             llr_abs_scratch: Vec::with_capacity(cap),
-            fec_candidates_buffer: Vec::new(),
+            fec_candidate_bits_buffer: Vec::with_capacity(PACKET_BYTES * 8),
             decoded_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             fec_workspace,
         }
@@ -68,7 +68,7 @@ impl PacketDecodeBuffers {
         self.deinterleave_buffer.clear();
         self.erasure_llr_buffer.clear();
         self.llr_abs_scratch.clear();
-        self.fec_candidates_buffer.clear();
+        self.fec_candidate_bits_buffer.clear();
         self.decoded_bytes_buffer.clear();
     }
 }
@@ -359,16 +359,13 @@ fn decode_single_llr_candidate(
         callback(&context.buffers.deinterleave_buffer[..layout.interleaved_bits]);
     }
 
-    fec::decode_soft_list_into(
+    let first_attempt = try_decode_soft_list_llrs(
         &context.buffers.deinterleave_buffer[..layout.fec_bits],
         context.options.viterbi_list_size,
-        &mut context.buffers.fec_candidates_buffer,
-        &mut context.buffers.fec_workspace,
-    );
-    let first_attempt = try_decode_soft_list_candidates(
-        &context.buffers.fec_candidates_buffer,
         layout.payload_bits_len,
+        &mut context.buffers.fec_candidate_bits_buffer,
         &mut context.buffers.decoded_bytes_buffer,
+        &mut context.buffers.fec_workspace,
     );
     if let Ok(packet) = first_attempt {
         return Ok(packet);
@@ -389,16 +386,13 @@ fn decode_single_llr_candidate(
             context.options.llr_erasure_quantile,
             &mut context.buffers.llr_abs_scratch,
         );
-        fec::decode_soft_list_into(
+        match try_decode_soft_list_llrs(
             &context.buffers.erasure_llr_buffer[..layout.fec_bits],
             context.options.llr_erasure_list_size,
-            &mut context.buffers.fec_candidates_buffer,
-            &mut context.buffers.fec_workspace,
-        );
-        match try_decode_soft_list_candidates(
-            &context.buffers.fec_candidates_buffer,
             layout.payload_bits_len,
+            &mut context.buffers.fec_candidate_bits_buffer,
             &mut context.buffers.decoded_bytes_buffer,
+            &mut context.buffers.fec_workspace,
         ) {
             Ok(packet) => {
                 context.stats.llr_second_pass_rescued += 1;
@@ -416,24 +410,45 @@ fn decode_single_llr_candidate(
     }
 }
 
-fn try_decode_soft_list_candidates(
-    decoded_candidates: &[Vec<u8>],
+fn try_decode_soft_list_llrs(
+    llrs: &[f32],
+    list_size: usize,
     p_bits_len: usize,
+    candidate_bits_scratch: &mut Vec<u8>,
     decoded_bytes: &mut Vec<u8>,
+    fec_workspace: &mut fec::FecDecodeWorkspace,
 ) -> Result<Packet, PacketDecodeError> {
     let mut saw_crc = false;
-    for decoded_bits in decoded_candidates {
-        if decoded_bits.len() < p_bits_len {
-            continue;
-        }
-        match decode_packet(&decoded_bits[..p_bits_len], decoded_bytes) {
-            Ok(packet) => return Ok(packet),
-            Err(PacketDecodeError::Crc) => saw_crc = true,
-            Err(PacketDecodeError::Parse) => {}
-        }
-    }
-    if saw_crc {
+    let mut saw_parse = false;
+    let packet = fec_workspace.decode_soft_list_try(
+        llrs,
+        list_size,
+        candidate_bits_scratch,
+        |decoded_bits, _rank, _score| {
+            if decoded_bits.len() < p_bits_len {
+                saw_parse = true;
+                return None;
+            }
+            match decode_packet(&decoded_bits[..p_bits_len], decoded_bytes) {
+                Ok(packet) => Some(packet),
+                Err(PacketDecodeError::Crc) => {
+                    saw_crc = true;
+                    None
+                }
+                Err(PacketDecodeError::Parse) => {
+                    saw_parse = true;
+                    None
+                }
+            }
+        },
+    );
+
+    if let Some(packet) = packet {
+        Ok(packet)
+    } else if saw_crc {
         Err(PacketDecodeError::Crc)
+    } else if saw_parse {
+        Err(PacketDecodeError::Parse)
     } else {
         Err(PacketDecodeError::Parse)
     }
@@ -647,36 +662,55 @@ mod tests {
     }
 
     #[test]
-    fn test_try_decode_soft_list_candidates_returns_packet_for_valid_bits() {
+    fn test_try_decode_soft_list_llrs_returns_packet_for_valid_bits() {
         let packet = Packet::new(7, 3, &[0x5a; crate::params::PAYLOAD_SIZE]);
-        let bits = fec::bytes_to_bits(&packet.serialize());
-
-        let candidates = vec![bits];
+        let llrs = encode_packet_to_descrambled_llrs(&packet, 8.0);
+        let mut candidate_bits = Vec::new();
         let mut decoded_bytes = Vec::new();
-        let decoded =
-            try_decode_soft_list_candidates(&candidates, PACKET_BYTES * 8, &mut decoded_bytes)
-                .unwrap();
+        let mut workspace = fec::FecDecodeWorkspace::new();
+        let decoded = try_decode_soft_list_llrs(
+            &llrs,
+            1,
+            PACKET_BYTES * 8,
+            &mut candidate_bits,
+            &mut decoded_bytes,
+            &mut workspace,
+        )
+        .unwrap();
 
         assert_eq!(decoded, packet);
     }
 
     #[test]
-    fn test_try_decode_soft_list_candidates_distinguishes_crc_and_parse_errors() {
+    fn test_try_decode_soft_list_llrs_distinguishes_crc_and_parse_errors() {
         let packet = Packet::new(1, 2, &[0x11; crate::params::PAYLOAD_SIZE]);
-        let mut crc_bits = fec::bytes_to_bits(&packet.serialize());
-        crc_bits[0] ^= 1;
-
-        let crc_candidates = vec![crc_bits];
+        let mut crc_bytes = packet.serialize();
+        crc_bytes[0] ^= 1;
+        let crc_llrs: Vec<f32> = fec::encode(&fec::bytes_to_bits(&crc_bytes))
+            .into_iter()
+            .map(|bit| if bit == 0 { 8.0 } else { -8.0 })
+            .collect();
+        let mut candidate_bits = Vec::new();
         let mut decoded_bytes = Vec::new();
-        let crc_err =
-            try_decode_soft_list_candidates(&crc_candidates, PACKET_BYTES * 8, &mut decoded_bytes);
+        let mut workspace = fec::FecDecodeWorkspace::new();
+        let crc_err = try_decode_soft_list_llrs(
+            &crc_llrs,
+            1,
+            PACKET_BYTES * 8,
+            &mut candidate_bits,
+            &mut decoded_bytes,
+            &mut workspace,
+        );
         assert!(matches!(crc_err, Err(PacketDecodeError::Crc)));
 
-        let parse_candidates = vec![vec![0; PACKET_BYTES * 8 - 1]];
-        let parse_err = try_decode_soft_list_candidates(
-            &parse_candidates,
-            PACKET_BYTES * 8,
+        let llrs = encode_packet_to_descrambled_llrs(&packet, 8.0);
+        let parse_err = try_decode_soft_list_llrs(
+            &llrs,
+            1,
+            0,
+            &mut candidate_bits,
             &mut decoded_bytes,
+            &mut workspace,
         );
         assert!(matches!(parse_err, Err(PacketDecodeError::Parse)));
     }
