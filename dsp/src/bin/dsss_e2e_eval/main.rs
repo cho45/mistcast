@@ -31,8 +31,8 @@ define_metrics! {
     packet_accept_ratio,           "受理パケット率 = accepted_packets / 全送信packet数",|_, m| m.packet_accept_ratio().into(), default;
     ber,                           "復元成功 payload に対する事後 BER",             |_, m| m.ber().into(), default;
     raw_ber,                       "PHY デコーダの FEC 復号前 codeword BER",        |_, m| m.raw_ber().into(), default;
-    goodput_effective_bps,         "総シミュレーション時間あたりの有効 payload bitrate [bps]",|ctx, m| m.goodput_effective_bps(ctx.payload_bits).into(), default;
-    goodput_success_mean_bps,      "復元成功イベントごとの payload bitrate の平均 [bps]",|ctx, m| m.goodput_success_mean_bps(ctx.payload_bits).into(), default;
+    goodput_effective_bps,         "受理パケットベース有効 payload bitrate [bps]",        |_, m| m.goodput_effective_bps().into(), default;
+    goodput_success_mean_bps,      "復元完了区間合計に対する payload bitrate [bps]",      |ctx, m| m.goodput_success_mean_bps(ctx.payload_bits).into(), default;
     p95_complete_s,                "復元成功イベントの完了時間 95% 点 [sec]",       |_, m| m.p95_completion_sec().into(), default;
     mean_complete_s,               "復元成功イベントの平均完了時間 [sec]",          |_, m| m.mean_completion_sec().into(), default;
     avg_proc_ns_sample,            "入力 1 sample あたりの平均処理時間 [ns/sample]",|_, m| m.avg_process_time_per_sample_ns().into(), default;
