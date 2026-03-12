@@ -42,6 +42,7 @@ pub const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 // DecodeProgressとCirNormalizationModeは各モジュールから再エクスポート
 pub use self::decoder_stats::DecodeProgress;
 pub use self::equalization::CirNormalizationMode;
+pub type AcceptedPacketCallback = Box<dyn FnMut(&Packet) + Send>;
 
 /// デコーダの状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +169,8 @@ pub struct Decoder {
 
     /// デバッグ観測用コールバック: デインターリーブ・デスクランブル後のLLRをパススルーする
     pub llr_callback: Option<LlrCallback>,
+    /// CRC/parse を通過したパケットを通知するコールバック
+    pub accepted_packet_callback: Option<AcceptedPacketCallback>,
 
     // ゼロアロケーション用バッファプール
     cir_buffer: Vec<Complex32>,
@@ -221,6 +224,7 @@ impl Decoder {
             llr_erasure_list_size: LLR_ERASURE_LIST_SIZE_DEFAULT,
             stats: DecoderStats::new(),
             llr_callback: None,
+            accepted_packet_callback: None,
             cir_buffer: vec![Complex32::new(0.0, 0.0); cir_buffer_size],
             complex_buffer: Vec::with_capacity(16_000),
             packet_decode_buffers: PacketDecodeBuffers::new(),
@@ -884,6 +888,10 @@ impl Decoder {
     }
 
     fn receive_decoded_packet(&mut self, packet: Packet) {
+        if let Some(callback) = self.accepted_packet_callback.as_mut() {
+            callback(&packet);
+        }
+
         let pkt_k = packet.lt_k as usize;
         if pkt_k != self.fountain_decoder.params().k {
             self.rebuild_fountain_decoder(pkt_k);
@@ -1156,6 +1164,24 @@ mod tests {
         assert_eq!(decoder.stats.last_pred_mse_raw, 0.250);
         assert_eq!(decoder.stats.last_est_snr_db, 12.5);
         assert_eq!(decoder.stats.last_path_used, 1);
+    }
+
+    #[test]
+    fn test_receive_decoded_packet_invokes_accepted_packet_callback() {
+        use std::sync::{Arc, Mutex};
+
+        let mut decoder = make_decoder();
+        let observed = Arc::new(Mutex::new(Vec::<(u16, u8)>::new()));
+        let observed_cb = Arc::clone(&observed);
+        decoder.accepted_packet_callback = Some(Box::new(move |packet: &Packet| {
+            observed_cb.lock().unwrap().push((packet.lt_seq, packet.lt_k));
+        }));
+
+        let packet = Packet::new(123, 10, &[0x42; PAYLOAD_SIZE]);
+        decoder.receive_decoded_packet(packet);
+
+        let observed = observed.lock().unwrap().clone();
+        assert_eq!(observed, vec![(123, 10)]);
     }
 
     #[test]
