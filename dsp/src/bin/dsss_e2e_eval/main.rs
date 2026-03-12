@@ -15,7 +15,10 @@ use crate::utils::{
     parse_nonnegative_f32, parse_positive_f32, parse_positive_usize, parse_unit_interval_f32,
 };
 use clap::{builder::PossibleValuesParser, Parser, ValueEnum};
-use dsp::mary::decoder::CirNormalizationMode;
+use dsp::mary::decoder::{
+    CirNormalizationMode, LLR_ERASURE_LIST_SIZE_DEFAULT, LLR_ERASURE_QUANTILE_DEFAULT,
+    LLR_ERASURE_SECOND_PASS_DEFAULT, VITERBI_LIST_SIZE_DEFAULT,
+};
 
 define_metrics! {
     scenario,                      "評価シナリオ名",                               |ctx, _| ctx.scenario.into(), default;
@@ -138,21 +141,24 @@ pub struct Cli {
     #[arg(
         long = "mary-viterbi-list",
         value_parser = parse_positive_usize,
-        default_value_t = 1
+        default_value_t = VITERBI_LIST_SIZE_DEFAULT
     )]
     pub mary_viterbi_list: usize,
-    #[arg(long = "mary-llr-erasure-second-pass", default_value_t = true)]
+    #[arg(
+        long = "mary-llr-erasure-second-pass",
+        default_value_t = LLR_ERASURE_SECOND_PASS_DEFAULT
+    )]
     pub mary_llr_erasure_second_pass: bool,
     #[arg(
         long = "mary-llr-erasure-q",
         value_parser = parse_unit_interval_f32,
-        default_value_t = 0.1
+        default_value_t = LLR_ERASURE_QUANTILE_DEFAULT
     )]
     pub mary_llr_erasure_q: f32,
     #[arg(
         long = "mary-llr-erasure-list",
         value_parser = parse_positive_usize,
-        default_value_t = 8
+        default_value_t = LLR_ERASURE_LIST_SIZE_DEFAULT
     )]
     pub mary_llr_erasure_list: usize,
     #[arg(
@@ -313,6 +319,18 @@ mod tests {
     fn test_cli_default_mary_fde_mode_is_auto() {
         let cli = Cli::parse_from(["dsss_e2e_eval"]);
         assert_eq!(cli.mary_fde_mode, MaryFdeMode::Auto);
+    }
+
+    #[test]
+    fn test_cli_default_mary_list_viterbi_settings_match_decoder_defaults() {
+        let cli = Cli::parse_from(["dsss_e2e_eval"]);
+        assert_eq!(cli.mary_viterbi_list, VITERBI_LIST_SIZE_DEFAULT);
+        assert_eq!(
+            cli.mary_llr_erasure_second_pass,
+            LLR_ERASURE_SECOND_PASS_DEFAULT
+        );
+        assert!((cli.mary_llr_erasure_q - LLR_ERASURE_QUANTILE_DEFAULT).abs() < 1e-7);
+        assert_eq!(cli.mary_llr_erasure_list, LLR_ERASURE_LIST_SIZE_DEFAULT);
     }
 
     #[test]

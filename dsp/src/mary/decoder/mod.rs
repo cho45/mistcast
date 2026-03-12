@@ -34,8 +34,10 @@ use crate::DspConfig;
 use num_complex::Complex32;
 
 const TRACKING_EARLY_LATE_DELTA_CHIP: f32 = 0.5;
-const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.10;
-const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
+pub const VITERBI_LIST_SIZE_DEFAULT: usize = 1;
+pub const LLR_ERASURE_SECOND_PASS_DEFAULT: bool = true;
+pub const LLR_ERASURE_QUANTILE_DEFAULT: f32 = 0.10;
+pub const LLR_ERASURE_LIST_SIZE_DEFAULT: usize = 8;
 
 // DecodeProgressとCirNormalizationModeは各モジュールから再エクスポート
 pub use self::decoder_stats::DecodeProgress;
@@ -213,8 +215,8 @@ impl Decoder {
             config: dsp_config.clone(),
             search: SearchState::default(),
             frame_session: None,
-            viterbi_list_size: 1,
-            llr_erasure_second_pass_enabled: true,
+            viterbi_list_size: VITERBI_LIST_SIZE_DEFAULT,
+            llr_erasure_second_pass_enabled: LLR_ERASURE_SECOND_PASS_DEFAULT,
             llr_erasure_quantile: LLR_ERASURE_QUANTILE_DEFAULT,
             llr_erasure_list_size: LLR_ERASURE_LIST_SIZE_DEFAULT,
             stats: DecoderStats::new(),
