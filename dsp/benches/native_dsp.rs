@@ -117,10 +117,55 @@ fn bench_fec_list_viterbi(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_fec_list_viterbi_try(c: &mut Criterion) {
+    let llrs = make_packet_fec_llrs(1.7);
+    let llr_len = llrs.len();
+    let bits_per_packet = llr_len / 2;
+
+    let mut group = c.benchmark_group("fec/decode_soft_list_try");
+    group.throughput(Throughput::Elements(bits_per_packet as u64));
+
+    for &list_size in &[1usize, 2, 4, 8, 16, 32] {
+        let mut workspace = FecDecodeWorkspace::new();
+        workspace.preallocate_for_llr_len(llr_len, list_size);
+        let mut candidate_bits = Vec::with_capacity(bits_per_packet);
+
+        for &(label, accept_after) in &[
+            ("reject_all", usize::MAX),
+            ("accept_after_1", 1usize),
+            ("accept_after_4", 4usize),
+        ] {
+            group.bench_function(format!("packet_llr348/k={list_size}/{label}"), |b| {
+                b.iter(|| {
+                    let mut seen = 0usize;
+                    let accepted = workspace.decode_soft_list_try(
+                        black_box(&llrs),
+                        black_box(list_size),
+                        &mut candidate_bits,
+                        |bits, _rank, _score| {
+                            seen += 1;
+                            black_box(bits);
+                            if seen >= accept_after {
+                                Some(())
+                            } else {
+                                None
+                            }
+                        },
+                    );
+                    black_box(accepted.is_some());
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     native_dsp_benches,
     bench_rrc_filter,
     bench_resampler,
-    bench_fec_list_viterbi
+    bench_fec_list_viterbi,
+    bench_fec_list_viterbi_try
 );
 criterion_main!(native_dsp_benches);

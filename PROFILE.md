@@ -140,11 +140,14 @@ BENCH_ITERS=50 BENCH_WARMUP_MIN_PAIRS=8 BENCH_WARMUP_MAX_PAIRS=30 npm run profil
 `List Viterbi` の `list_size (K)` を増やしたときのスケーリングを確認する。
 ベンチ実装は `dsp/benches/native_dsp.rs` の
 `fec/decode_soft_list_into/packet_llr348/k={1,2,4,8,16,32}`。
+`decode_soft_list_try` は決定的な受理条件で
+`fec/decode_soft_list_try/packet_llr348/k={...}/{reject_all,accept_after_1,accept_after_4}`。
 
 ### 実行
 
 ```bash
 cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- 'fec/decode_soft_list_into'
+cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- 'fec/decode_soft_list_try'
 ```
 
 ### 特定 K のみ実行
@@ -154,6 +157,7 @@ cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- 'fec/decode_sof
 
 ```bash
 cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- '^fec/decode_soft_list_into/packet_llr348/k=1$'
+cargo bench --manifest-path dsp/Cargo.toml --bench native_dsp -- '^fec/decode_soft_list_try/packet_llr348/k=8/accept_after_1$'
 ```
 
 ### 見るべき値
