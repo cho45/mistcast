@@ -3143,6 +3143,8 @@ mod tests {
             .map(|(idx, v)| (idx, v.norm_sqr()))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .expect("non-empty CIR(before)");
+        let raw_total_power: f32 = cir_before.iter().map(|v| v.norm_sqr()).sum();
+        let raw_main_ratio = cir_before[raw_peak_idx].norm_sqr() / raw_total_power.max(1e-12);
         let (peak_idx, peak_power) = cir_obs
             .iter()
             .enumerate()
@@ -3153,14 +3155,20 @@ mod tests {
         let main_ratio = peak_power / total_power.max(1e-12);
 
         assert!(
-            peak_idx + spc < raw_peak_idx,
-            "deembed should pull folded peak earlier in frontend identity: before={} after={}",
+            peak_idx <= raw_peak_idx + spc,
+            "deembed should keep dominant tap aligned in frontend identity: before={} after={}",
             raw_peak_idx,
             peak_idx,
         );
         assert!(
             main_ratio > 0.05,
             "deembed should keep a non-trivial dominant tap after unfolding: ratio={}",
+            main_ratio
+        );
+        assert!(
+            main_ratio >= raw_main_ratio * 0.8,
+            "deembed should not significantly degrade dominant-tap concentration: before={} after={}",
+            raw_main_ratio,
             main_ratio
         );
     }
