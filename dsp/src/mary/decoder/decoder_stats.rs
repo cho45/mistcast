@@ -237,8 +237,9 @@ fn estimate_ebn0_approx_db(config: &DspConfig, est_snr_db_internal: f32) -> f32 
     let code_rate = (crate::frame::packet::PACKET_BYTES as f32 * 8.0)
         / interleaver_config::interleaved_bits() as f32;
     let rb_info = (coded_bit_rate * code_rate).max(1e-6);
+    // est_snr_db_internal は内部推定SNRなので、その定義帯域 B（ここでは近似的に chip_rate）で正規化する。
     let beq = chip_rate; // 近似: 等価雑音帯域幅 B ≈ Rc
-    est_snr_db_internal + 10.0 * (beq / rb_info).log10()
+    crate::common::channel::snr_db_to_ebn0_db(est_snr_db_internal, beq, rb_info)
 }
 
 #[cfg(test)]

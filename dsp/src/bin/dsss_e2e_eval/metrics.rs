@@ -61,6 +61,7 @@ pub struct MetricContext<'a> {
     pub sigma: f32,
     pub multipath_name: &'a str,
     pub sample_rate: f32,
+    pub chip_rate: f32,
     pub bit_rate: f32,
 }
 
@@ -461,6 +462,26 @@ impl Metrics {
         }
     }
 
+    /// 受信器内部の推定 SNR から Eb/N0 を換算する。
+    ///
+    /// `snr_bandwidth_hz` には avg_last_est_snr_db を定義した帯域 B を渡す。
+    /// （Mary の現実装では、内部推定SNRはチップ領域由来のため B≈chip_rate を使う）
+    pub fn avg_last_est_ebn0_db(&self, snr_bandwidth_hz: f32, bit_rate: f32) -> Option<f32> {
+        let est_snr_db = self.avg_last_est_snr_db()?;
+        let rb = bit_rate.max(1e-6);
+        let beq = snr_bandwidth_hz.max(1e-6);
+        Some(dsp::common::channel::snr_db_to_ebn0_db(est_snr_db, beq, rb))
+    }
+
+    /// 受信器内部の推定 SNR から C/N0 を換算する。
+    ///
+    /// `snr_bandwidth_hz` は avg_last_est_snr_db の帯域 B と一致させる必要がある。
+    pub fn avg_last_est_cn0_db(&self, snr_bandwidth_hz: f32) -> Option<f32> {
+        let est_snr_db = self.avg_last_est_snr_db()?;
+        let beq = snr_bandwidth_hz.max(1e-6);
+        Some(dsp::common::channel::snr_db_to_cn0_db(est_snr_db, beq))
+    }
+
     pub fn awgn_snr_db(&self, sigma: f32) -> Option<f32> {
         if sigma <= 0.0 {
             return None;
@@ -627,7 +648,9 @@ mod tests {
         assert_eq!(m.goodput_effective_bps(), expected_effective);
         // goodput_success_mean_bps = (payload_bits * total_successes) / sum(completion_secs)
         let expected_mean_bps = (512.0 * 3.0) / (2.0 + 4.0 + 6.0);
-        assert!((m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4);
+        assert!(
+            (m.goodput_success_mean_bps(payload_bits).unwrap() - expected_mean_bps).abs() < 1e-4
+        );
 
         // 4. Power and SNR
         m.total_tx_signal_energy = 1000.0;

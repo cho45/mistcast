@@ -196,7 +196,7 @@ fn main() -> Result<(), String> {
     let code_rate = (PACKET_BYTES as f32 * 8.0) / interleaver_config::interleaved_bits() as f32;
     let rb_info = coded_bit_rate * code_rate;
     let beq = cfg.chip_rate; // 近似: Beq ≈ Rc
-    let offset_db = 10.0 * (beq / rb_info).log10();
+    let offset_db = dsp::common::channel::snr_db_to_ebn0_db(0.0, beq, rb_info);
 
     let mut points = Vec::<SamplePoint>::new();
     for r in &rows {
@@ -213,8 +213,8 @@ fn main() -> Result<(), String> {
             continue;
         };
 
-        let ebn0_ref_db = awgn_snr_db + offset_db;
-        let ebn0_approx_db = est_snr_db + offset_db;
+        let ebn0_ref_db = dsp::common::channel::snr_db_to_ebn0_db(awgn_snr_db, beq, rb_info);
+        let ebn0_approx_db = dsp::common::channel::snr_db_to_ebn0_db(est_snr_db, beq, rb_info);
         points.push(SamplePoint {
             sigma,
             awgn_snr_db,

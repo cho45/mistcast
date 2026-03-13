@@ -85,6 +85,7 @@ pub fn print_row(scenario: &str, cli: &Cli, imp: &ChannelImpairment, m: &Metrics
         sigma: imp.sigma,
         multipath_name: &imp.multipath.name,
         sample_rate: cli.sample_rate,
+        chip_rate: cli.chip_rate,
         bit_rate: crate::runner::calculate_info_bit_rate(cli),
     };
 

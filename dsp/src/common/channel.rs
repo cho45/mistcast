@@ -168,6 +168,10 @@ pub fn add_awgn_snr_iq(
 /// Eb/N0 (ビットエネルギー対雑音電力密度比) [dB] を内部的な SNR [dB] に変換する。
 /// ここでの内部SNRは、指定された帯域幅 (bandwidth) 全体での信号電力対雑音電力比。
 /// 離散時間信号において雑音電力をサンプリングレート fs 全域で定義する場合、bandwidth には fs を指定する。
+/// 重要: `bandwidth` は「その SNR が定義されている帯域 B」を指定すること。
+/// 例:
+/// - 波形電力ベースSNRなら `bandwidth = sample_rate`
+/// - チップ領域/相関器内部で定義したSNRなら `bandwidth = chip_rate`（または等価帯域）
 /// rb は情報ビットレート (bps)。
 pub fn ebn0_db_to_snr_db(ebn0_db: f32, bandwidth: f32, rb: f32) -> f32 {
     // SNR = (Eb/N0) * (Rb/B)
@@ -175,10 +179,23 @@ pub fn ebn0_db_to_snr_db(ebn0_db: f32, bandwidth: f32, rb: f32) -> f32 {
 }
 
 /// 指定された帯域幅 (bandwidth) における SNR [dB] を Eb/N0 [dB] に変換する。
+/// 重要: `bandwidth` は `snr_db` を定義したときの帯域 B と一致させること。
 /// rb は情報ビットレート (bps)。
 pub fn snr_db_to_ebn0_db(snr_db: f32, bandwidth: f32, rb: f32) -> f32 {
     // Eb/N0 = SNR * (B/Rb)
     snr_db + 10.0 * (bandwidth / rb).log10()
+}
+
+/// 指定された帯域幅 (bandwidth) における SNR [dB] を C/N0 [dB-Hz] に変換する。
+///
+/// 重要: `bandwidth` は `snr_db` を定義したときの帯域 B と一致させること。
+pub fn snr_db_to_cn0_db(snr_db: f32, bandwidth: f32) -> f32 {
+    snr_db + 10.0 * bandwidth.log10()
+}
+
+/// 指定された帯域幅 (bandwidth) における C/N0 [dB-Hz] を SNR [dB] に変換する。
+pub fn cn0_db_to_snr_db(cn0_db: f32, bandwidth: f32) -> f32 {
+    cn0_db - 10.0 * bandwidth.log10()
 }
 #[cfg(test)]
 mod tests {
@@ -330,5 +347,14 @@ mod tests {
 
         let ebn0_back = snr_db_to_ebn0_db(snr, bandwidth, rb);
         assert!((ebn0_back - ebn0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_cn0_snr_conversion() {
+        let bandwidth = 48_000.0f32;
+        let snr_db = -6.0206f32;
+        let cn0_db = snr_db_to_cn0_db(snr_db, bandwidth);
+        let snr_back = cn0_db_to_snr_db(cn0_db, bandwidth);
+        assert!((snr_back - snr_db).abs() < 1e-5);
     }
 }
