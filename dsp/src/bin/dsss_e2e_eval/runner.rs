@@ -877,6 +877,10 @@ mod tests {
     }
 
     fn dummy_cli(phy: Phy) -> Cli {
+        let sync_word_bits = match phy {
+            Phy::Mary => dsp::mary::params::dsp_config_48k().sync_word_bits,
+            Phy::Dsss => dsp::dsss::params::dsp_config_48k().sync_word_bits,
+        };
         Cli {
             phy,
             mode: EvalMode::Point,
@@ -901,7 +905,7 @@ mod tests {
             carrier_freq: 15000.0,
             mseq_order: 4,
             rrc_alpha: 0.3,
-            sync_word_bits: 16,
+            sync_word_bits,
             preamble_repeat: 2,
             packets_per_frame: 1,
             preamble_sf: 127,
