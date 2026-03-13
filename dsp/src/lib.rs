@@ -36,7 +36,7 @@ pub mod params {
     pub const SYNC_WORD_BITS: usize = 8;
     pub const SYNC_WORD: u32 = 0xDEAD_BEEF;
     pub const PREAMBLE_SF: usize = 71;
-    pub const PACKETS_PER_SYNC_BURST: usize = 1;
+    pub const PACKETS_PER_SYNC_BURST: usize = 2;
     pub const PAYLOAD_SIZE: usize = 24;
     pub const FIXED_K: usize = 10;
     pub const FOUNTAIN_OVERHEAD: f32 = 0.1;

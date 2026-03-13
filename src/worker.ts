@@ -14,7 +14,7 @@ import initSimd, {
 import { RecycleTransferSender } from "./recycle-transfer-bridge";
 
 const DSSS_PACKETS_PER_BURST = 1;
-const MARY_PACKETS_PER_BURST = 3;
+const MARY_PACKETS_PER_BURST = 2;
 
 type WasmEncoderLike = {
   set_data(data: Uint8Array): void;
