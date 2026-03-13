@@ -208,19 +208,40 @@ fn test_duration_is_approximate_ends_on_frame_boundary() {
         "Should show actual duration"
     );
 
-    // 実際の長さは 3.7秒 ± 1フレーム分程度の範囲内にあるはず
-    // Maryフレームは約7200サンプル = 0.15秒
+    // 実際の長さは「目標以上かつ1フレーム超過未満」にあるはず
     let contents = fs::read(output_path).expect("Failed to read WAV file");
     let data_size =
         u32::from_le_bytes([contents[40], contents[41], contents[42], contents[43]]) as usize;
     let num_samples = data_size / 2;
     let actual_duration = num_samples as f32 / 48000.0;
+    let target_duration = 3.7f32;
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("フレーム数:"))
+        .expect("Should contain frame count line");
+    let frame_count: usize = line
+        .split(':')
+        .nth(1)
+        .expect("frame count value")
+        .trim()
+        .parse()
+        .expect("frame count must be usize");
 
-    // 3.7秒 ± 0.2秒の範囲内（フレーム境界調整による誤差を許容）
+    assert!(frame_count > 0, "frame_count must be positive");
+    let frame_duration = actual_duration / frame_count as f32;
+    let sample_epsilon = 1.0 / 48000.0;
+
     assert!(
-        actual_duration > 3.5 && actual_duration < 3.9,
-        "Actual duration {} is not close to target 3.7s",
-        actual_duration
+        actual_duration + sample_epsilon >= target_duration,
+        "Actual duration {} should be >= target {}",
+        actual_duration,
+        target_duration
+    );
+    assert!(
+        actual_duration - target_duration <= frame_duration + sample_epsilon,
+        "Overshoot {} exceeds one frame {}",
+        actual_duration - target_duration,
+        frame_duration
     );
 }
 
