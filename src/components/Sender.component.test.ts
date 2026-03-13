@@ -266,7 +266,7 @@ describe('Sender.vue', () => {
 
       expect(wrapper.find('.size-indicator').exists()).toBe(true);
       const sizeText = wrapper.find('.size-indicator').text();
-      expect(sizeText).toMatch(/\d+ \/ 4080 bytes/);
+      expect(sizeText).toMatch(/\d+ \/ 6118 bytes/);
     });
 
     it('should show warning class when size exceeds 3500 bytes', async () => {
@@ -305,7 +305,7 @@ describe('Sender.vue', () => {
   });
 
   describe('File size validation', () => {
-    const MAX_FILE_SIZE = 255 * 16; // 4080 bytes
+    const MAX_FILE_SIZE = 255 * 24 - 2; // 6118 bytes (2 bytes are reserved for size prefix)
 
     it('should show error toast when file size exceeds limit on file select', async () => {
       const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});

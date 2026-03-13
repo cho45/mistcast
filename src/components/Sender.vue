@@ -15,7 +15,12 @@ defineOptions({
 const runtime = useDemoRuntime();
 const attrs = useAttrs();
 
-const MAX_FILE_SIZE = 255 * 16; // 4080 bytes
+const LT_K_MAX = 255;
+const PAYLOAD_SIZE_BYTES = 24;
+const SIZE_PREFIX_BYTES = 2;
+const MAX_TRANSPORT_BYTES = LT_K_MAX * PAYLOAD_SIZE_BYTES;
+const MAX_CONTENT_BYTES = MAX_TRANSPORT_BYTES - SIZE_PREFIX_BYTES;
+const SIZE_WARNING_BYTES = 3500;
 const TOAST_DURATION_MS = 5000;
 const STORAGE_KEY = 'sender-send-mode';
 
@@ -96,7 +101,7 @@ let analyserNode: AnalyserNode | null = null;
 let opQueue: Promise<void> = Promise.resolve();
 
 function validateFileSize(size: number): boolean {
-  return size <= MAX_FILE_SIZE;
+  return size <= MAX_CONTENT_BYTES;
 }
 
 // localStorageから送信モードを復元
@@ -187,7 +192,7 @@ async function handleFileSelect(event: Event) {
   const file = target.files?.[0];
   if (file) {
     if (!validateFileSize(file.size)) {
-      showToast(t('sender.toasts.file_too_large', { max: MAX_FILE_SIZE }));
+      showToast(t('sender.toasts.file_too_large', { max: MAX_CONTENT_BYTES }));
       target.value = '';
       return;
     }
@@ -226,7 +231,7 @@ async function handleDrop(event: DragEvent) {
   const file = event.dataTransfer?.files?.[0];
   if (file) {
     if (!validateFileSize(file.size)) {
-      showToast(t('sender.toasts.file_too_large', { max: MAX_FILE_SIZE }));
+      showToast(t('sender.toasts.file_too_large', { max: MAX_CONTENT_BYTES }));
       return;
     }
     selectedFile.value = file;
@@ -330,7 +335,7 @@ async function startSendingData(data: Uint8Array) {
 async function startSendingText() {
   const data = new TextEncoder().encode(inputText.value);
   if (!validateFileSize(data.length)) {
-    showToast(t('sender.toasts.text_too_large', { max: MAX_FILE_SIZE }));
+    showToast(t('sender.toasts.text_too_large', { max: MAX_CONTENT_BYTES }));
     return;
   }
   await startSendingData(data);
@@ -499,7 +504,7 @@ defineExpose({
       >
         <div class="drop-content">
           <div class="drop-text">{{ $t('sender.input.drop_hint') }}</div>
-          <div class="drop-hint">MAX 4KB</div>
+          <div class="drop-hint">MAX {{ MAX_CONTENT_BYTES }} bytes</div>
         </div>
       </div>
     </div>
@@ -510,8 +515,8 @@ defineExpose({
     <!-- 統一送信ボタン -->
     <div class="send-footer">
       <div class="footer-meta">
-        <div class="size-indicator" :class="{ warning: contentBytes > 3500 }">
-          {{ contentBytes }} / 4080 bytes
+        <div class="size-indicator" :class="{ warning: contentBytes > SIZE_WARNING_BYTES }">
+          {{ contentBytes }} / {{ MAX_CONTENT_BYTES }} bytes
         </div>
       </div>
       <template v-if="!isTransmitting">
