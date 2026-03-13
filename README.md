@@ -1,4 +1,9 @@
+<center>
+<img src="src/assets/icon.svg" width="150" height="150" alt="logo">
+
 # Mistcast
+
+</center>
 
 Mistcastは、ブラウザ上で動作する**小さなデータ（数KB程度）の近距離ブロードキャスト**を目的とした、**音響データ通信（Data-over-Sound）ウェブアプリケーション**です。
 スピーカーとマイクを使用し、音響空間を介したデータ伝送を実装しています。
