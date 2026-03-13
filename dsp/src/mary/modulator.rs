@@ -1129,8 +1129,7 @@ mod tests {
         }
 
         // 位相遷移の正しさを検証
-        // SYNC_WORD = 0xDEAD_BEEF の最上位ビットは1
-        // bit=1 -> delta=2 -> phase=2
+        // 先頭ビットが1のとき bit=1 -> delta=2 -> phase=2
         assert_eq!(
             expected_phases[0], 2,
             "First phase should be 2 (MSB of SYNC_WORD is 1)"

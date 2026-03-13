@@ -34,7 +34,13 @@ pub mod params {
     pub const CHIP_RATE: f32 = 8000.0;
     pub const PREAMBLE_REPEAT: usize = 2;
     pub const SYNC_WORD_BITS: usize = 8;
-    pub const SYNC_WORD: u32 = 0xDEAD_BEEF;
+    /// Sync Word (共通定数)。
+    ///
+    /// DBPSK差動後の位相系列で自己相関サイドローブが小さくなる値を採用。
+    /// 下位ビットが実際に使われるため、主要運用長に対して以下を満たす:
+    /// - 8-bit  (Mary):  0xE2
+    /// - 16-bit (DSSS): 0xE6E2
+    pub const SYNC_WORD: u32 = 0xA5C3_E6E2;
     pub const PREAMBLE_SF: usize = 71;
     pub const PACKETS_PER_SYNC_BURST: usize = 2;
     pub const PAYLOAD_SIZE: usize = 24;
