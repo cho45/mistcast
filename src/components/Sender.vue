@@ -15,11 +15,8 @@ defineOptions({
 const runtime = useDemoRuntime();
 const attrs = useAttrs();
 
-const LT_K_MAX = 255;
-const PAYLOAD_SIZE_BYTES = 24;
 const SIZE_PREFIX_BYTES = 2;
-const MAX_TRANSPORT_BYTES = LT_K_MAX * PAYLOAD_SIZE_BYTES;
-const MAX_CONTENT_BYTES = MAX_TRANSPORT_BYTES - SIZE_PREFIX_BYTES;
+const DEFAULT_MAX_TRANSPORT_BYTES = 255 * 24; // バックエンド初期化前の表示用フォールバック
 const SIZE_WARNING_BYTES = 3500;
 const TOAST_DURATION_MS = 5000;
 const STORAGE_KEY = 'sender-send-mode';
@@ -97,11 +94,13 @@ let senderWorker: Worker | null = null;
 let senderBackend: Comlink.Remote<MistcastBackend> | null = null;
 let encoderNode: AudioWorkletNode | null = null;
 let analyserNode: AnalyserNode | null = null;
+const maxTransportBytes = ref(DEFAULT_MAX_TRANSPORT_BYTES);
+const maxContentBytes = computed(() => maxTransportBytes.value - SIZE_PREFIX_BYTES);
 
 let opQueue: Promise<void> = Promise.resolve();
 
 function validateFileSize(size: number): boolean {
-  return size <= MAX_CONTENT_BYTES;
+  return size <= maxContentBytes.value;
 }
 
 // localStorageから送信モードを復元
@@ -133,6 +132,13 @@ sendMode.value = loadSendMode();
 watch(sendMode, (newMode) => {
   saveSendMode(newMode);
 }, { immediate: false });
+
+watch(
+  () => runtime.modemMode.value,
+  () => {
+    void refreshMaxTransportBytes();
+  }
+);
 
 function showToast(message: string, type: ToastType = 'error') {
   const id = toastIdCounter++;
@@ -192,7 +198,7 @@ async function handleFileSelect(event: Event) {
   const file = target.files?.[0];
   if (file) {
     if (!validateFileSize(file.size)) {
-      showToast(t('sender.toasts.file_too_large', { max: MAX_CONTENT_BYTES }));
+      showToast(t('sender.toasts.file_too_large', { max: maxContentBytes.value }));
       target.value = '';
       return;
     }
@@ -231,7 +237,7 @@ async function handleDrop(event: DragEvent) {
   const file = event.dataTransfer?.files?.[0];
   if (file) {
     if (!validateFileSize(file.size)) {
-      showToast(t('sender.toasts.file_too_large', { max: MAX_CONTENT_BYTES }));
+      showToast(t('sender.toasts.file_too_large', { max: maxContentBytes.value }));
       return;
     }
     selectedFile.value = file;
@@ -256,6 +262,11 @@ function safeDisconnect<T extends AudioNode>(node: T | null, destination?: Audio
   } catch {
     // no-op
   }
+}
+
+async function refreshMaxTransportBytes() {
+  if (!senderBackend) return;
+  maxTransportBytes.value = await senderBackend.getMaxTransportBytes(runtime.modemMode.value);
 }
 
 async function loadSampleFile(): Promise<Uint8Array> {
@@ -294,6 +305,7 @@ async function rebuildSenderGraph() {
   senderWorker = new MistcastWorker();
   senderBackend = Comlink.wrap<MistcastBackend>(senderWorker);
   await senderBackend.init();
+  await refreshMaxTransportBytes();
 
   encoderNode = new AudioWorkletNode(audioContext, 'encoder-processor');
   await senderBackend.setAudioOutPort(Comlink.transfer(encoderNode.port, [encoderNode.port]));
@@ -335,7 +347,7 @@ async function startSendingData(data: Uint8Array) {
 async function startSendingText() {
   const data = new TextEncoder().encode(inputText.value);
   if (!validateFileSize(data.length)) {
-    showToast(t('sender.toasts.text_too_large', { max: MAX_CONTENT_BYTES }));
+    showToast(t('sender.toasts.text_too_large', { max: maxContentBytes.value }));
     return;
   }
   await startSendingData(data);
@@ -504,7 +516,7 @@ defineExpose({
       >
         <div class="drop-content">
           <div class="drop-text">{{ $t('sender.input.drop_hint') }}</div>
-          <div class="drop-hint">MAX {{ MAX_CONTENT_BYTES }} bytes</div>
+          <div class="drop-hint">MAX {{ maxContentBytes }} bytes</div>
         </div>
       </div>
     </div>
@@ -516,7 +528,7 @@ defineExpose({
     <div class="send-footer">
       <div class="footer-meta">
         <div class="size-indicator" :class="{ warning: contentBytes > SIZE_WARNING_BYTES }">
-          {{ contentBytes }} / {{ MAX_CONTENT_BYTES }} bytes
+          {{ contentBytes }} / {{ maxContentBytes }} bytes
         </div>
       </div>
       <template v-if="!isTransmitting">

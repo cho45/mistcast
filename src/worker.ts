@@ -51,7 +51,10 @@ type WasmDecoderLike = {
   reset(): void;
 };
 
-type WasmEncoderCtor = new (sampleRate: number, packetsPerBurst: number) => WasmEncoderLike;
+type WasmEncoderCtor = {
+  new (sampleRate: number, packetsPerBurst: number): WasmEncoderLike;
+  maxTransportBytes(): number;
+};
 type WasmDecoderCtor = new (sampleRate: number, packetsPerBurst: number) => WasmDecoderLike;
 type WasmInitFn = () => Promise<unknown>;
 type WasmBindings = {
@@ -192,6 +195,14 @@ export class MistcastBackend {
 
   async init() {
     await this.ensureWasm();
+  }
+
+  async getMaxTransportBytes(mode: ModemMode = "mary"): Promise<number> {
+    await this.init();
+    const bindings = this.requireBindings();
+    return mode === "mary"
+      ? bindings.WasmMaryEncoder.maxTransportBytes()
+      : bindings.WasmDsssEncoder.maxTransportBytes();
   }
 
   async setAudioOutPort(port: MessagePort) {

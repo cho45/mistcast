@@ -19,17 +19,23 @@ type WasmBindings = {
     flavor: 'base' | 'simd';
     wasmPath: string;
     init: (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>) => Promise<unknown>;
-    WasmDsssEncoder: new (sampleRate: number, packetsPerBurst: number) => {
-        set_data(data: Uint8Array): void;
-        pull_frame(): Float32Array | undefined;
+    WasmDsssEncoder: {
+        new (sampleRate: number, packetsPerBurst: number): {
+            set_data(data: Uint8Array): void;
+            pull_frame(): Float32Array | undefined;
+        };
+        maxTransportBytes(): number;
     };
     WasmDsssDecoder: new (sampleRate: number, packetsPerBurst: number) => {
         process_samples(samples: Float32Array): { complete: boolean };
         recovered_data(): Uint8Array | undefined;
     };
-    WasmMaryEncoder: new (sampleRate: number, packetsPerBurst: number) => {
-        set_data(data: Uint8Array): void;
-        pull_frame(): Float32Array | undefined;
+    WasmMaryEncoder: {
+        new (sampleRate: number, packetsPerBurst: number): {
+            set_data(data: Uint8Array): void;
+            pull_frame(): Float32Array | undefined;
+        };
+        maxTransportBytes(): number;
     };
     WasmMaryDecoder: new (sampleRate: number, packetsPerBurst: number) => {
         process_samples(samples: Float32Array): { complete: boolean };
@@ -106,6 +112,19 @@ function measureDecoderProcessingTime(
 beforeAll(async () => {
     for (const binding of BINDINGS) {
         await loadWasm(binding);
+    }
+});
+
+describe('WASM Encoder Static Limits', () => {
+    for (const binding of BINDINGS) {
+        it(`should expose maxTransportBytes on encoders (${binding.flavor})`, () => {
+            const dsssLimit = binding.WasmDsssEncoder.maxTransportBytes();
+            const maryLimit = binding.WasmMaryEncoder.maxTransportBytes();
+
+            expect(dsssLimit, `[${binding.flavor}] dsss maxTransportBytes`).toBe(255 * 24);
+            expect(maryLimit, `[${binding.flavor}] mary maxTransportBytes`).toBe(255 * 24);
+            expect(maryLimit, `[${binding.flavor}] dsss/mary maxTransportBytes parity`).toBe(dsssLimit);
+        });
     }
 });
 

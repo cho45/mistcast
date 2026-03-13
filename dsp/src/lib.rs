@@ -49,6 +49,11 @@ pub mod params {
     pub const INTERNAL_SPC: usize = 3;
 }
 
+/// 1セッションで送れる最大データ長（上位層ヘッダ付与前の生バイト数）。
+pub const fn max_transport_bytes() -> usize {
+    crate::frame::packet::LT_K_MAX * params::PAYLOAD_SIZE
+}
+
 #[derive(Clone, Debug)]
 pub struct DspConfig {
     pub sample_rate: f32,
@@ -251,6 +256,11 @@ impl WasmDsssEncoder {
         self.inner.reset();
         self.fountain_encoder = None;
     }
+
+    #[wasm_bindgen(js_name = maxTransportBytes)]
+    pub fn max_transport_bytes() -> usize {
+        max_transport_bytes()
+    }
 }
 
 // --- Mary (Robust) WASM Interface ---
@@ -382,5 +392,10 @@ impl WasmMaryEncoder {
     }
     pub fn reset(&mut self) {
         self.inner.reset();
+    }
+
+    #[wasm_bindgen(js_name = maxTransportBytes)]
+    pub fn max_transport_bytes() -> usize {
+        max_transport_bytes()
     }
 }

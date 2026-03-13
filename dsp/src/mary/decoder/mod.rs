@@ -1116,6 +1116,15 @@ mod tests {
         Decoder::new(160, 10, config)
     }
 
+    /// 指定した最小フレーム数が必要になる入力長を生成する。
+    /// 例: min_frames=2 の場合、1フレームでは完了しないように k を決める。
+    fn data_requiring_at_least_frames(config: &DspConfig, min_frames: usize, fill: u8) -> Vec<u8> {
+        let packets_per_frame = config.packets_per_burst.max(1);
+        let required_k = packets_per_frame * (min_frames.saturating_sub(1)) + 1;
+        let data_len = (required_k - 1) * PAYLOAD_SIZE + 1;
+        vec![fill; data_len]
+    }
+
     #[test]
     fn test_decoder_creation_and_reset() {
         let mut decoder = make_decoder();
@@ -1392,8 +1401,9 @@ mod tests {
         use crate::mary::encoder::Encoder;
         let config = DspConfig::default_48k();
         let mut encoder = Encoder::new(config.clone());
-        let mut decoder = Decoder::new(160, 10, config);
-        let data = vec![0x12u8; 16];
+        let data = data_requiring_at_least_frames(&config, 2, 0x12);
+        let k = data.len().div_ceil(PAYLOAD_SIZE).max(1);
+        let mut decoder = Decoder::new(data.len(), k, config);
         encoder.set_data(&data);
         let frame = encoder.encode_frame().unwrap();
         assert!(frame.len() > 2000, "Frame should be long enough");
@@ -1554,8 +1564,9 @@ mod tests {
         use rand::prelude::*;
         let config = DspConfig::default_48k();
         let mut encoder = Encoder::new(config.clone());
-        let mut decoder = Decoder::new(160, 10, config);
-        let data = vec![0xCDu8; 16];
+        let data = data_requiring_at_least_frames(&config, 2, 0xCD);
+        let k = data.len().div_ceil(PAYLOAD_SIZE).max(1);
+        let mut decoder = Decoder::new(data.len(), k, config);
         encoder.set_data(&data);
         let frame = encoder.encode_frame().unwrap();
         let mut rng = thread_rng();

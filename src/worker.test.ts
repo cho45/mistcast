@@ -16,6 +16,9 @@ vi.mock('comlink', () => ({
 
 vi.mock('../pkg/dsp', () => {
   class WasmDsssEncoder {
+    static maxTransportBytes() {
+      return 255 * 24;
+    }
     constructor(...args: any[]) {
       hoisted.WasmEncoder(...args);
     }
@@ -57,6 +60,9 @@ vi.mock('../pkg/dsp', () => {
 
 vi.mock('../pkg-simd/dsp', () => {
   class WasmDsssEncoder {
+    static maxTransportBytes() {
+      return 255 * 24;
+    }
     constructor(...args: any[]) {
       hoisted.WasmEncoder(...args);
     }
@@ -123,6 +129,14 @@ describe('MistcastBackend', () => {
 
     expect(hoisted.WasmEncoder).toHaveBeenCalledWith(48000, 1);
     expect(mockPort.postMessage).toHaveBeenCalled();
+  });
+
+  it('returns max transport bytes from encoder static method', async () => {
+    const { MistcastBackend } = await import('./worker');
+    const backend = new MistcastBackend();
+
+    const maxTransportBytes = await backend.getMaxTransportBytes('mary');
+    expect(maxTransportBytes).toBe(255 * 24);
   });
 
   it('decodes samples and extracts actual data from size prefix', async () => {

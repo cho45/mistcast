@@ -1411,9 +1411,16 @@ mod tests {
         assert_vec_close(&simd_q, &expected_q, 1e-6);
     }
 
-    fn build_test_signal(data: &[u8], k: usize, frames: usize, gap_samples: usize) -> Vec<f32> {
+    fn build_test_signal(
+        data: &[u8],
+        k: usize,
+        frames: usize,
+        packets_per_sync_burst: usize,
+        gap_samples: usize,
+    ) -> Vec<f32> {
         let mut enc_cfg = EncoderConfig::new(crate::dsss::params::dsp_config_48k());
         enc_cfg.fountain_k = k;
+        enc_cfg.packets_per_sync_burst = packets_per_sync_burst.max(1);
         let burst_count = enc_cfg.packets_per_sync_burst.max(1);
         let mut encoder = Encoder::new(enc_cfg);
         let params = FountainParams::new(k, PAYLOAD_SIZE);
@@ -1529,7 +1536,7 @@ mod tests {
     fn test_decoder_tracking_tolerates_clock_drift_ppm() {
         let data = b"tracking timing drift payload";
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
-        let signal = build_test_signal(data, k, 6, 64);
+        let signal = build_test_signal(data, k, 6, 2, 64);
         // 実オーディオI/Fで起きるオーダー(100ppm前後)のクロックずれを模擬。
         let drifted = apply_clock_drift_ppm(&signal, 120.0);
         let recovered = decode_signal(data, k, crate::dsss::params::dsp_config_48k(), &drifted)
@@ -1541,7 +1548,7 @@ mod tests {
     fn test_decoder_tracking_tolerates_carrier_offset() {
         let data = b"tracking carrier offset payload";
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
-        let signal = build_test_signal(data, k, 3, 64);
+        let signal = build_test_signal(data, k, 3, 2, 64);
 
         let mut rx_cfg = crate::dsss::params::dsp_config_48k();
         // 受信LOずれを模擬: 音響リンクで現実的な小さなCFO。
@@ -1556,7 +1563,7 @@ mod tests {
     fn test_decoder_direct_first_frame_payload_decode_has_no_crc_errors() {
         let data = vec![0xAAu8; 160];
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
-        let signal = build_test_signal(&data, k, 1, 64);
+        let signal = build_test_signal(&data, k, 1, 1, 64);
         let mut decoder = Decoder::new(data.len(), k, crate::dsss::params::dsp_config_48k());
         decoder.config.packets_per_burst = 1;
         append_processed_samples(&mut decoder, &signal);
@@ -1784,7 +1791,7 @@ mod tests {
         let data = b"sync word header";
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
         let mut signal = vec![0.0f32; 137];
-        signal.extend(build_test_signal(data, k, 3, 64));
+        signal.extend(build_test_signal(data, k, 3, 2, 64));
 
         let mut rx_cfg = crate::dsss::params::dsp_config_48k();
         rx_cfg.carrier_freq += 10.0;
@@ -2005,7 +2012,7 @@ mod tests {
         let data = vec![0xAAu8; 160];
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
         let num_frames = 20;
-        let signal = build_test_signal(&data, k, num_frames, 64);
+        let signal = build_test_signal(&data, k, num_frames, 1, 64);
 
         let mut decoder = Decoder::new(data.len(), k, crate::dsss::params::dsp_config_48k());
         decoder.config.packets_per_burst = 1;
@@ -2042,7 +2049,7 @@ mod tests {
         let data = vec![0xAAu8; 160];
         let k = data.len().div_ceil(crate::params::PAYLOAD_SIZE);
         let num_frames = 20;
-        let signal = build_test_signal(&data, k, num_frames, 64);
+        let signal = build_test_signal(&data, k, num_frames, 1, 64);
 
         let mut decoder = Decoder::new(data.len(), k, crate::dsss::params::dsp_config_48k());
         decoder.config.packets_per_burst = 1;
