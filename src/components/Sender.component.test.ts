@@ -546,7 +546,7 @@ describe('Sender.vue', () => {
       await tabButtons[1].trigger('click');
 
       const sampleButtons = wrapper.findAll('.sample-option-btn');
-      expect(sampleButtons).toHaveLength(2);
+      expect(sampleButtons).toHaveLength(3);
 
       // AVIF サンプルに切り替え
       await sampleButtons[1].trigger('click');
@@ -556,7 +556,13 @@ describe('Sender.vue', () => {
       expect(sampleInfo.text()).toContain('4008');
 
       const vm = wrapper.vm as any;
-      expect(vm.selectedSample.id).toBe('avif');
+      expect(vm.selectedSample.id).toBe('avif0');
+
+      // 3番目のサンプル (test1.avif) に切り替え
+      await sampleButtons[2].trigger('click');
+      expect(sampleInfo.text()).toContain('test1.avif');
+      expect(sampleInfo.text()).toContain('5894');
+      expect(vm.selectedSample.id).toBe('avif1');
     });
   });
 

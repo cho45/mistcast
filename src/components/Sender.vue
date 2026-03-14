@@ -23,6 +23,7 @@ const STORAGE_KEY = 'sender-send-mode';
 
 import sampleTestPng from '../assets/sample-files/test.png';
 import sampleTest0Avif from '../assets/sample-files/test0.avif';
+import sampleTest1Avif from '../assets/sample-files/test1.avif';
 
 interface SampleFile {
   id: string;
@@ -33,7 +34,8 @@ interface SampleFile {
 
 const SAMPLE_FILES: SampleFile[] = [
   { id: 'png', name: 'test.png', url: sampleTestPng, size: 921 },
-  { id: 'avif', name: 'test0.avif', url: sampleTest0Avif, size: 4008 },
+  { id: 'avif0', name: 'test0.avif', url: sampleTest0Avif, size: 4008 },
+  { id: 'avif1', name: 'test1.avif', url: sampleTest1Avif, size: 5894 },
 ];
 
 const selectedSample = ref<SampleFile>(SAMPLE_FILES[0]);
