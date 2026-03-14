@@ -87,16 +87,26 @@ pub(crate) struct PacketDecodeRuntime<'a> {
     pub llr_callback: &'a mut Option<LlrCallback>,
 }
 
-// DQPSK LLR は通常は best Walsh 仮説で計算する。
-// ただし Walsh 判定が曖昧な場合のみ上位仮説を混合し、LLR をやや保守化して
-// 復号処理で扱いやすい形に寄せる。
-const DQPSK_WALSH_TOPK_MAX: usize = 2;
-// walsh_conf = (E1-E2)/E1 がこの値未満なら Top-K 混合を有効化する。
+// DQPSK LLR は (Walsh仮説 h, 位相仮説 s) の同時尤度を
+// 全Walsh仮説で周辺化して計算する。
+// walsh_conf は位相追跡のゲート制御にも使うため継続して算出する。
+const DQPSK_WALSH_HYPOTHESES: usize = 16;
+// walsh_conf = (E1-E2)/E1 の観測閾値（統計/テストの判定用）。
+// 範囲: [0, 1]。大きくすると「曖昧」と判定される領域が広がる。
+#[cfg(test)]
 const DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH: f32 = 0.30;
 // DQPSK LLR 正規化の雑音床下限スケール。
 // 小さくすると LLR が立ちやすくなり、弱い仮説を過信しやすい（誤判定時の振れが大きくなる）。
 // 大きくすると LLR を保守化できる一方、十分高SNRでも過小信頼になり得る。
+// 妥当目安: >= 1.0。1.0未満は雑音床を過小評価しやすく、LLR過大化を招きやすい。
 const DQPSK_LLR_NOISE_FLOOR_SCALE: f32 = 5.0;
+// prev_phase の位相不確かさ分散推定（EWMA）に使う係数。
+// 妥当範囲: 0.0..1.0（1.0は更新停止に近いので非推奨）。
+// 大きいほど長期平均寄りで安定だが追従は遅く、小さいほど追従は速いが雑音に敏感。
+const DQPSK_PREV_PHASE_VAR_EWMA_ALPHA: f32 = 0.95;
+// 位相分散の上限 [rad]。外れ値で分散推定が暴走しないためのクリップ。
+// 妥当目安: 0.5..PI。小さすぎると常時保守化、大きすぎると外れ値耐性が下がる。
+const DQPSK_PREV_PHASE_SIGMA_MAX_RAD: f32 = 1.2;
 // 期待シンボルの振幅がこの値未満なら、方向が不安定とみなして hard 判定へフォールバックする。
 const DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN: f32 = 1e-3;
 
@@ -115,11 +125,41 @@ struct DecodeCandidateContext<'a> {
     options: &'a PacketDecodeOptions,
 }
 
+#[inline]
+fn log_add_exp(a: f32, b: f32) -> f32 {
+    if !a.is_finite() {
+        return b;
+    }
+    if !b.is_finite() {
+        return a;
+    }
+    let m = a.max(b);
+    m + ((a - m).exp() + (b - m).exp()).ln()
+}
+
+#[inline]
+fn dqpsk_symbol_metrics(diff: Complex32, norm_scale: f32) -> [f32; 4] {
+    let d = diff / norm_scale.max(1e-6);
+    [
+        d.re,  // s0: phase0 -> 00
+        d.im,  // s1: phase1 -> 01
+        -d.re, // s2: phase2 -> 11
+        -d.im, // s3: phase3 -> 10
+    ]
+}
+
+#[inline]
+fn dqpsk_prev_phase_kappa_from_sigma2(sigma2: f32) -> f32 {
+    let sigma2_clamped = sigma2.clamp(0.0, DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
+    (-0.5 * sigma2_clamped).exp().clamp(0.0, 1.0)
+}
+
 fn dqpsk_llr_from_walsh_hypotheses(
     demodulator: &Demodulator,
     on_corrs: &[Complex32; 16],
     phase_ref: Complex32,
     prev_phase: Complex32,
+    prev_phase_kappa: f32,
     max_energy: f32,
     second_energy: f32,
     on_rot_best: Complex32,
@@ -127,64 +167,50 @@ fn dqpsk_llr_from_walsh_hypotheses(
 ) -> ([f32; 2], f32, usize, [f32; 16]) {
     let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
     let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
-
-    let dqpsk_topk = if walsh_conf < DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH {
-        DQPSK_WALSH_TOPK_MAX
-    } else {
-        1usize
-    };
-
-    let mut top_indices = [0usize; DQPSK_WALSH_TOPK_MAX];
-    let mut top_energies = [0.0f32; DQPSK_WALSH_TOPK_MAX];
-    for (idx, &energy) in energies.iter().enumerate() {
-        for pos in 0..DQPSK_WALSH_TOPK_MAX {
-            if energy > top_energies[pos] {
-                for shift in (pos + 1..DQPSK_WALSH_TOPK_MAX).rev() {
-                    top_energies[shift] = top_energies[shift - 1];
-                    top_indices[shift] = top_indices[shift - 1];
-                }
-                top_energies[pos] = energy;
-                top_indices[pos] = idx;
-                break;
-            }
-        }
-    }
-
-    let mut dqpsk_llr = [0.0f32; 2];
-    let mut llr_weight_sum = 0.0f32;
     let energy_sum = energies.iter().sum::<f32>();
-    for rank in 0..dqpsk_topk {
-        let idx = top_indices[rank];
-        // 上位仮説を優先するため energy^2 で重み付けする。
-        let weight = top_energies[rank] * top_energies[rank];
-        if weight <= 0.0 {
-            continue;
-        }
+    let walsh_noise_floor_e = ((energy_sum - max_energy).max(0.0) / 15.0).max(1e-6);
+
+    // p(s|y) ∝ Σ_h p(y|h) p(y|s,h) を log-domain で周辺化する。
+    let mut sym_logs = [f32::NEG_INFINITY; 4];
+    for idx in 0..DQPSK_WALSH_HYPOTHESES {
+        let energy_h = energies[idx];
         let on_rot_h = on_corrs[idx] * phase_ref.conj();
         let diff_h = on_rot_h * prev_phase.conj();
-        let noise_floor_h = ((energy_sum - top_energies[rank]).max(0.0) / 15.0).sqrt();
+        let noise_floor_h = ((energy_sum - energy_h).max(0.0) / 15.0).sqrt();
         let norm_h = on_rot_h
             .norm()
             .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_h)
             .max(1e-6);
-        let llr_h = demodulator.dqpsk_llr(diff_h, norm_h);
-        dqpsk_llr[0] += weight * llr_h[0];
-        dqpsk_llr[1] += weight * llr_h[1];
-        llr_weight_sum += weight;
+        let mut phase_logs = dqpsk_symbol_metrics(diff_h, norm_h);
+        for item in &mut phase_logs {
+            *item *= prev_phase_kappa;
+        }
+        // 相対ログ重みを使って数値桁落ちを避ける（定数項はLLR差分で相殺される）。
+        let log_p_h = (energy_h - max_energy) / walsh_noise_floor_e;
+        for s in 0..4 {
+            sym_logs[s] = log_add_exp(sym_logs[s], log_p_h + phase_logs[s]);
+        }
     }
-    if llr_weight_sum > 0.0 {
-        dqpsk_llr[0] /= llr_weight_sum;
-        dqpsk_llr[1] /= llr_weight_sum;
+
+    let dqpsk_llr = if sym_logs.iter().all(|v| v.is_finite()) {
+        let bit0_0 = log_add_exp(sym_logs[0], sym_logs[1]);
+        let bit0_1 = log_add_exp(sym_logs[2], sym_logs[3]);
+        let bit1_0 = log_add_exp(sym_logs[0], sym_logs[3]);
+        let bit1_1 = log_add_exp(sym_logs[1], sym_logs[2]);
+        [bit0_0 - bit0_1, bit1_0 - bit1_1]
     } else {
         let noise_floor_best = ((energy_sum - max_energy).max(0.0) / 15.0).sqrt();
         let dqpsk_norm = on_rot_best
             .norm()
             .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_best)
             .max(1e-6);
-        dqpsk_llr = demodulator.dqpsk_llr(diff_best, dqpsk_norm);
-    }
+        let mut llr = demodulator.dqpsk_llr(diff_best, dqpsk_norm);
+        llr[0] *= prev_phase_kappa;
+        llr[1] *= prev_phase_kappa;
+        llr
+    };
 
-    (dqpsk_llr, walsh_conf, dqpsk_topk, energies)
+    (dqpsk_llr, walsh_conf, DQPSK_WALSH_HYPOTHESES, energies)
 }
 
 pub(crate) fn process_packet_core<D>(
@@ -210,6 +236,7 @@ where
 
     buffers.packet_llrs_buffer.clear();
     let mut total_packet_energy = 0.0f32;
+    let mut prev_phase_sigma2 = 0.0f32;
 
     for sym_idx in 0..expected_symbols {
         let symbol_start = options.spc + sym_idx * PAYLOAD_SPREAD_FACTOR * options.spc;
@@ -266,12 +293,14 @@ where
         let best_corr = on_corrs[best_idx];
         let on_rot = best_corr * tracking_state.phase_ref.conj();
         let diff = on_rot * prev_phase.conj();
+        let prev_phase_kappa = dqpsk_prev_phase_kappa_from_sigma2(prev_phase_sigma2);
 
         let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
             demodulator,
             &on_corrs,
             tracking_state.phase_ref,
             *prev_phase,
+            prev_phase_kappa,
             max_energy,
             second_energy,
             on_rot,
@@ -312,6 +341,9 @@ where
         if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
             stats.phase_err_abs_ge_1p0_symbols += 1;
         }
+        let phase_var_sample = (phase_err_abs * phase_err_abs).min(DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
+        prev_phase_sigma2 = DQPSK_PREV_PHASE_VAR_EWMA_ALPHA * prev_phase_sigma2
+            + (1.0 - DQPSK_PREV_PHASE_VAR_EWMA_ALPHA) * phase_var_sample;
         let innovation_rejected = tracking_state.phase_gate_enabled
             && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
             && dqpsk_conf_tracking < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
@@ -776,6 +808,7 @@ mod tests {
             &on_corrs,
             phase_ref,
             prev_phase,
+            1.0,
             100.0,
             1.0,
             on_rot_best,
@@ -784,13 +817,14 @@ mod tests {
         let expected = demodulator.dqpsk_llr(diff_best, on_rot_best.norm());
 
         assert!(walsh_conf > DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH);
-        assert_eq!(topk_used, 1);
-        assert_close(dqpsk_llr[0], expected[0], 1e-5, "llr0");
-        assert_close(dqpsk_llr[1], expected[1], 1e-5, "llr1");
+        assert_eq!(topk_used, DQPSK_WALSH_HYPOTHESES);
+        // Walsh尤度が十分に鋭い場合は joint 周辺化でも単一仮説に近づく。
+        assert_close(dqpsk_llr[0], expected[0], 1e-3, "llr0");
+        assert_close(dqpsk_llr[1], expected[1], 1e-3, "llr1");
     }
 
     #[test]
-    fn test_dqpsk_llr_uses_top2_weighted_mix_when_walsh_conf_is_low() {
+    fn test_dqpsk_llr_uses_joint_marginalization_when_walsh_conf_is_low() {
         let demodulator = Demodulator::new();
         let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
         on_corrs[0] = Complex32::new(10.0, 0.0); // energy=100, phase0
@@ -806,6 +840,7 @@ mod tests {
             &on_corrs,
             phase_ref,
             prev_phase,
+            1.0,
             100.0,
             80.0,
             on_rot_best,
@@ -814,30 +849,33 @@ mod tests {
 
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
-        let noise_floor0 = ((energy_sum - energies[0]).max(0.0) / 15.0).sqrt();
-        let noise_floor1 = ((energy_sum - energies[1]).max(0.0) / 15.0).sqrt();
-        let norm0 = on_corrs[0]
-            .norm()
-            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor0)
-            .max(1e-6);
-        let norm1 = on_corrs[1]
-            .norm()
-            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor1)
-            .max(1e-6);
-        let llr0 = demodulator.dqpsk_llr(on_corrs[0], norm0);
-        let llr1 = demodulator.dqpsk_llr(on_corrs[1], norm1);
-        let w0 = 100.0f32 * 100.0f32;
-        let w1 = 80.0f32 * 80.0f32;
+        let walsh_noise_floor_e = ((energy_sum - 100.0).max(0.0) / 15.0).max(1e-6);
+        let mut sym_logs = [f32::NEG_INFINITY; 4];
+        for idx in 0..DQPSK_WALSH_HYPOTHESES {
+            let energy_h = energies[idx];
+            let on_rot_h = on_corrs[idx] * phase_ref.conj();
+            let diff_h = on_rot_h * prev_phase.conj();
+            let noise_floor_h = ((energy_sum - energy_h).max(0.0) / 15.0).sqrt();
+            let norm_h = on_rot_h
+                .norm()
+                .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_h)
+                .max(1e-6);
+            let m = dqpsk_symbol_metrics(diff_h, norm_h);
+            let log_p_h = (energy_h - 100.0) / walsh_noise_floor_e;
+            for s in 0..4 {
+                sym_logs[s] = log_add_exp(sym_logs[s], log_p_h + m[s]);
+            }
+        }
         let expected = [
-            (w0 * llr0[0] + w1 * llr1[0]) / (w0 + w1),
-            (w0 * llr0[1] + w1 * llr1[1]) / (w0 + w1),
+            log_add_exp(sym_logs[0], sym_logs[1]) - log_add_exp(sym_logs[2], sym_logs[3]),
+            log_add_exp(sym_logs[0], sym_logs[3]) - log_add_exp(sym_logs[1], sym_logs[2]),
         ];
 
         assert!(walsh_conf < DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH);
-        assert_eq!(topk_used, 2);
+        assert_eq!(topk_used, DQPSK_WALSH_HYPOTHESES);
         assert_close(dqpsk_llr[0], expected[0], 1e-4, "llr0");
         assert_close(dqpsk_llr[1], expected[1], 1e-4, "llr1");
-        assert!((dqpsk_llr[1] - llr0[1]).abs() > 0.1);
+        assert!(dqpsk_llr[0].is_finite() && dqpsk_llr[1].is_finite());
     }
 
     #[test]
