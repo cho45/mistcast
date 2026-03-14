@@ -1,7 +1,10 @@
-use dsp::coding::fec;
+use dsp::coding::{fec, interleaver::BlockInterleaver, scrambler::Scrambler};
 use dsp::frame::packet::{Packet, PACKET_BYTES};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+const MARY_BITS_PER_SYMBOL: usize = 6;
+const MARY_WALSH_BITS_PER_SYMBOL: usize = 4;
 
 pub fn count_bit_errors_bytes(tx: &[u8], rx: Option<&[u8]>) -> usize {
     let Some(rx) = rx else {
@@ -83,6 +86,10 @@ pub fn bit_errors_and_runs_from_bits(
 pub struct PreFecStats {
     pub bit_errors: usize,
     pub bits_compared: usize,
+    pub walsh_bit_errors: usize,
+    pub walsh_bits_compared: usize,
+    pub dqpsk_bit_errors: usize,
+    pub dqpsk_bits_compared: usize,
     pub error_runs: usize,
     pub error_run_bits: usize,
     pub error_run_max: usize,
@@ -128,9 +135,22 @@ fn packet_seq_from_bits(packet_bits: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes([b1, b2]))
 }
 
+#[inline]
+fn interleave_f32_block(input: &[f32], rows: usize, cols: usize, output: &mut Vec<f32>) {
+    let total = rows * cols;
+    output.clear();
+    output.resize(total, 0.0);
+    for (k, &value) in input.iter().enumerate().take(total) {
+        let row = k / cols;
+        let col = k % cols;
+        output[col * rows + row] = value;
+    }
+}
+
 /// Mary BER集計用
 pub struct BerAccumulator {
     expected_fec_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
+    expected_interleaved_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
     expected_packet_bits: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
     expected_packet_bytes: Arc<Mutex<HashMap<u16, Vec<u8>>>>,
     register_packet_bytes: Arc<Mutex<Vec<u8>>>,
@@ -138,6 +158,10 @@ pub struct BerAccumulator {
     register_fec_bits: Arc<Mutex<Vec<u8>>>,
     raw_bit_errors: Arc<Mutex<usize>>,
     raw_bits_compared: Arc<Mutex<usize>>,
+    raw_walsh_bit_errors: Arc<Mutex<usize>>,
+    raw_walsh_bits_compared: Arc<Mutex<usize>>,
+    raw_dqpsk_bit_errors: Arc<Mutex<usize>>,
+    raw_dqpsk_bits_compared: Arc<Mutex<usize>>,
     raw_error_runs: Arc<Mutex<usize>>,
     raw_error_run_bits: Arc<Mutex<usize>>,
     raw_error_run_max: Arc<Mutex<usize>>,
@@ -164,6 +188,7 @@ impl BerAccumulator {
     pub fn new() -> Self {
         Self {
             expected_fec_bits: Arc::new(Mutex::new(HashMap::new())),
+            expected_interleaved_bits: Arc::new(Mutex::new(HashMap::new())),
             expected_packet_bits: Arc::new(Mutex::new(HashMap::new())),
             expected_packet_bytes: Arc::new(Mutex::new(HashMap::new())),
             register_packet_bytes: Arc::new(Mutex::new(Vec::with_capacity(PACKET_BYTES))),
@@ -171,6 +196,10 @@ impl BerAccumulator {
             register_fec_bits: Arc::new(Mutex::new(Vec::with_capacity((PACKET_BYTES * 8 + 6) * 2))),
             raw_bit_errors: Arc::new(Mutex::new(0)),
             raw_bits_compared: Arc::new(Mutex::new(0)),
+            raw_walsh_bit_errors: Arc::new(Mutex::new(0)),
+            raw_walsh_bits_compared: Arc::new(Mutex::new(0)),
+            raw_dqpsk_bit_errors: Arc::new(Mutex::new(0)),
+            raw_dqpsk_bits_compared: Arc::new(Mutex::new(0)),
             raw_error_runs: Arc::new(Mutex::new(0)),
             raw_error_run_bits: Arc::new(Mutex::new(0)),
             raw_error_run_max: Arc::new(Mutex::new(0)),
@@ -202,6 +231,15 @@ impl BerAccumulator {
         pkt.serialize_into(&mut packet_bytes);
         fec::bytes_to_bits_into(&packet_bytes, &mut bits);
         fec::encode_into(&bits, &mut fec_encoded);
+        let mut scrambled = fec_encoded.clone();
+        let mut scrambler = Scrambler::default();
+        scrambler.process_bits(&mut scrambled);
+        let mut interleaved = vec![0u8; dsp::mary::interleaver_config::interleaved_bits()];
+        let interleaver = BlockInterleaver::new(
+            dsp::mary::interleaver_config::INTERLEAVER_ROWS,
+            dsp::mary::interleaver_config::INTERLEAVER_COLS,
+        );
+        interleaver.interleave_in_place(&scrambled, &mut interleaved);
 
         self.expected_packet_bits
             .lock()
@@ -215,6 +253,10 @@ impl BerAccumulator {
             .lock()
             .unwrap()
             .insert(seq, fec_encoded.clone());
+        self.expected_interleaved_bits
+            .lock()
+            .unwrap()
+            .insert(seq, interleaved);
     }
 
     /// CRC 通過後に受理されたパケットの観測コールバックを生成
@@ -243,9 +285,14 @@ impl BerAccumulator {
     /// LLRコールバックを生成
     pub fn llr_callback(&self) -> LlrCallback {
         let efb = Arc::clone(&self.expected_fec_bits);
+        let eib = Arc::clone(&self.expected_interleaved_bits);
         let epb = Arc::clone(&self.expected_packet_bits);
         let rbe = Arc::clone(&self.raw_bit_errors);
         let rbc = Arc::clone(&self.raw_bits_compared);
+        let rwbe = Arc::clone(&self.raw_walsh_bit_errors);
+        let rwbc = Arc::clone(&self.raw_walsh_bits_compared);
+        let rdbe = Arc::clone(&self.raw_dqpsk_bit_errors);
+        let rdbc = Arc::clone(&self.raw_dqpsk_bits_compared);
         let rer = Arc::clone(&self.raw_error_runs);
         let rrb = Arc::clone(&self.raw_error_run_bits);
         let rrm = Arc::clone(&self.raw_error_run_max);
@@ -260,6 +307,9 @@ impl BerAccumulator {
         let pdm = Arc::clone(&self.post_decode_matched);
         let fec_workspace = Arc::new(Mutex::new(fec::FecDecodeWorkspace::new()));
         let decoded_bits_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let il_rows = dsp::mary::interleaver_config::INTERLEAVER_ROWS;
+        let il_cols = dsp::mary::interleaver_config::INTERLEAVER_COLS;
+        let il_bits = dsp::mary::interleaver_config::interleaved_bits();
 
         Box::new(move |llrs: &[f32]| {
             *pda.lock().unwrap() += 1;
@@ -288,6 +338,45 @@ impl BerAccumulator {
             *max_guard = (*max_guard).max(run_max);
             cew.lock().unwrap().push(errors);
 
+            if llrs.len() >= il_bits {
+                if let Some(expected_interleaved) = eib.lock().unwrap().get(&seq).cloned() {
+                    let mut scrambled_llrs = llrs[..il_bits].to_vec();
+                    let mut scrambler = Scrambler::default();
+                    for llr in &mut scrambled_llrs {
+                        if scrambler.next_bit() == 1 {
+                            *llr = -*llr;
+                        }
+                    }
+                    let mut interleaved_llrs = Vec::with_capacity(il_bits);
+                    interleave_f32_block(&scrambled_llrs, il_rows, il_cols, &mut interleaved_llrs);
+
+                    let mut walsh_errors = 0usize;
+                    let mut walsh_bits = 0usize;
+                    let mut dqpsk_errors = 0usize;
+                    let mut dqpsk_bits = 0usize;
+                    for j in 0..il_bits.min(expected_interleaved.len()) {
+                        let bit = expected_interleaved[j];
+                        let llr = interleaved_llrs[j];
+                        let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
+                        if (j % MARY_BITS_PER_SYMBOL) < MARY_WALSH_BITS_PER_SYMBOL {
+                            walsh_bits += 1;
+                            if is_err {
+                                walsh_errors += 1;
+                            }
+                        } else {
+                            dqpsk_bits += 1;
+                            if is_err {
+                                dqpsk_errors += 1;
+                            }
+                        }
+                    }
+                    *rwbe.lock().unwrap() += walsh_errors;
+                    *rwbc.lock().unwrap() += walsh_bits;
+                    *rdbe.lock().unwrap() += dqpsk_errors;
+                    *rdbc.lock().unwrap() += dqpsk_bits;
+                }
+            }
+
             let expected_post = match epb.lock().unwrap().get(&seq) {
                 Some(bits) => bits.clone(),
                 None => return,
@@ -309,6 +398,10 @@ impl BerAccumulator {
     pub fn extract_pre_fec(&self) -> PreFecStats {
         let raw_bit_errors = *self.raw_bit_errors.lock().unwrap();
         let raw_bits_compared = *self.raw_bits_compared.lock().unwrap();
+        let raw_walsh_bit_errors = *self.raw_walsh_bit_errors.lock().unwrap();
+        let raw_walsh_bits_compared = *self.raw_walsh_bits_compared.lock().unwrap();
+        let raw_dqpsk_bit_errors = *self.raw_dqpsk_bit_errors.lock().unwrap();
+        let raw_dqpsk_bits_compared = *self.raw_dqpsk_bits_compared.lock().unwrap();
         let raw_error_runs = *self.raw_error_runs.lock().unwrap();
         let raw_error_run_bits = *self.raw_error_run_bits.lock().unwrap();
         let raw_error_run_max = *self.raw_error_run_max.lock().unwrap();
@@ -319,6 +412,10 @@ impl BerAccumulator {
         PreFecStats {
             bit_errors: raw_bit_errors,
             bits_compared: raw_bits_compared,
+            walsh_bit_errors: raw_walsh_bit_errors,
+            walsh_bits_compared: raw_walsh_bits_compared,
+            dqpsk_bit_errors: raw_dqpsk_bit_errors,
+            dqpsk_bits_compared: raw_dqpsk_bits_compared,
             error_runs: raw_error_runs,
             error_run_bits: raw_error_run_bits,
             error_run_max: raw_error_run_max,
@@ -562,6 +659,11 @@ mod tests {
         let pre = accum.extract_pre_fec();
         assert_eq!(pre.codeword_count, 2);
         assert_eq!(pre.bit_errors, 1);
+        assert_eq!(
+            pre.walsh_bits_compared + pre.dqpsk_bits_compared,
+            pre.bits_compared
+        );
+        assert_eq!(pre.walsh_bit_errors + pre.dqpsk_bit_errors, pre.bit_errors);
         assert_eq!(pre.codeword_error_weights, vec![0, 1]);
         let (att, mat) = accum.extract_decode_stats();
         assert_eq!(att, 3);

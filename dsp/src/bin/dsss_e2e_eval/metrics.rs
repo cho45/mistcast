@@ -19,6 +19,10 @@ pub struct Metrics {
     pub completion_secs: Vec<f32>,
     pub total_raw_bit_errors: usize,
     pub total_raw_bits_compared: usize,
+    pub total_raw_walsh_bit_errors: usize,
+    pub total_raw_walsh_bits_compared: usize,
+    pub total_raw_dqpsk_bit_errors: usize,
+    pub total_raw_dqpsk_bits_compared: usize,
     pub total_raw_error_runs: usize,
     pub total_raw_error_run_bits: usize,
     pub max_raw_error_run_len: usize,
@@ -181,6 +185,10 @@ impl Metrics {
     pub fn set_mary_raw_ber(&mut self, stats: PreFecStats) {
         self.total_raw_bit_errors = stats.bit_errors;
         self.total_raw_bits_compared = stats.bits_compared;
+        self.total_raw_walsh_bit_errors = stats.walsh_bit_errors;
+        self.total_raw_walsh_bits_compared = stats.walsh_bits_compared;
+        self.total_raw_dqpsk_bit_errors = stats.dqpsk_bit_errors;
+        self.total_raw_dqpsk_bits_compared = stats.dqpsk_bits_compared;
         self.total_raw_error_runs = stats.error_runs;
         self.total_raw_error_run_bits = stats.error_run_bits;
         self.max_raw_error_run_len = stats.error_run_max;
@@ -340,6 +348,32 @@ impl Metrics {
             f32::NAN
         } else {
             self.total_raw_bit_errors as f32 / self.total_raw_bits_compared as f32
+        }
+    }
+
+    pub fn raw_ber_walsh(&self) -> f32 {
+        if self.total_raw_walsh_bits_compared == 0 {
+            f32::NAN
+        } else {
+            self.total_raw_walsh_bit_errors as f32 / self.total_raw_walsh_bits_compared as f32
+        }
+    }
+
+    pub fn raw_ber_dqpsk(&self) -> f32 {
+        if self.total_raw_dqpsk_bits_compared == 0 {
+            f32::NAN
+        } else {
+            self.total_raw_dqpsk_bit_errors as f32 / self.total_raw_dqpsk_bits_compared as f32
+        }
+    }
+
+    pub fn raw_ber_dqpsk_over_walsh(&self) -> f32 {
+        let walsh = self.raw_ber_walsh();
+        let dqpsk = self.raw_ber_dqpsk();
+        if !walsh.is_finite() || !dqpsk.is_finite() || walsh <= 0.0 {
+            f32::NAN
+        } else {
+            dqpsk / walsh
         }
     }
 
@@ -663,7 +697,17 @@ mod tests {
         // 5. Raw BER
         m.total_raw_bit_errors = 100;
         m.total_raw_bits_compared = 1000;
+        m.total_raw_walsh_bit_errors = 60;
+        m.total_raw_walsh_bits_compared = 700;
+        m.total_raw_dqpsk_bit_errors = 40;
+        m.total_raw_dqpsk_bits_compared = 300;
         assert_eq!(m.raw_ber(), 100.0 / 1000.0);
+        assert_eq!(m.raw_ber_walsh(), 60.0 / 700.0);
+        assert_eq!(m.raw_ber_dqpsk(), 40.0 / 300.0);
+        assert_eq!(
+            m.raw_ber_dqpsk_over_walsh(),
+            (40.0 / 300.0) / (60.0 / 700.0)
+        );
 
         // 6. LLR Rescue
         m.total_llr_second_pass_attempts = 20;

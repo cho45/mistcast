@@ -32,6 +32,9 @@ define_metrics! {
     packet_accept_ratio,           "受理パケット率 = accepted_packets / 全送信packet数",|_, m| m.packet_accept_ratio().into(), default;
     ber,                           "復元成功 payload に対する事後 BER",             |_, m| m.ber().into(), default;
     raw_ber,                       "PHY デコーダの FEC 復号前 codeword BER",        |_, m| m.raw_ber().into(), default;
+    raw_ber_walsh,                 "PHY デコーダの FEC 復号前 BER (Walsh由来4bit)", |_, m| m.raw_ber_walsh().into();
+    raw_ber_dqpsk,                 "PHY デコーダの FEC 復号前 BER (DQPSK由来2bit)", |_, m| m.raw_ber_dqpsk().into();
+    raw_ber_dqpsk_over_walsh,      "raw_ber_dqpsk / raw_ber_walsh",                 |_, m| m.raw_ber_dqpsk_over_walsh().into();
     goodput_effective_bps,         "受理パケットベース有効 payload bitrate [bps]",        |_, m| m.goodput_effective_bps().into(), default;
     goodput_success_mean_bps,      "復元完了区間合計に対する payload bitrate [bps]",      |ctx, m| m.goodput_success_mean_bps(ctx.payload_bits).into(), default;
     p95_complete_s,                "復元成功イベントの完了時間 95% 点 [sec]",       |_, m| m.p95_completion_sec().into(), default;
