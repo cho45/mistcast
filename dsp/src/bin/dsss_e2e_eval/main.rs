@@ -25,10 +25,10 @@ define_metrics! {
     phy,                           "物理方式",                                     |ctx, _| ctx.phy.into(), default;
     mary_fde_mode,                 "Mary の FDE モード",                           |ctx, _| ctx.mary_fde_mode.into(), default;
     total_sim_sec,                 "評価に含めた受信サンプルの総時間 [sec]",        |_, m| m.total_sim_sec.into(), default;
-    // 理論系: awgn_snr_db はサンプル帯域のSNRとして扱うため、B=sample_rateで換算する。
-    ebn0_db,                       "AWGN 仮定 (B=sample_rate) から換算した理論 Eb/N0 [dB]",         |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_ebn0_db(snr, ctx.sample_rate, ctx.bit_rate)).into(), default;
-    cn0_db,                        "AWGN 仮定 (B=sample_rate) から換算した理論 C/N0 [dB-Hz]",        |ctx, m| m.awgn_snr_db(ctx.sigma).map(|snr| dsp::common::channel::snr_db_to_cn0_db(snr, ctx.sample_rate)).into(), default;
-    snr_wideband_db,               "AWGN 仮定での受信全帯域 SNR [dB]",             |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
+    // 理論系: 実信号AWGNの分散比 SNR から C/N0・Eb/N0 を出すため、B=fs/2 (Nyquist帯域) を使う。
+    ebn0_db,                       "AWGN 仮定 (B=sample_rate/2) から換算した理論 Eb/N0 [dB]",       |ctx, m| m.awgn_ebn0_db(ctx.sigma, ctx.sample_rate, ctx.bit_rate).into(), default;
+    cn0_db,                        "AWGN 仮定 (B=sample_rate/2) から換算した理論 C/N0 [dB-Hz]",      |ctx, m| m.awgn_cn0_db(ctx.sigma, ctx.sample_rate).into(), default;
+    snr_wideband_db,               "AWGN 分散比 SNR [dB] (定義帯域: B=sample_rate/2)", |ctx, m| m.awgn_snr_db(ctx.sigma).into(), default;
     packet_accept_ratio,           "受理パケット率 = accepted_packets / 全送信packet数",|_, m| m.packet_accept_ratio().into(), default;
     ber,                           "復元成功 payload に対する事後 BER",             |_, m| m.ber().into(), default;
     raw_ber,                       "PHY デコーダの FEC 復号前 codeword BER",        |_, m| m.raw_ber().into(), default;
@@ -56,7 +56,7 @@ define_metrics! {
     phase_err_abs_mean_rad,        "位相誤差絶対値の平均 [rad]",                    |_, m| m.phase_err_abs_mean_rad().into(), default;
     phase_err_abs_ge_0p5_ratio,    "|phase error| >= 0.5 rad の比率",               |_, m| m.phase_err_abs_ge_0p5_ratio().into(), default;
     phase_err_abs_ge_1p0_ratio,    "|phase error| >= 1.0 rad の比率",               |_, m| m.phase_err_abs_ge_1p0_ratio().into(), default;
-    avg_last_est_snr_db,           "受信器内部の推定 SNR の平均 [dB]",              |_, m| m.avg_last_est_snr_db().into(), default;
+    avg_last_est_snr_db,           "受信器内部の推定 SNR の平均 [dB] (定義帯域: B≈chip_rate)", |_, m| m.avg_last_est_snr_db().into(), default;
     // 推定系: avg_last_est_snr_db は受信器内部定義のSNR。現実装では B≈chip_rate で正規化する。
     est_ebn0_db,                   "受信器内部推定SNR (B≈chip_rate) から換算した推定 Eb/N0 [dB]",   |ctx, m| m.avg_last_est_ebn0_db(ctx.chip_rate, ctx.bit_rate).into();
     est_cn0_db,                    "受信器内部推定SNR (B≈chip_rate) から換算した推定 C/N0 [dB-Hz]", |ctx, m| m.avg_last_est_cn0_db(ctx.chip_rate).into();
@@ -320,10 +320,11 @@ mod tests {
         let cn0_db = metric_float("cn0_db", &ctx, &m).expect("cn0_db");
         let ebn0_db = metric_float("ebn0_db", &ctx, &m).expect("ebn0_db");
 
-        let expected_cn0 = snr_db + 10.0 * sample_rate.log10();
+        let expected_bandwidth = sample_rate * 0.5;
+        let expected_cn0 = snr_db + 10.0 * expected_bandwidth.log10();
         assert!((cn0_db - expected_cn0).abs() < 1e-4);
 
-        let expected_ebn0 = snr_db + 10.0 * (sample_rate / bit_rate).log10();
+        let expected_ebn0 = snr_db + 10.0 * (expected_bandwidth / bit_rate).log10();
         assert!((ebn0_db - expected_ebn0).abs() < 1e-4);
 
         // C/N0 = Eb/N0 + 10log10(Rb)

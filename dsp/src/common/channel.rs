@@ -167,11 +167,12 @@ pub fn add_awgn_snr_iq(
 
 /// Eb/N0 (ビットエネルギー対雑音電力密度比) [dB] を内部的な SNR [dB] に変換する。
 /// ここでの内部SNRは、指定された帯域幅 (bandwidth) 全体での信号電力対雑音電力比。
-/// 離散時間信号において雑音電力をサンプリングレート fs 全域で定義する場合、bandwidth には fs を指定する。
-/// 重要: `bandwidth` は「その SNR が定義されている帯域 B」を指定すること。
+/// 重要: `bandwidth` は「その SNR を定義したときの帯域 B[Hz]」を必ず指定すること。
+/// ここでの式は汎用で、どの帯域を使うかは SNR の定義方法に依存する。
 /// 例:
-/// - 波形電力ベースSNRなら `bandwidth = sample_rate`
-/// - チップ領域/相関器内部で定義したSNRなら `bandwidth = chip_rate`（または等価帯域）
+/// - 実信号AWGN分散比 `SNR = P_signal / sigma^2`（本プロジェクトの e2e_eval 理論列）
+///   では C/N0(片側PSD)との対応として `bandwidth = sample_rate / 2` が整合
+/// - 相関器/チップ領域で定義した内部SNRなら `bandwidth = chip_rate`（または等価帯域）
 /// rb は情報ビットレート (bps)。
 pub fn ebn0_db_to_snr_db(ebn0_db: f32, bandwidth: f32, rb: f32) -> f32 {
     // SNR = (Eb/N0) * (Rb/B)

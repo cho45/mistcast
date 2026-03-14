@@ -548,6 +548,29 @@ impl Metrics {
         Some(dsp::common::channel::snr_db_to_cn0_db(est_snr_db, beq))
     }
 
+    /// 実サンプリング信号(実数)に付与した AWGN の理論換算で使う SNR 定義帯域 B [Hz]。
+    ///
+    /// `awgn_snr_db` は時系列の分散比 `P_signal / sigma^2` から計算するため、
+    /// C/N0(片側PSDの慣習)への換算では Nyquist 帯域 `fs/2` を用いる。
+    pub fn awgn_snr_bandwidth_hz(sample_rate_hz: f32) -> f32 {
+        (sample_rate_hz * 0.5).max(1e-6)
+    }
+
+    /// AWGN 仮定の理論 C/N0 [dB-Hz]。
+    pub fn awgn_cn0_db(&self, sigma: f32, sample_rate_hz: f32) -> Option<f32> {
+        let snr_db = self.awgn_snr_db(sigma)?;
+        let beq = Self::awgn_snr_bandwidth_hz(sample_rate_hz);
+        Some(dsp::common::channel::snr_db_to_cn0_db(snr_db, beq))
+    }
+
+    /// AWGN 仮定の理論 Eb/N0 [dB]。
+    pub fn awgn_ebn0_db(&self, sigma: f32, sample_rate_hz: f32, bit_rate: f32) -> Option<f32> {
+        let snr_db = self.awgn_snr_db(sigma)?;
+        let beq = Self::awgn_snr_bandwidth_hz(sample_rate_hz);
+        let rb = bit_rate.max(1e-6);
+        Some(dsp::common::channel::snr_db_to_ebn0_db(snr_db, beq, rb))
+    }
+
     pub fn awgn_snr_db(&self, sigma: f32) -> Option<f32> {
         if sigma <= 0.0 {
             return None;
@@ -771,6 +794,28 @@ mod tests {
         assert_eq!(m.phase_gate_on_ratio(), 0.7);
         assert_eq!(m.phase_err_abs_mean_rad().unwrap(), 50.0 / 1000.0);
         assert_eq!(m.phase_err_abs_ge_0p5_ratio(), 100.0 / 1000.0);
+    }
+
+    #[test]
+    fn test_awgn_ebn0_cn0_use_nyquist_bandwidth() {
+        let mut m = Metrics::new(1);
+        m.total_tx_signal_energy = 1000.0;
+        m.total_tx_signal_samples = 2000; // p_sig = 0.5
+        let sigma = 0.2f32; // p_noise = 0.04
+        let fs = 48_000.0f32;
+        let rb = 1_000.0f32;
+
+        let snr_db = m.awgn_snr_db(sigma).unwrap();
+        let beq = Metrics::awgn_snr_bandwidth_hz(fs);
+        assert!((beq - fs * 0.5).abs() < 1e-6);
+
+        let cn0_db = m.awgn_cn0_db(sigma, fs).unwrap();
+        let ebn0_db = m.awgn_ebn0_db(sigma, fs, rb).unwrap();
+
+        let expected_cn0 = snr_db + 10.0 * beq.log10();
+        let expected_ebn0 = snr_db + 10.0 * (beq / rb).log10();
+        assert!((cn0_db - expected_cn0).abs() < 1e-4);
+        assert!((ebn0_db - expected_ebn0).abs() < 1e-4);
     }
 
     #[test]
