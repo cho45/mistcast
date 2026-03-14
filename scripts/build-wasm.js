@@ -11,7 +11,7 @@ const DSP_ROOT = path.join(RADIO_ROOT, "dsp");
 const flavor = String(process.env.WASM_FLAVOR ?? "both").toLowerCase();
 const noOptRaw = String(process.env.WASM_NO_OPT ?? "1").toLowerCase();
 const noOpt = noOptRaw === "1" || noOptRaw === "true" || noOptRaw === "on";
-const mode = String(process.env.WASM_MODE ?? "no-install");
+const mode = String(process.env.WASM_MODE ?? "normal");
 
 const pickFlavors = () => {
 	if (flavor === "base") return ["base"];

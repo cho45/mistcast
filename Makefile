@@ -1,12 +1,33 @@
 # 音響通信DSPシステム (outer-kuiper) Makefile
 
 .PHONY: all test test-verbose test-dsp-wasm-simd bench-native-dsp profile-native-dsss profile-wasm-node build example clean check build-wasm dev build-all \
+	toolchain-install toolchain-check \
 	phy-baseline phy-baseline-full phy-compare \
 	dsss-e2e-baseline dsss-e2e-baseline-full dsss-e2e-compare
 
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+WASM_PACK_VERSION ?= 0.14.0
 
 all: build-all
+
+# 開発ツールチェーン導入 (Rust + WASM)
+toolchain-install:
+	rustup target add wasm32-unknown-unknown
+	cargo install --locked --force wasm-pack --version $(WASM_PACK_VERSION)
+
+# 開発ツールチェーン確認
+toolchain-check:
+	@echo "== toolchain versions =="
+	@echo -n "node: " && node --version
+	@echo -n "npm: " && npm --version
+	@echo -n "rustc: " && rustc --version
+	@echo -n "cargo: " && cargo --version
+	@echo -n "wasm-pack: " && wasm-pack --version
+	@echo -n "wasm-bindgen (optional): " && (wasm-bindgen --version || echo "not found")
+	@echo "== rust targets =="
+	@rustup target list --installed | rg -x "wasm32-unknown-unknown" >/dev/null || \
+		(echo "missing rust target: wasm32-unknown-unknown"; exit 1)
+	@echo "wasm32-unknown-unknown: installed"
 
 # Rustビルド確認
 build:
