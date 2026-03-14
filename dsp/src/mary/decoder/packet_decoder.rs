@@ -97,6 +97,8 @@ const DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH: f32 = 0.30;
 // 小さくすると LLR が立ちやすくなり、弱い仮説を過信しやすい（誤判定時の振れが大きくなる）。
 // 大きくすると LLR を保守化できる一方、十分高SNRでも過小信頼になり得る。
 const DQPSK_LLR_NOISE_FLOOR_SCALE: f32 = 5.0;
+// 期待シンボルの振幅がこの値未満なら、方向が不安定とみなして hard 判定へフォールバックする。
+const DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN: f32 = 1e-3;
 
 struct DecodeLayout {
     rows: usize,
@@ -299,7 +301,7 @@ where
             stats.phase_gate_off_symbols += 1;
         }
 
-        let decided = decide_dqpsk_symbol_from_llr(dqpsk_llr);
+        let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
         let phase_err = tracking::phase_error_from_diff(diff, decided);
         let phase_err_abs = phase_err.abs();
         stats.phase_err_abs_sum_rad += phase_err_abs as f64;
@@ -625,6 +627,41 @@ pub(crate) fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
     }
 }
 
+#[inline]
+fn prob_bit0_from_llr(llr: f32) -> f32 {
+    if llr >= 0.0 {
+        1.0 / (1.0 + (-llr).exp())
+    } else {
+        let e = llr.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// 位相更新専用の DQPSK シンボル推定。
+/// LLR から bit 事後確率を作り、4位相の期待値方向を使って位相誤差を計算する。
+/// 曖昧すぎて期待値振幅が極小のときは hard 判定にフォールバックする。
+#[inline]
+pub(crate) fn decide_dqpsk_symbol_for_phase_update(dqpsk_llr: [f32; 2]) -> Complex32 {
+    let p_b0_0 = prob_bit0_from_llr(dqpsk_llr[0]);
+    let p_b1_0 = prob_bit0_from_llr(dqpsk_llr[1]);
+    let p_b0_1 = 1.0 - p_b0_0;
+    let p_b1_1 = 1.0 - p_b1_0;
+
+    // Gray マッピング:
+    // s0:(0,0)->+1, s1:(0,1)->+j, s2:(1,1)->-1, s3:(1,0)->-j
+    let w0 = p_b0_0 * p_b1_0;
+    let w1 = p_b0_0 * p_b1_1;
+    let w2 = p_b0_1 * p_b1_1;
+    let w3 = p_b0_1 * p_b1_0;
+    let soft = Complex32::new(w0 - w2, w1 - w3);
+    let norm = soft.norm();
+    if norm > DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN {
+        soft / norm
+    } else {
+        decide_dqpsk_symbol_from_llr(dqpsk_llr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,6 +864,38 @@ mod tests {
         assert_eq!(
             decide_dqpsk_symbol_from_llr([-1.0, 1.0]),
             Complex32::new(0.0, -1.0)
+        );
+    }
+
+    #[test]
+    fn test_decide_dqpsk_symbol_for_phase_update_falls_back_when_llr_is_ambiguous() {
+        let hard = decide_dqpsk_symbol_from_llr([0.0, 0.0]);
+        let soft = decide_dqpsk_symbol_for_phase_update([0.0, 0.0]);
+        assert_eq!(soft, hard);
+    }
+
+    #[test]
+    fn test_decide_dqpsk_symbol_for_phase_update_uses_soft_direction_when_llr_is_asymmetric() {
+        let soft = decide_dqpsk_symbol_for_phase_update([2.0, 0.5]);
+        assert!(soft.re > 0.0);
+        assert!(soft.im > 0.0);
+        assert_close(soft.norm(), 1.0, 1e-5, "soft_symbol_norm");
+    }
+
+    #[test]
+    fn test_soft_phase_update_symbol_reduces_phase_error_vs_hard_decision() {
+        let llr = [2.0, 0.5];
+        let hard = decide_dqpsk_symbol_from_llr(llr);
+        let soft = decide_dqpsk_symbol_for_phase_update(llr);
+        let diff = Complex32::new(20.0f32.to_radians().cos(), 20.0f32.to_radians().sin());
+
+        let err_hard = tracking::phase_error_from_diff(diff, hard).abs();
+        let err_soft = tracking::phase_error_from_diff(diff, soft).abs();
+        assert!(
+            err_soft < err_hard,
+            "soft phase update should reduce phase error: hard={} soft={}",
+            err_hard,
+            err_soft
         );
     }
 
