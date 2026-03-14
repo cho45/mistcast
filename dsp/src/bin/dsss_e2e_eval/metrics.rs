@@ -23,6 +23,10 @@ pub struct Metrics {
     pub total_raw_walsh_bits_compared: usize,
     pub total_raw_dqpsk_bit_errors: usize,
     pub total_raw_dqpsk_bits_compared: usize,
+    pub total_raw_dqpsk_walsh_weak_bit_errors: usize,
+    pub total_raw_dqpsk_walsh_weak_bits_compared: usize,
+    pub total_raw_dqpsk_walsh_strong_bit_errors: usize,
+    pub total_raw_dqpsk_walsh_strong_bits_compared: usize,
     pub total_raw_error_runs: usize,
     pub total_raw_error_run_bits: usize,
     pub max_raw_error_run_len: usize,
@@ -189,6 +193,10 @@ impl Metrics {
         self.total_raw_walsh_bits_compared = stats.walsh_bits_compared;
         self.total_raw_dqpsk_bit_errors = stats.dqpsk_bit_errors;
         self.total_raw_dqpsk_bits_compared = stats.dqpsk_bits_compared;
+        self.total_raw_dqpsk_walsh_weak_bit_errors = stats.dqpsk_walsh_weak_bit_errors;
+        self.total_raw_dqpsk_walsh_weak_bits_compared = stats.dqpsk_walsh_weak_bits_compared;
+        self.total_raw_dqpsk_walsh_strong_bit_errors = stats.dqpsk_walsh_strong_bit_errors;
+        self.total_raw_dqpsk_walsh_strong_bits_compared = stats.dqpsk_walsh_strong_bits_compared;
         self.total_raw_error_runs = stats.error_runs;
         self.total_raw_error_run_bits = stats.error_run_bits;
         self.max_raw_error_run_len = stats.error_run_max;
@@ -375,6 +383,30 @@ impl Metrics {
         } else {
             dqpsk / walsh
         }
+    }
+
+    pub fn raw_ber_dqpsk_walsh_weak(&self) -> f32 {
+        if self.total_raw_dqpsk_walsh_weak_bits_compared == 0 {
+            f32::NAN
+        } else {
+            self.total_raw_dqpsk_walsh_weak_bit_errors as f32
+                / self.total_raw_dqpsk_walsh_weak_bits_compared as f32
+        }
+    }
+
+    pub fn raw_ber_dqpsk_walsh_strong(&self) -> f32 {
+        if self.total_raw_dqpsk_walsh_strong_bits_compared == 0 {
+            f32::NAN
+        } else {
+            self.total_raw_dqpsk_walsh_strong_bit_errors as f32
+                / self.total_raw_dqpsk_walsh_strong_bits_compared as f32
+        }
+    }
+
+    pub fn dqpsk_walsh_weak_bit_ratio(&self) -> f32 {
+        let weak = self.total_raw_dqpsk_walsh_weak_bits_compared;
+        let strong = self.total_raw_dqpsk_walsh_strong_bits_compared;
+        ratio(weak, weak + strong)
     }
 
     pub fn raw_err_run_mean(&self) -> Option<f32> {
@@ -701,9 +733,16 @@ mod tests {
         m.total_raw_walsh_bits_compared = 700;
         m.total_raw_dqpsk_bit_errors = 40;
         m.total_raw_dqpsk_bits_compared = 300;
+        m.total_raw_dqpsk_walsh_weak_bit_errors = 24;
+        m.total_raw_dqpsk_walsh_weak_bits_compared = 120;
+        m.total_raw_dqpsk_walsh_strong_bit_errors = 16;
+        m.total_raw_dqpsk_walsh_strong_bits_compared = 180;
         assert_eq!(m.raw_ber(), 100.0 / 1000.0);
         assert_eq!(m.raw_ber_walsh(), 60.0 / 700.0);
         assert_eq!(m.raw_ber_dqpsk(), 40.0 / 300.0);
+        assert_eq!(m.raw_ber_dqpsk_walsh_weak(), 24.0 / 120.0);
+        assert_eq!(m.raw_ber_dqpsk_walsh_strong(), 16.0 / 180.0);
+        assert_eq!(m.dqpsk_walsh_weak_bit_ratio(), 120.0 / 300.0);
         assert_eq!(
             m.raw_ber_dqpsk_over_walsh(),
             (40.0 / 300.0) / (60.0 / 700.0)

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 const MARY_BITS_PER_SYMBOL: usize = 6;
 const MARY_WALSH_BITS_PER_SYMBOL: usize = 4;
+const MARY_WALSH_LLR_CONF_WEAK_THRESH: f32 = 0.25;
 
 pub fn count_bit_errors_bytes(tx: &[u8], rx: Option<&[u8]>) -> usize {
     let Some(rx) = rx else {
@@ -90,6 +91,10 @@ pub struct PreFecStats {
     pub walsh_bits_compared: usize,
     pub dqpsk_bit_errors: usize,
     pub dqpsk_bits_compared: usize,
+    pub dqpsk_walsh_weak_bit_errors: usize,
+    pub dqpsk_walsh_weak_bits_compared: usize,
+    pub dqpsk_walsh_strong_bit_errors: usize,
+    pub dqpsk_walsh_strong_bits_compared: usize,
     pub error_runs: usize,
     pub error_run_bits: usize,
     pub error_run_max: usize,
@@ -162,6 +167,10 @@ pub struct BerAccumulator {
     raw_walsh_bits_compared: Arc<Mutex<usize>>,
     raw_dqpsk_bit_errors: Arc<Mutex<usize>>,
     raw_dqpsk_bits_compared: Arc<Mutex<usize>>,
+    raw_dqpsk_walsh_weak_bit_errors: Arc<Mutex<usize>>,
+    raw_dqpsk_walsh_weak_bits_compared: Arc<Mutex<usize>>,
+    raw_dqpsk_walsh_strong_bit_errors: Arc<Mutex<usize>>,
+    raw_dqpsk_walsh_strong_bits_compared: Arc<Mutex<usize>>,
     raw_error_runs: Arc<Mutex<usize>>,
     raw_error_run_bits: Arc<Mutex<usize>>,
     raw_error_run_max: Arc<Mutex<usize>>,
@@ -200,6 +209,10 @@ impl BerAccumulator {
             raw_walsh_bits_compared: Arc::new(Mutex::new(0)),
             raw_dqpsk_bit_errors: Arc::new(Mutex::new(0)),
             raw_dqpsk_bits_compared: Arc::new(Mutex::new(0)),
+            raw_dqpsk_walsh_weak_bit_errors: Arc::new(Mutex::new(0)),
+            raw_dqpsk_walsh_weak_bits_compared: Arc::new(Mutex::new(0)),
+            raw_dqpsk_walsh_strong_bit_errors: Arc::new(Mutex::new(0)),
+            raw_dqpsk_walsh_strong_bits_compared: Arc::new(Mutex::new(0)),
             raw_error_runs: Arc::new(Mutex::new(0)),
             raw_error_run_bits: Arc::new(Mutex::new(0)),
             raw_error_run_max: Arc::new(Mutex::new(0)),
@@ -293,6 +306,10 @@ impl BerAccumulator {
         let rwbc = Arc::clone(&self.raw_walsh_bits_compared);
         let rdbe = Arc::clone(&self.raw_dqpsk_bit_errors);
         let rdbc = Arc::clone(&self.raw_dqpsk_bits_compared);
+        let rdwbe = Arc::clone(&self.raw_dqpsk_walsh_weak_bit_errors);
+        let rdwbc = Arc::clone(&self.raw_dqpsk_walsh_weak_bits_compared);
+        let rdsbe = Arc::clone(&self.raw_dqpsk_walsh_strong_bit_errors);
+        let rdsbc = Arc::clone(&self.raw_dqpsk_walsh_strong_bits_compared);
         let rer = Arc::clone(&self.raw_error_runs);
         let rrb = Arc::clone(&self.raw_error_run_bits);
         let rrm = Arc::clone(&self.raw_error_run_max);
@@ -350,11 +367,60 @@ impl BerAccumulator {
                     let mut interleaved_llrs = Vec::with_capacity(il_bits);
                     interleave_f32_block(&scrambled_llrs, il_rows, il_cols, &mut interleaved_llrs);
 
+                    let compare_len = il_bits.min(expected_interleaved.len());
                     let mut walsh_errors = 0usize;
                     let mut walsh_bits = 0usize;
                     let mut dqpsk_errors = 0usize;
                     let mut dqpsk_bits = 0usize;
-                    for j in 0..il_bits.min(expected_interleaved.len()) {
+                    let mut dqpsk_walsh_weak_errors = 0usize;
+                    let mut dqpsk_walsh_weak_bits = 0usize;
+                    let mut dqpsk_walsh_strong_errors = 0usize;
+                    let mut dqpsk_walsh_strong_bits = 0usize;
+                    let full_symbols = compare_len / MARY_BITS_PER_SYMBOL;
+
+                    for sym in 0..full_symbols {
+                        let base = sym * MARY_BITS_PER_SYMBOL;
+                        let walsh_abs_mean = interleaved_llrs[base..base + MARY_WALSH_BITS_PER_SYMBOL]
+                            .iter()
+                            .map(|v| v.abs())
+                            .sum::<f32>()
+                            / MARY_WALSH_BITS_PER_SYMBOL as f32;
+                        let walsh_is_weak = walsh_abs_mean < MARY_WALSH_LLR_CONF_WEAK_THRESH;
+
+                        for off in 0..MARY_WALSH_BITS_PER_SYMBOL {
+                            let j = base + off;
+                            let bit = expected_interleaved[j];
+                            let llr = interleaved_llrs[j];
+                            let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
+                            walsh_bits += 1;
+                            if is_err {
+                                walsh_errors += 1;
+                            }
+                        }
+                        for off in MARY_WALSH_BITS_PER_SYMBOL..MARY_BITS_PER_SYMBOL {
+                            let j = base + off;
+                            let bit = expected_interleaved[j];
+                            let llr = interleaved_llrs[j];
+                            let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
+                            dqpsk_bits += 1;
+                            if is_err {
+                                dqpsk_errors += 1;
+                            }
+                            if walsh_is_weak {
+                                dqpsk_walsh_weak_bits += 1;
+                                if is_err {
+                                    dqpsk_walsh_weak_errors += 1;
+                                }
+                            } else {
+                                dqpsk_walsh_strong_bits += 1;
+                                if is_err {
+                                    dqpsk_walsh_strong_errors += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    for j in (full_symbols * MARY_BITS_PER_SYMBOL)..compare_len {
                         let bit = expected_interleaved[j];
                         let llr = interleaved_llrs[j];
                         let is_err = (bit == 0 && llr <= 0.0) || (bit == 1 && llr >= 0.0);
@@ -374,6 +440,10 @@ impl BerAccumulator {
                     *rwbc.lock().unwrap() += walsh_bits;
                     *rdbe.lock().unwrap() += dqpsk_errors;
                     *rdbc.lock().unwrap() += dqpsk_bits;
+                    *rdwbe.lock().unwrap() += dqpsk_walsh_weak_errors;
+                    *rdwbc.lock().unwrap() += dqpsk_walsh_weak_bits;
+                    *rdsbe.lock().unwrap() += dqpsk_walsh_strong_errors;
+                    *rdsbc.lock().unwrap() += dqpsk_walsh_strong_bits;
                 }
             }
 
@@ -402,6 +472,13 @@ impl BerAccumulator {
         let raw_walsh_bits_compared = *self.raw_walsh_bits_compared.lock().unwrap();
         let raw_dqpsk_bit_errors = *self.raw_dqpsk_bit_errors.lock().unwrap();
         let raw_dqpsk_bits_compared = *self.raw_dqpsk_bits_compared.lock().unwrap();
+        let raw_dqpsk_walsh_weak_bit_errors = *self.raw_dqpsk_walsh_weak_bit_errors.lock().unwrap();
+        let raw_dqpsk_walsh_weak_bits_compared =
+            *self.raw_dqpsk_walsh_weak_bits_compared.lock().unwrap();
+        let raw_dqpsk_walsh_strong_bit_errors =
+            *self.raw_dqpsk_walsh_strong_bit_errors.lock().unwrap();
+        let raw_dqpsk_walsh_strong_bits_compared =
+            *self.raw_dqpsk_walsh_strong_bits_compared.lock().unwrap();
         let raw_error_runs = *self.raw_error_runs.lock().unwrap();
         let raw_error_run_bits = *self.raw_error_run_bits.lock().unwrap();
         let raw_error_run_max = *self.raw_error_run_max.lock().unwrap();
@@ -416,6 +493,10 @@ impl BerAccumulator {
             walsh_bits_compared: raw_walsh_bits_compared,
             dqpsk_bit_errors: raw_dqpsk_bit_errors,
             dqpsk_bits_compared: raw_dqpsk_bits_compared,
+            dqpsk_walsh_weak_bit_errors: raw_dqpsk_walsh_weak_bit_errors,
+            dqpsk_walsh_weak_bits_compared: raw_dqpsk_walsh_weak_bits_compared,
+            dqpsk_walsh_strong_bit_errors: raw_dqpsk_walsh_strong_bit_errors,
+            dqpsk_walsh_strong_bits_compared: raw_dqpsk_walsh_strong_bits_compared,
             error_runs: raw_error_runs,
             error_run_bits: raw_error_run_bits,
             error_run_max: raw_error_run_max,
@@ -664,6 +745,14 @@ mod tests {
             pre.bits_compared
         );
         assert_eq!(pre.walsh_bit_errors + pre.dqpsk_bit_errors, pre.bit_errors);
+        assert_eq!(
+            pre.dqpsk_walsh_weak_bits_compared + pre.dqpsk_walsh_strong_bits_compared,
+            pre.dqpsk_bits_compared
+        );
+        assert_eq!(
+            pre.dqpsk_walsh_weak_bit_errors + pre.dqpsk_walsh_strong_bit_errors,
+            pre.dqpsk_bit_errors
+        );
         assert_eq!(pre.codeword_error_weights, vec![0, 1]);
         let (att, mat) = accum.extract_decode_stats();
         assert_eq!(att, 3);
