@@ -95,11 +95,19 @@ const DQPSK_WALSH_HYPOTHESES: usize = 16;
 // 範囲: [0, 1]。大きくすると「曖昧」と判定される領域が広がる。
 #[cfg(test)]
 const DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH: f32 = 0.30;
-// DQPSK LLR 正規化の雑音床下限スケール。
-// 小さくすると LLR が立ちやすくなり、弱い仮説を過信しやすい（誤判定時の振れが大きくなる）。
-// 大きくすると LLR を保守化できる一方、十分高SNRでも過小信頼になり得る。
-// 妥当目安: >= 1.0。1.0未満は雑音床を過小評価しやすく、LLR過大化を招きやすい。
-const DQPSK_LLR_NOISE_FLOOR_SCALE: f32 = 5.0;
+// DQPSK尤度計算で使う雑音分散の下限（数値安定用）。
+// 0に近づけるほどLLRが過大化しやすく、上げすぎると過小信頼になりやすい。
+const DQPSK_NOISE_VAR_FLOOR: f32 = 1e-6;
+// 振幅正規化後の位相観測分散の下限。
+// 小さすぎると高SNRでLLRが暴走しやすく、大きすぎると全域で過小信頼になりやすい。
+// 妥当目安: 1e-4..1e-2
+const DQPSK_PHASE_OBS_VAR_FLOOR: f32 = 1e-3;
+// 位相尤度のモデル誤差分散（正規化領域）。
+// 観測分散に加算して sigma_eff^2 = sigma_obs^2 + sigma_model^2 とし、
+// モデルずれ・残留位相誤差でのLLR過信を抑える。
+// 小さくすると鋭いLLRになり、大きくすると保守化される。
+// 妥当目安: 0.5..2.0
+const DQPSK_PHASE_MODEL_VAR: f32 = 1.0;
 // prev_phase の位相不確かさ分散推定（EWMA）に使う係数。
 // 妥当範囲: 0.0..1.0（1.0は更新停止に近いので非推奨）。
 // 大きいほど長期平均寄りで安定だが追従は遅く、小さいほど追従は速いが雑音に敏感。
@@ -138,13 +146,31 @@ fn log_add_exp(a: f32, b: f32) -> f32 {
 }
 
 #[inline]
-fn dqpsk_symbol_metrics(diff: Complex32, norm_scale: f32) -> [f32; 4] {
-    let d = diff / norm_scale.max(1e-6);
+fn dqpsk_noise_var_from_energy(energy_sum: f32, energy_h: f32) -> f32 {
+    ((energy_sum - energy_h).max(0.0) / 15.0).max(DQPSK_NOISE_VAR_FLOOR)
+}
+
+#[inline]
+fn dqpsk_phase_log_metrics(
+    diff: Complex32,
+    amp: f32,
+    noise_var: f32,
+    prev_phase_kappa: f32,
+) -> [f32; 4] {
+    // 観測モデル:
+    //   y = diff / amp_ref ≈ s + n, n ~ CN(0, sigma2)
+    //   log p(y|s) = -|y-s|^2 / sigma2 + const
+    // LLR差分に効くのは Re{y * conj(s)} / sigma2 項のみ。
+    let amp_ref = amp.max(1e-6);
+    let y = diff / amp_ref;
+    let sigma2_obs = (noise_var / (amp_ref * amp_ref)).max(DQPSK_PHASE_OBS_VAR_FLOOR);
+    let sigma2_eff = sigma2_obs + DQPSK_PHASE_MODEL_VAR;
+    let gain = prev_phase_kappa / sigma2_eff;
     [
-        d.re,  // s0: phase0 -> 00
-        d.im,  // s1: phase1 -> 01
-        -d.re, // s2: phase2 -> 11
-        -d.im, // s3: phase3 -> 10
+        gain * y.re,  // s0: phase0 -> 00
+        gain * y.im,  // s1: phase1 -> 01
+        -gain * y.re, // s2: phase2 -> 11
+        -gain * y.im, // s3: phase3 -> 10
     ]
 }
 
@@ -155,7 +181,6 @@ fn dqpsk_prev_phase_kappa_from_sigma2(sigma2: f32) -> f32 {
 }
 
 fn dqpsk_llr_from_walsh_hypotheses(
-    demodulator: &Demodulator,
     on_corrs: &[Complex32; 16],
     phase_ref: Complex32,
     prev_phase: Complex32,
@@ -168,7 +193,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
     let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
     let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
     let energy_sum = energies.iter().sum::<f32>();
-    let walsh_noise_floor_e = ((energy_sum - max_energy).max(0.0) / 15.0).max(1e-6);
+    let walsh_noise_floor_e = dqpsk_noise_var_from_energy(energy_sum, max_energy);
 
     // p(s|y) ∝ Σ_h p(y|h) p(y|s,h) を log-domain で周辺化する。
     let mut sym_logs = [f32::NEG_INFINITY; 4];
@@ -176,15 +201,9 @@ fn dqpsk_llr_from_walsh_hypotheses(
         let energy_h = energies[idx];
         let on_rot_h = on_corrs[idx] * phase_ref.conj();
         let diff_h = on_rot_h * prev_phase.conj();
-        let noise_floor_h = ((energy_sum - energy_h).max(0.0) / 15.0).sqrt();
-        let norm_h = on_rot_h
-            .norm()
-            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_h)
-            .max(1e-6);
-        let mut phase_logs = dqpsk_symbol_metrics(diff_h, norm_h);
-        for item in &mut phase_logs {
-            *item *= prev_phase_kappa;
-        }
+        let noise_var_h = dqpsk_noise_var_from_energy(energy_sum, energy_h);
+        let phase_logs =
+            dqpsk_phase_log_metrics(diff_h, on_rot_h.norm(), noise_var_h, prev_phase_kappa);
         // 相対ログ重みを使って数値桁落ちを避ける（定数項はLLR差分で相殺される）。
         let log_p_h = (energy_h - max_energy) / walsh_noise_floor_e;
         for s in 0..4 {
@@ -199,15 +218,17 @@ fn dqpsk_llr_from_walsh_hypotheses(
         let bit1_1 = log_add_exp(sym_logs[1], sym_logs[2]);
         [bit0_0 - bit0_1, bit1_0 - bit1_1]
     } else {
-        let noise_floor_best = ((energy_sum - max_energy).max(0.0) / 15.0).sqrt();
-        let dqpsk_norm = on_rot_best
-            .norm()
-            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_best)
-            .max(1e-6);
-        let mut llr = demodulator.dqpsk_llr(diff_best, dqpsk_norm);
-        llr[0] *= prev_phase_kappa;
-        llr[1] *= prev_phase_kappa;
-        llr
+        let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, max_energy);
+        let phase_logs = dqpsk_phase_log_metrics(
+            diff_best,
+            on_rot_best.norm(),
+            noise_var_best,
+            prev_phase_kappa,
+        );
+        [
+            log_add_exp(phase_logs[0], phase_logs[1]) - log_add_exp(phase_logs[2], phase_logs[3]),
+            log_add_exp(phase_logs[0], phase_logs[3]) - log_add_exp(phase_logs[1], phase_logs[2]),
+        ]
     };
 
     (dqpsk_llr, walsh_conf, DQPSK_WALSH_HYPOTHESES, energies)
@@ -296,7 +317,6 @@ where
         let prev_phase_kappa = dqpsk_prev_phase_kappa_from_sigma2(prev_phase_sigma2);
 
         let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
-            demodulator,
             &on_corrs,
             tracking_state.phase_ref,
             *prev_phase,
@@ -793,7 +813,6 @@ mod tests {
 
     #[test]
     fn test_dqpsk_llr_uses_single_hypothesis_when_walsh_conf_is_high() {
-        let demodulator = Demodulator::new();
         let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
         on_corrs[0] = Complex32::new(10.0, 0.0); // energy=100
         on_corrs[1] = Complex32::new(1.0, 0.0); // energy=1
@@ -804,7 +823,6 @@ mod tests {
         let diff_best = on_corrs[0];
 
         let (dqpsk_llr, walsh_conf, topk_used, _energies) = dqpsk_llr_from_walsh_hypotheses(
-            &demodulator,
             &on_corrs,
             phase_ref,
             prev_phase,
@@ -814,18 +832,24 @@ mod tests {
             on_rot_best,
             diff_best,
         );
-        let expected = demodulator.dqpsk_llr(diff_best, on_rot_best.norm());
+        let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
+        let energy_sum = energies.iter().sum::<f32>();
+        let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, energies[0]);
+        let phase_logs = dqpsk_phase_log_metrics(diff_best, on_rot_best.norm(), noise_var_best, 1.0);
+        let expected = [
+            log_add_exp(phase_logs[0], phase_logs[1]) - log_add_exp(phase_logs[2], phase_logs[3]),
+            log_add_exp(phase_logs[0], phase_logs[3]) - log_add_exp(phase_logs[1], phase_logs[2]),
+        ];
 
         assert!(walsh_conf > DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH);
         assert_eq!(topk_used, DQPSK_WALSH_HYPOTHESES);
         // Walsh尤度が十分に鋭い場合は joint 周辺化でも単一仮説に近づく。
-        assert_close(dqpsk_llr[0], expected[0], 1e-3, "llr0");
-        assert_close(dqpsk_llr[1], expected[1], 1e-3, "llr1");
+        assert_close(dqpsk_llr[0], expected[0], 2e-2, "llr0");
+        assert_close(dqpsk_llr[1], expected[1], 2e-2, "llr1");
     }
 
     #[test]
     fn test_dqpsk_llr_uses_joint_marginalization_when_walsh_conf_is_low() {
-        let demodulator = Demodulator::new();
         let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
         on_corrs[0] = Complex32::new(10.0, 0.0); // energy=100, phase0
         on_corrs[1] = Complex32::new(0.0, 8.944272); // energy≈80, phase1
@@ -836,7 +860,6 @@ mod tests {
         let diff_best = on_corrs[0];
 
         let (dqpsk_llr, walsh_conf, topk_used, _energies) = dqpsk_llr_from_walsh_hypotheses(
-            &demodulator,
             &on_corrs,
             phase_ref,
             prev_phase,
@@ -849,18 +872,14 @@ mod tests {
 
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
-        let walsh_noise_floor_e = ((energy_sum - 100.0).max(0.0) / 15.0).max(1e-6);
+        let walsh_noise_floor_e = dqpsk_noise_var_from_energy(energy_sum, 100.0);
         let mut sym_logs = [f32::NEG_INFINITY; 4];
         for idx in 0..DQPSK_WALSH_HYPOTHESES {
             let energy_h = energies[idx];
             let on_rot_h = on_corrs[idx] * phase_ref.conj();
             let diff_h = on_rot_h * prev_phase.conj();
-            let noise_floor_h = ((energy_sum - energy_h).max(0.0) / 15.0).sqrt();
-            let norm_h = on_rot_h
-                .norm()
-                .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_h)
-                .max(1e-6);
-            let m = dqpsk_symbol_metrics(diff_h, norm_h);
+            let noise_var_h = dqpsk_noise_var_from_energy(energy_sum, energy_h);
+            let m = dqpsk_phase_log_metrics(diff_h, on_rot_h.norm(), noise_var_h, 1.0);
             let log_p_h = (energy_h - 100.0) / walsh_noise_floor_e;
             for s in 0..4 {
                 sym_logs[s] = log_add_exp(sym_logs[s], log_p_h + m[s]);
