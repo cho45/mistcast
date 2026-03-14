@@ -115,6 +115,11 @@ const DQPSK_PREV_PHASE_VAR_EWMA_ALPHA: f32 = 0.95;
 // 位相分散の上限 [rad]。外れ値で分散推定が暴走しないためのクリップ。
 // 妥当目安: 0.5..PI。小さすぎると常時保守化、大きすぎると外れ値耐性が下がる。
 const DQPSK_PREV_PHASE_SIGMA_MAX_RAD: f32 = 1.2;
+// Walsh事後平均で位相追跡に使う複素振幅の最小ノルム。
+// 小さすぎると雑音起因のほぼゼロベクトルで位相更新しやすく、
+// 大きすぎるとフォールバックが増えて best 仮説依存が強くなる。
+// 妥当目安: 1e-6..1e-3
+const DQPSK_TRACKING_POSTERIOR_NORM_MIN: f32 = 1e-5;
 // 期待シンボルの振幅がこの値未満なら、方向が不安定とみなして hard 判定へフォールバックする。
 const DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN: f32 = 1e-3;
 
@@ -178,6 +183,45 @@ fn dqpsk_phase_log_metrics(
 fn dqpsk_prev_phase_kappa_from_sigma2(sigma2: f32) -> f32 {
     let sigma2_clamped = sigma2.clamp(0.0, DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
     (-0.5 * sigma2_clamped).exp().clamp(0.0, 1.0)
+}
+
+#[inline]
+fn walsh_posterior_weighted_on_rot(
+    on_corrs: &[Complex32; 16],
+    phase_ref: Complex32,
+    energies: &[f32; 16],
+    max_energy: f32,
+    on_rot_best: Complex32,
+) -> Complex32 {
+    let energy_sum = energies.iter().sum::<f32>();
+    let walsh_temp = dqpsk_noise_var_from_energy(energy_sum, max_energy);
+
+    let mut max_log = f32::NEG_INFINITY;
+    let mut log_weights = [0.0f32; 16];
+    for idx in 0..16 {
+        let lp = (energies[idx] - max_energy) / walsh_temp;
+        log_weights[idx] = lp;
+        if lp > max_log {
+            max_log = lp;
+        }
+    }
+
+    let mut weighted = Complex32::new(0.0, 0.0);
+    let mut wsum = 0.0f32;
+    for idx in 0..16 {
+        let w = (log_weights[idx] - max_log).exp();
+        wsum += w;
+        weighted += on_corrs[idx] * phase_ref.conj() * w;
+    }
+    if wsum <= 0.0 {
+        return on_rot_best;
+    }
+    let posterior = weighted / wsum;
+    if posterior.norm() >= DQPSK_TRACKING_POSTERIOR_NORM_MIN {
+        posterior
+    } else {
+        on_rot_best
+    }
 }
 
 fn dqpsk_llr_from_walsh_hypotheses(
@@ -313,7 +357,7 @@ where
 
         let best_corr = on_corrs[best_idx];
         let on_rot = best_corr * tracking_state.phase_ref.conj();
-        let diff = on_rot * prev_phase.conj();
+        let diff_best = on_rot * prev_phase.conj();
         let prev_phase_kappa = dqpsk_prev_phase_kappa_from_sigma2(prev_phase_sigma2);
 
         let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
@@ -324,8 +368,16 @@ where
             max_energy,
             second_energy,
             on_rot,
-            diff,
+            diff_best,
         );
+        let on_rot_tracking = walsh_posterior_weighted_on_rot(
+            &on_corrs,
+            tracking_state.phase_ref,
+            &energies,
+            max_energy,
+            on_rot,
+        );
+        let diff_tracking = on_rot_tracking * prev_phase.conj();
         let walsh_llr = demodulator.walsh_llr(&energies, max_energy);
 
         buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
@@ -351,7 +403,7 @@ where
         }
 
         let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
-        let phase_err = tracking::phase_error_from_diff(diff, decided);
+        let phase_err = tracking::phase_error_from_diff(diff_tracking, decided);
         let phase_err_abs = phase_err.abs();
         stats.phase_err_abs_sum_rad += phase_err_abs as f64;
         stats.phase_err_abs_count += 1;
@@ -413,8 +465,8 @@ where
             timing_limit,
         );
 
-        let on_norm = on_rot.norm().max(1e-6);
-        *prev_phase = on_rot / on_norm;
+        let on_norm = on_rot_tracking.norm().max(1e-6);
+        *prev_phase = on_rot_tracking / on_norm;
     }
 
     let _avg_energy = total_packet_energy / expected_symbols as f32;
@@ -895,6 +947,46 @@ mod tests {
         assert_close(dqpsk_llr[0], expected[0], 1e-4, "llr0");
         assert_close(dqpsk_llr[1], expected[1], 1e-4, "llr1");
         assert!(dqpsk_llr[0].is_finite() && dqpsk_llr[1].is_finite());
+    }
+
+    #[test]
+    fn test_walsh_posterior_weighted_on_rot_tracks_dominant_hypothesis() {
+        let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
+        on_corrs[0] = Complex32::new(10.0, 0.0); // dominant
+        on_corrs[1] = Complex32::new(1.0, 3.0);
+        let energies = on_corrs.map(|c| c.norm_sqr());
+        let on_rot_best = on_corrs[0];
+
+        let mixed = walsh_posterior_weighted_on_rot(
+            &on_corrs,
+            Complex32::new(1.0, 0.0),
+            &energies,
+            energies[0],
+            on_rot_best,
+        );
+
+        assert!(mixed.re > 8.0);
+        assert!(mixed.im.abs() < 2.0);
+    }
+
+    #[test]
+    fn test_walsh_posterior_weighted_on_rot_falls_back_when_posterior_cancels() {
+        let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
+        on_corrs[0] = Complex32::new(10.0, 0.0);
+        on_corrs[1] = Complex32::new(-10.0, 0.0);
+        let energies = on_corrs.map(|c| c.norm_sqr());
+        let on_rot_best = on_corrs[0];
+
+        let mixed = walsh_posterior_weighted_on_rot(
+            &on_corrs,
+            Complex32::new(1.0, 0.0),
+            &energies,
+            energies[0],
+            on_rot_best,
+        );
+
+        assert_close(mixed.re, on_rot_best.re, 1e-6, "mixed_re");
+        assert_close(mixed.im, on_rot_best.im, 1e-6, "mixed_im");
     }
 
     #[test]
