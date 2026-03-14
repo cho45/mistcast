@@ -6,9 +6,9 @@
 use super::decoder_stats::DecoderStats;
 use super::tracking::{
     self, TrackingState, PHASE_ERR_ABS_THRESH_0P5_RAD, PHASE_ERR_ABS_THRESH_1P0_RAD,
-    TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH, TRACKING_PHASE_ERR_GATE_RAD,
-    TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_PROP_GAIN_OFF,
-    TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_STEP_CLAMP,
+    TRACKING_PHASE_DQPSK_CONF_ON_MIN, TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH,
+    TRACKING_PHASE_ERR_GATE_RAD, TRACKING_PHASE_FREQ_GAIN_OFF, TRACKING_PHASE_OFF_ERR_CLAMP,
+    TRACKING_PHASE_PROP_GAIN_OFF, TRACKING_PHASE_RATE_HOLD_DECAY, TRACKING_PHASE_STEP_CLAMP,
 };
 use crate::coding::fec;
 use crate::coding::interleaver::BlockInterleaver;
@@ -196,9 +196,12 @@ where
         let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
         let snr_proxy = max_energy / (noise_floor + 1e-6);
         let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
+        // 位相追跡の信頼度は DQPSK 単独では過大になりやすいため、
+        // Walsh識別の確からしさを掛け合わせて低SNR時の追従暴走を抑える。
+        let dqpsk_conf_tracking = dqpsk_conf * walsh_conf.clamp(0.0, 1.0);
         tracking_state.phase_gate_enabled = tracking::next_phase_gate_enabled(
             tracking_state.phase_gate_enabled,
-            dqpsk_conf,
+            dqpsk_conf_tracking,
             walsh_conf,
             snr_proxy,
         );
@@ -221,14 +224,23 @@ where
         }
         let innovation_rejected = tracking_state.phase_gate_enabled
             && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
-            && dqpsk_conf < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
+            && dqpsk_conf_tracking < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
         if innovation_rejected {
             stats.phase_innovation_reject_symbols += 1;
         }
         let phase_step = if tracking_state.phase_gate_enabled {
+            // DQPSK信頼度が低いときは位相更新の駆動誤差を抑え、
+            // 誤ったイノベーションでループが振れるのを防ぐ。
+            let dqpsk_phase_weight =
+                (dqpsk_conf_tracking / TRACKING_PHASE_DQPSK_CONF_ON_MIN).clamp(0.0, 1.0);
+            let phase_err_for_update = if innovation_rejected {
+                0.0
+            } else {
+                phase_err * dqpsk_phase_weight
+            };
             tracking_state.phase_rate =
-                tracking::update_phase_rate(tracking_state.phase_rate, phase_err);
-            tracking::phase_step_from_phase_error(phase_err, tracking_state.phase_rate)
+                tracking::update_phase_rate(tracking_state.phase_rate, phase_err_for_update);
+            tracking::phase_step_from_phase_error(phase_err_for_update, tracking_state.phase_rate)
         } else {
             let damped_err =
                 phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
