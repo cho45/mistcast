@@ -30,6 +30,7 @@ https://github.com/user-attachments/assets/9e2b40ab-bfc8-4fa5-8e5b-f9ce8e6f0eb9
 ## 技術仕様
 
 <img src="docs/plot_comparison.png">
+<img src="docs/plot_ber_vs_ebn0.png">
 
 ### 1. 物理レイヤー (物理変調)
 

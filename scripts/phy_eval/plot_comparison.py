@@ -11,6 +11,9 @@ plt.rcParams["axes.unicode_minus"] = False
 
 X_AXIS_METRIC = "cn0_db"
 X_AXIS_LABEL = "C/N0 (dB-Hz)"
+EBN0_METRIC = "ebn0_db"
+BER_METRIC = "raw_ber"
+POST_BER_METRIC = "post_ber"
 
 def add_cn0_reference(fig):
     """図の下部に C/N0 の目安テーブルを表示する。"""
@@ -63,10 +66,12 @@ def run_eval(phy, packets_per_frame="2", sweep_awgn="0.2,0.3,0.40,0.50,0.60,0.65
     required_columns = [
         "scenario",
         X_AXIS_METRIC,
+        EBN0_METRIC,
         "goodput_effective_bps",
         "goodput_success_mean_bps",
         "crc_pass_ratio",
-        "raw_ber",
+        BER_METRIC,
+        POST_BER_METRIC,
     ]
     requested_columns = [col.strip() for col in str(columns).split(",") if col.strip()]
     for col in required_columns:
@@ -115,6 +120,61 @@ def run_eval(phy, packets_per_frame="2", sweep_awgn="0.2,0.3,0.40,0.50,0.60,0.65
             continue
 
     return data_points
+
+
+def save_ber_vs_ebn0_plot(results, output_path):
+    """Eb/N0-BER の比較図（raw/post重ね表示）を保存する。"""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    colors = plt.cm.tab10.colors
+    case_names = list(results.keys())
+    series_defs = [
+        (BER_METRIC, "raw (pre FEC)", "-", "o"),
+        (POST_BER_METRIC, "post (post FEC)", "--", "x"),
+    ]
+
+    any_series = False
+    for i, case_name in enumerate(case_names):
+        color = colors[i % len(colors)]
+        for metric_name, metric_label, line_style, marker_style in series_defs:
+            data_points = []
+            for point in results[case_name]:
+                x_val = point.get(EBN0_METRIC)
+                y_val = point.get(metric_name)
+                if isinstance(x_val, (int, float)) and isinstance(y_val, (int, float)):
+                    if math.isfinite(x_val) and math.isfinite(y_val) and y_val >= 0.0:
+                        data_points.append((float(x_val), float(y_val)))
+            data_points.sort()
+            if not data_points:
+                continue
+
+            any_series = True
+            x_vals, y_vals = zip(*data_points)
+            positive_y = [v for v in y_vals if v > 0.0]
+            ber_floor = min(positive_y) * 0.5 if positive_y else 1e-6
+            y_vals_plot = [max(v, ber_floor) for v in y_vals]
+
+            ax.semilogy(
+                x_vals,
+                y_vals_plot,
+                marker=marker_style,
+                linestyle=line_style,
+                label=f"{case_name} {metric_label}",
+                linewidth=2,
+                markersize=6,
+                color=color,
+            )
+
+    if not any_series:
+        print("Warning: no finite Eb/N0-BER data found for BER plot.", file=sys.stderr)
+
+    ax.set_xlabel("Eb/N0 (dB)", fontsize=11)
+    ax.set_ylabel("BER", fontsize=11)
+    ax.set_title("BER vs Eb/N0 (raw/post)", fontsize=13)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=10)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
 
 def main():
     # 実行するケースの設定
@@ -234,7 +294,12 @@ def main():
     os.makedirs('docs', exist_ok=True)
     output_path = 'docs/plot_comparison.png'
     plt.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+    ber_output_path = 'docs/plot_ber_vs_ebn0.png'
+    save_ber_vs_ebn0_plot(results, ber_output_path)
     print(f"Plot saved to {output_path}")
+    print(f"BER plot saved to {ber_output_path}")
 
     return 0
 
