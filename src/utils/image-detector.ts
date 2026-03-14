@@ -30,6 +30,18 @@ export function extractImagePayload(data: Uint8Array): ImagePayload | null {
     return { mime: 'image/jpeg', bytes: data };
   }
 
+  // SVG detection: look for "<svg" within the first 512 bytes
+  // It must contain "<svg" tag to be considered an SVG image.
+  const isSvg = () => {
+    const slice = data.slice(0, Math.min(data.length, 512));
+    const text = new TextDecoder().decode(slice).toLowerCase();
+    return text.includes('<svg');
+  };
+
+  if (isSvg()) {
+    return { mime: 'image/svg+xml', bytes: data };
+  }
+
   const GIF_MAGIC = [0x47, 0x49, 0x46, 0x38];
   const WEBP_MAGIC = [0x52, 0x49, 0x46, 0x46];
 

@@ -238,4 +238,48 @@ describe('extractImagePayload', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('SVG detection', () => {
+    it('should detect SVG starting with <svg', () => {
+      const svgData = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="40" /></svg>');
+      const result = extractImagePayload(svgData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/svg+xml');
+    });
+
+    it('should detect SVG starting with XML declaration', () => {
+      const svgData = new TextEncoder().encode('<?xml version="1.0" encoding="UTF-8"?><svg>...</svg>');
+      const result = extractImagePayload(svgData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/svg+xml');
+    });
+
+    it('should detect SVG with leading whitespace', () => {
+      const svgData = new TextEncoder().encode('   <svg>...</svg>');
+      const result = extractImagePayload(svgData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/svg+xml');
+    });
+
+    it('should be case-insensitive for <svg tag', () => {
+      const svgData = new TextEncoder().encode('<SVG>...</SVG>');
+      const result = extractImagePayload(svgData);
+      expect(result).not.toBeNull();
+      expect(result?.mime).toBe('image/svg+xml');
+    });
+
+    it('should not detect general XML as SVG if <svg tag is missing in first 512 bytes', () => {
+      const xmlData = new TextEncoder().encode('<?xml version="1.0"?><note><to>Tove</to></note>');
+      const result = extractImagePayload(xmlData);
+      expect(result).toBeNull();
+    });
+
+    it('should not detect plain text containing " <svg" late in the file', () => {
+      // Create a long text that contains "<svg" after 512 bytes
+      const longText = 'a'.repeat(600) + '<svg>...</svg>';
+      const textData = new TextEncoder().encode(longText);
+      const result = extractImagePayload(textData);
+      expect(result).toBeNull();
+    });
+  });
 });
