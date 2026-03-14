@@ -157,6 +157,23 @@ pub fn next_phase_gate_enabled(
     }
 }
 
+/// 位相レート更新の可否を計算
+///
+/// 位相ゲートがONでも、各シンボル更新はON判定と同じ閾値で再評価する。
+/// これにより低信頼シンボルでの誤更新を抑え、ループ発散を避ける。
+#[inline]
+pub fn phase_rate_update_enabled(dqpsk_conf: f32, walsh_conf: f32, snr_proxy: f32) -> bool {
+    let pass_count = phase_gate_pass_count(
+        dqpsk_conf,
+        walsh_conf,
+        snr_proxy,
+        TRACKING_PHASE_DQPSK_CONF_ON_MIN,
+        TRACKING_PHASE_WALSH_CONF_ON_MIN,
+        TRACKING_PHASE_SNR_PROXY_ON_MIN,
+    );
+    pass_count >= 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +286,22 @@ mod tests {
         );
 
         assert!(enabled);
+    }
+
+    #[test]
+    fn test_phase_rate_update_enabled_requires_two_on_threshold_hits() {
+        let enabled = phase_rate_update_enabled(
+            TRACKING_PHASE_DQPSK_CONF_ON_MIN + 0.01,
+            TRACKING_PHASE_WALSH_CONF_ON_MIN + 0.01,
+            TRACKING_PHASE_SNR_PROXY_ON_MIN - 0.5,
+        );
+        let disabled = phase_rate_update_enabled(
+            TRACKING_PHASE_DQPSK_CONF_ON_MIN - 0.1,
+            TRACKING_PHASE_WALSH_CONF_ON_MIN + 0.01,
+            TRACKING_PHASE_SNR_PROXY_ON_MIN - 0.5,
+        );
+
+        assert!(enabled);
+        assert!(!disabled);
     }
 }

@@ -413,12 +413,15 @@ where
         if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
             stats.phase_err_abs_ge_1p0_symbols += 1;
         }
-        let phase_var_sample = (phase_err_abs * phase_err_abs).min(DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
+        let phase_var_sample =
+            (phase_err_abs * phase_err_abs).min(DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
         prev_phase_sigma2 = DQPSK_PREV_PHASE_VAR_EWMA_ALPHA * prev_phase_sigma2
             + (1.0 - DQPSK_PREV_PHASE_VAR_EWMA_ALPHA) * phase_var_sample;
         let innovation_rejected = tracking_state.phase_gate_enabled
             && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
             && dqpsk_conf_tracking < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
+        let phase_rate_update_enabled = tracking_state.phase_gate_enabled
+            && tracking::phase_rate_update_enabled(dqpsk_conf_tracking, walsh_conf, snr_proxy);
         if innovation_rejected {
             stats.phase_innovation_reject_symbols += 1;
         }
@@ -427,13 +430,16 @@ where
             // 誤ったイノベーションでループが振れるのを防ぐ。
             let dqpsk_phase_weight =
                 (dqpsk_conf_tracking / TRACKING_PHASE_DQPSK_CONF_ON_MIN).clamp(0.0, 1.0);
-            let phase_err_for_update = if innovation_rejected {
+            let phase_err_for_update = if innovation_rejected || !phase_rate_update_enabled {
                 0.0
             } else {
                 phase_err * dqpsk_phase_weight
             };
-            tracking_state.phase_rate =
-                tracking::update_phase_rate(tracking_state.phase_rate, phase_err_for_update);
+            tracking_state.phase_rate = update_phase_rate_when_gate_on(
+                tracking_state.phase_rate,
+                phase_err_for_update,
+                phase_rate_update_enabled,
+            );
             tracking::phase_step_from_phase_error(phase_err_for_update, tracking_state.phase_rate)
         } else {
             let damped_err =
@@ -489,6 +495,23 @@ where
     PacketProcessResult {
         processed: true,
         packet,
+    }
+}
+
+#[inline]
+fn update_phase_rate_when_gate_on(
+    phase_rate: f32,
+    phase_err_for_update: f32,
+    phase_rate_update_enabled: bool,
+) -> f32 {
+    if phase_rate_update_enabled {
+        tracking::update_phase_rate(phase_rate, phase_err_for_update)
+    } else {
+        // ゲートON中でも低信頼シンボルでは phase_rate を更新せず減衰保持する。
+        (phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY).clamp(
+            -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+            tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+        )
     }
 }
 
@@ -887,7 +910,8 @@ mod tests {
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
         let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, energies[0]);
-        let phase_logs = dqpsk_phase_log_metrics(diff_best, on_rot_best.norm(), noise_var_best, 1.0);
+        let phase_logs =
+            dqpsk_phase_log_metrics(diff_best, on_rot_best.norm(), noise_var_best, 1.0);
         let expected = [
             log_add_exp(phase_logs[0], phase_logs[1]) - log_add_exp(phase_logs[2], phase_logs[3]),
             log_add_exp(phase_logs[0], phase_logs[3]) - log_add_exp(phase_logs[1], phase_logs[2]),
@@ -1046,6 +1070,28 @@ mod tests {
             err_hard,
             err_soft
         );
+    }
+
+    #[test]
+    fn test_update_phase_rate_when_gate_on_updates_with_innovation_when_enabled() {
+        let phase_rate = 0.7;
+        let phase_err_for_update = 0.2;
+        let updated = update_phase_rate_when_gate_on(phase_rate, phase_err_for_update, true);
+        let expected = tracking::update_phase_rate(phase_rate, phase_err_for_update);
+        assert_close(updated, expected, 1e-7, "phase_rate_update_enabled");
+    }
+
+    #[test]
+    fn test_update_phase_rate_when_gate_on_holds_and_decays_when_disabled() {
+        let phase_rate = 0.7;
+        let updated_small_err = update_phase_rate_when_gate_on(phase_rate, 0.1, false);
+        let updated_large_err = update_phase_rate_when_gate_on(phase_rate, 10.0, false);
+        let expected = (phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY).clamp(
+            -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+            tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+        );
+        assert_close(updated_small_err, expected, 1e-7, "phase_rate_hold_decay_small");
+        assert_close(updated_large_err, expected, 1e-7, "phase_rate_hold_decay_large");
     }
 
     #[test]
