@@ -186,62 +186,6 @@ fn dqpsk_prev_phase_kappa_from_sigma2(sigma2: f32) -> f32 {
 }
 
 #[inline]
-fn dqpsk_symbol_from_state(state: usize) -> Complex32 {
-    debug_assert!(state < 4, "dqpsk state must be in [0, 3]");
-    match state {
-        0 => Complex32::new(1.0, 0.0),
-        1 => Complex32::new(0.0, 1.0),
-        2 => Complex32::new(-1.0, 0.0),
-        3 => Complex32::new(0.0, -1.0),
-        _ => Complex32::new(1.0, 0.0),
-    }
-}
-
-#[inline]
-fn dqpsk_llr_from_phase_logs(phase_logs: [f32; 4]) -> [f32; 2] {
-    let bit0_0 = log_add_exp(phase_logs[0], phase_logs[1]);
-    let bit0_1 = log_add_exp(phase_logs[2], phase_logs[3]);
-    let bit1_0 = log_add_exp(phase_logs[0], phase_logs[3]);
-    let bit1_1 = log_add_exp(phase_logs[1], phase_logs[2]);
-    [bit0_0 - bit0_1, bit1_0 - bit1_1]
-}
-
-#[inline]
-fn dqpsk_soft_symbol_from_phase_logs(phase_logs: [f32; 4]) -> Complex32 {
-    let mut max_log = f32::NEG_INFINITY;
-    let mut argmax_state = 0usize;
-    for (idx, &v) in phase_logs.iter().enumerate() {
-        if v > max_log {
-            max_log = v;
-            argmax_state = idx;
-        }
-    }
-    if !max_log.is_finite() {
-        return Complex32::new(1.0, 0.0);
-    }
-
-    let mut w = [0.0f32; 4];
-    let mut wsum = 0.0f32;
-    for idx in 0..4 {
-        let p = (phase_logs[idx] - max_log).exp();
-        w[idx] = p;
-        wsum += p;
-    }
-    if wsum <= 0.0 {
-        return dqpsk_symbol_from_state(argmax_state);
-    }
-
-    // 4状態の同時事後から E[s|y] を直接作る（2bit独立近似を避ける）。
-    let soft = Complex32::new((w[0] - w[2]) / wsum, (w[1] - w[3]) / wsum);
-    let norm = soft.norm();
-    if norm > DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN {
-        soft / norm
-    } else {
-        dqpsk_symbol_from_state(argmax_state)
-    }
-}
-
-#[inline]
 fn walsh_posterior_weighted_on_rot(
     on_corrs: &[Complex32; 16],
     phase_ref: Complex32,
@@ -289,7 +233,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
     second_energy: f32,
     on_rot_best: Complex32,
     diff_best: Complex32,
-) -> ([f32; 2], Complex32, f32, usize, [f32; 16]) {
+) -> ([f32; 2], f32, usize, [f32; 16]) {
     let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
     let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
     let energy_sum = energies.iter().sum::<f32>();
@@ -311,11 +255,12 @@ fn dqpsk_llr_from_walsh_hypotheses(
         }
     }
 
-    let (dqpsk_llr, phase_update_symbol) = if sym_logs.iter().all(|v| v.is_finite()) {
-        (
-            dqpsk_llr_from_phase_logs(sym_logs),
-            dqpsk_soft_symbol_from_phase_logs(sym_logs),
-        )
+    let dqpsk_llr = if sym_logs.iter().all(|v| v.is_finite()) {
+        let bit0_0 = log_add_exp(sym_logs[0], sym_logs[1]);
+        let bit0_1 = log_add_exp(sym_logs[2], sym_logs[3]);
+        let bit1_0 = log_add_exp(sym_logs[0], sym_logs[3]);
+        let bit1_1 = log_add_exp(sym_logs[1], sym_logs[2]);
+        [bit0_0 - bit0_1, bit1_0 - bit1_1]
     } else {
         let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, max_energy);
         let phase_logs = dqpsk_phase_log_metrics(
@@ -324,19 +269,13 @@ fn dqpsk_llr_from_walsh_hypotheses(
             noise_var_best,
             prev_phase_kappa,
         );
-        (
-            dqpsk_llr_from_phase_logs(phase_logs),
-            dqpsk_soft_symbol_from_phase_logs(phase_logs),
-        )
+        [
+            log_add_exp(phase_logs[0], phase_logs[1]) - log_add_exp(phase_logs[2], phase_logs[3]),
+            log_add_exp(phase_logs[0], phase_logs[3]) - log_add_exp(phase_logs[1], phase_logs[2]),
+        ]
     };
 
-    (
-        dqpsk_llr,
-        phase_update_symbol,
-        walsh_conf,
-        DQPSK_WALSH_HYPOTHESES,
-        energies,
-    )
+    (dqpsk_llr, walsh_conf, DQPSK_WALSH_HYPOTHESES, energies)
 }
 
 pub(crate) fn process_packet_core<D>(
@@ -421,17 +360,16 @@ where
         let diff_best = on_rot * prev_phase.conj();
         let prev_phase_kappa = dqpsk_prev_phase_kappa_from_sigma2(prev_phase_sigma2);
 
-        let (dqpsk_llr, phase_update_symbol, walsh_conf, _topk_used, energies) =
-            dqpsk_llr_from_walsh_hypotheses(
-                &on_corrs,
-                tracking_state.phase_ref,
-                *prev_phase,
-                prev_phase_kappa,
-                max_energy,
-                second_energy,
-                on_rot,
-                diff_best,
-            );
+        let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
+            &on_corrs,
+            tracking_state.phase_ref,
+            *prev_phase,
+            prev_phase_kappa,
+            max_energy,
+            second_energy,
+            on_rot,
+            diff_best,
+        );
         let on_rot_tracking = walsh_posterior_weighted_on_rot(
             &on_corrs,
             tracking_state.phase_ref,
@@ -464,7 +402,7 @@ where
             stats.phase_gate_off_symbols += 1;
         }
 
-        let decided = phase_update_symbol;
+        let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
         let phase_err = tracking::phase_error_from_diff(diff_tracking, decided);
         let phase_err_abs = phase_err.abs();
         stats.phase_err_abs_sum_rad += phase_err_abs as f64;
@@ -804,7 +742,6 @@ pub(crate) fn apply_llr_erasure_quantile_with_scratch(
 }
 
 #[inline]
-#[cfg(test)]
 pub(crate) fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
     if dqpsk_llr[0] >= 0.0 && dqpsk_llr[1] >= 0.0 {
         Complex32::new(1.0, 0.0)
@@ -818,7 +755,6 @@ pub(crate) fn decide_dqpsk_symbol_from_llr(dqpsk_llr: [f32; 2]) -> Complex32 {
 }
 
 #[inline]
-#[cfg(test)]
 fn prob_bit0_from_llr(llr: f32) -> f32 {
     if llr >= 0.0 {
         1.0 / (1.0 + (-llr).exp())
@@ -832,7 +768,6 @@ fn prob_bit0_from_llr(llr: f32) -> f32 {
 /// LLR から bit 事後確率を作り、4位相の期待値方向を使って位相誤差を計算する。
 /// 曖昧すぎて期待値振幅が極小のときは hard 判定にフォールバックする。
 #[inline]
-#[cfg(test)]
 pub(crate) fn decide_dqpsk_symbol_for_phase_update(dqpsk_llr: [f32; 2]) -> Complex32 {
     let p_b0_0 = prob_bit0_from_llr(dqpsk_llr[0]);
     let p_b1_0 = prob_bit0_from_llr(dqpsk_llr[1]);
@@ -962,17 +897,16 @@ mod tests {
         let on_rot_best = on_corrs[0];
         let diff_best = on_corrs[0];
 
-        let (dqpsk_llr, _phase_symbol, walsh_conf, topk_used, _energies) =
-            dqpsk_llr_from_walsh_hypotheses(
-                &on_corrs,
-                phase_ref,
-                prev_phase,
-                1.0,
-                100.0,
-                1.0,
-                on_rot_best,
-                diff_best,
-            );
+        let (dqpsk_llr, walsh_conf, topk_used, _energies) = dqpsk_llr_from_walsh_hypotheses(
+            &on_corrs,
+            phase_ref,
+            prev_phase,
+            1.0,
+            100.0,
+            1.0,
+            on_rot_best,
+            diff_best,
+        );
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
         let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, energies[0]);
@@ -1001,17 +935,16 @@ mod tests {
         let on_rot_best = on_corrs[0];
         let diff_best = on_corrs[0];
 
-        let (dqpsk_llr, _phase_symbol, walsh_conf, topk_used, _energies) =
-            dqpsk_llr_from_walsh_hypotheses(
-                &on_corrs,
-                phase_ref,
-                prev_phase,
-                1.0,
-                100.0,
-                80.0,
-                on_rot_best,
-                diff_best,
-            );
+        let (dqpsk_llr, walsh_conf, topk_used, _energies) = dqpsk_llr_from_walsh_hypotheses(
+            &on_corrs,
+            phase_ref,
+            prev_phase,
+            1.0,
+            100.0,
+            80.0,
+            on_rot_best,
+            diff_best,
+        );
 
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
@@ -1140,17 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dqpsk_soft_symbol_from_phase_logs_uses_joint_state_posterior() {
-        // (s0, s1, s2, s3) のうち s0 と s3 を優勢にすると、
-        // bit独立近似より joint 後方分布の方向 (-45deg) が明確に出る。
-        let phase_logs = [0.0, -5.0, -5.0, -0.2];
-        let soft = dqpsk_soft_symbol_from_phase_logs(phase_logs);
-        assert!(soft.re > 0.0);
-        assert!(soft.im < 0.0);
-        assert_close(soft.norm(), 1.0, 1e-6, "joint_soft_symbol_norm");
-    }
-
-    #[test]
     fn test_update_phase_rate_when_gate_on_updates_with_innovation_when_enabled() {
         let phase_rate = 0.7;
         let phase_err_for_update = 0.2;
@@ -1168,18 +1090,8 @@ mod tests {
             -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
             tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
         );
-        assert_close(
-            updated_small_err,
-            expected,
-            1e-7,
-            "phase_rate_hold_decay_small",
-        );
-        assert_close(
-            updated_large_err,
-            expected,
-            1e-7,
-            "phase_rate_hold_decay_large",
-        );
+        assert_close(updated_small_err, expected, 1e-7, "phase_rate_hold_decay_small");
+        assert_close(updated_large_err, expected, 1e-7, "phase_rate_hold_decay_large");
     }
 
     #[test]
