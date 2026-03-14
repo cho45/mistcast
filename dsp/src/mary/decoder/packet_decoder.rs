@@ -87,6 +87,13 @@ pub(crate) struct PacketDecodeRuntime<'a> {
     pub llr_callback: &'a mut Option<LlrCallback>,
 }
 
+// DQPSK LLR は通常は best Walsh 仮説で計算する。
+// ただし Walsh 判定が曖昧な場合のみ上位仮説を混合し、LLR をやや保守化して
+// 復号処理で扱いやすい形に寄せる。
+const DQPSK_WALSH_TOPK_MAX: usize = 2;
+// walsh_conf = (E1-E2)/E1 がこの値未満なら Top-K 混合を有効化する。
+const DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH: f32 = 0.30;
+
 struct DecodeLayout {
     rows: usize,
     cols: usize,
@@ -100,6 +107,69 @@ struct DecodeCandidateContext<'a> {
     buffers: &'a mut PacketDecodeBuffers,
     llr_callback: &'a mut Option<LlrCallback>,
     options: &'a PacketDecodeOptions,
+}
+
+fn dqpsk_llr_from_walsh_hypotheses(
+    demodulator: &Demodulator,
+    on_corrs: &[Complex32; 16],
+    phase_ref: Complex32,
+    prev_phase: Complex32,
+    max_energy: f32,
+    second_energy: f32,
+    on_rot_best: Complex32,
+    diff_best: Complex32,
+) -> ([f32; 2], f32, usize, [f32; 16]) {
+    let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
+    let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
+
+    let dqpsk_topk = if walsh_conf < DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH {
+        DQPSK_WALSH_TOPK_MAX
+    } else {
+        1usize
+    };
+
+    let mut top_indices = [0usize; DQPSK_WALSH_TOPK_MAX];
+    let mut top_energies = [0.0f32; DQPSK_WALSH_TOPK_MAX];
+    for (idx, &energy) in energies.iter().enumerate() {
+        for pos in 0..DQPSK_WALSH_TOPK_MAX {
+            if energy > top_energies[pos] {
+                for shift in (pos + 1..DQPSK_WALSH_TOPK_MAX).rev() {
+                    top_energies[shift] = top_energies[shift - 1];
+                    top_indices[shift] = top_indices[shift - 1];
+                }
+                top_energies[pos] = energy;
+                top_indices[pos] = idx;
+                break;
+            }
+        }
+    }
+
+    let mut dqpsk_llr = [0.0f32; 2];
+    let mut llr_weight_sum = 0.0f32;
+    for rank in 0..dqpsk_topk {
+        let idx = top_indices[rank];
+        // 上位仮説を優先するため energy^2 で重み付けする。
+        let weight = top_energies[rank] * top_energies[rank];
+        if weight <= 0.0 {
+            continue;
+        }
+        let on_rot_h = on_corrs[idx] * phase_ref.conj();
+        let diff_h = on_rot_h * prev_phase.conj();
+        let norm_h = on_rot_h.norm().max(1e-6);
+        let llr_h = demodulator.dqpsk_llr(diff_h, norm_h);
+        dqpsk_llr[0] += weight * llr_h[0];
+        dqpsk_llr[1] += weight * llr_h[1];
+        llr_weight_sum += weight;
+    }
+    if llr_weight_sum > 0.0 {
+        dqpsk_llr[0] /= llr_weight_sum;
+        dqpsk_llr[1] /= llr_weight_sum;
+    } else {
+        let dqpsk_norm = on_rot_best.norm().max(1e-6);
+        dqpsk_llr = demodulator.dqpsk_llr(diff_best, dqpsk_norm);
+    }
+
+    (dqpsk_llr, walsh_conf, dqpsk_topk, energies)
 }
 
 pub(crate) fn process_packet_core<D>(
@@ -182,16 +252,21 @@ where
         let on_rot = best_corr * tracking_state.phase_ref.conj();
         let diff = on_rot * prev_phase.conj();
 
-        let energies: [f32; 16] =
-            on_corrs.map(|c| (c * tracking_state.phase_ref.conj()).norm_sqr());
+        let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
+            demodulator,
+            &on_corrs,
+            tracking_state.phase_ref,
+            *prev_phase,
+            max_energy,
+            second_energy,
+            on_rot,
+            diff,
+        );
         let walsh_llr = demodulator.walsh_llr(&energies, max_energy);
-        let dqpsk_norm = on_rot.norm().max(1e-6);
-        let dqpsk_llr = demodulator.dqpsk_llr(diff, dqpsk_norm);
 
         buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
         buffers.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
 
-        let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
         let energy_sum = energies.iter().sum::<f32>();
         let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
         let snr_proxy = max_energy / (noise_floor + 1e-6);
@@ -548,6 +623,17 @@ mod tests {
     use crate::mary::interleaver_config;
     use std::sync::{Arc, Mutex};
 
+    fn assert_close(actual: f32, expected: f32, tol: f32, label: &str) {
+        assert!(
+            (actual - expected).abs() <= tol,
+            "{} mismatch: actual={}, expected={}, tol={}",
+            label,
+            actual,
+            expected,
+            tol
+        );
+    }
+
     fn default_options() -> PacketDecodeOptions {
         PacketDecodeOptions {
             spc: 2,
@@ -621,6 +707,75 @@ mod tests {
                 corrs
             })
             .collect()
+    }
+
+    #[test]
+    fn test_dqpsk_llr_uses_single_hypothesis_when_walsh_conf_is_high() {
+        let demodulator = Demodulator::new();
+        let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
+        on_corrs[0] = Complex32::new(10.0, 0.0); // energy=100
+        on_corrs[1] = Complex32::new(1.0, 0.0); // energy=1
+
+        let phase_ref = Complex32::new(1.0, 0.0);
+        let prev_phase = Complex32::new(1.0, 0.0);
+        let on_rot_best = on_corrs[0];
+        let diff_best = on_corrs[0];
+
+        let (dqpsk_llr, walsh_conf, topk_used, _energies) = dqpsk_llr_from_walsh_hypotheses(
+            &demodulator,
+            &on_corrs,
+            phase_ref,
+            prev_phase,
+            100.0,
+            1.0,
+            on_rot_best,
+            diff_best,
+        );
+        let expected = demodulator.dqpsk_llr(diff_best, on_rot_best.norm());
+
+        assert!(walsh_conf > DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH);
+        assert_eq!(topk_used, 1);
+        assert_close(dqpsk_llr[0], expected[0], 1e-5, "llr0");
+        assert_close(dqpsk_llr[1], expected[1], 1e-5, "llr1");
+    }
+
+    #[test]
+    fn test_dqpsk_llr_uses_top2_weighted_mix_when_walsh_conf_is_low() {
+        let demodulator = Demodulator::new();
+        let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
+        on_corrs[0] = Complex32::new(10.0, 0.0); // energy=100, phase0
+        on_corrs[1] = Complex32::new(0.0, 8.944272); // energy≈80, phase1
+
+        let phase_ref = Complex32::new(1.0, 0.0);
+        let prev_phase = Complex32::new(1.0, 0.0);
+        let on_rot_best = on_corrs[0];
+        let diff_best = on_corrs[0];
+
+        let (dqpsk_llr, walsh_conf, topk_used, _energies) = dqpsk_llr_from_walsh_hypotheses(
+            &demodulator,
+            &on_corrs,
+            phase_ref,
+            prev_phase,
+            100.0,
+            80.0,
+            on_rot_best,
+            diff_best,
+        );
+
+        let llr0 = demodulator.dqpsk_llr(on_corrs[0], on_corrs[0].norm());
+        let llr1 = demodulator.dqpsk_llr(on_corrs[1], on_corrs[1].norm());
+        let w0 = 100.0f32 * 100.0f32;
+        let w1 = 80.0f32 * 80.0f32;
+        let expected = [
+            (w0 * llr0[0] + w1 * llr1[0]) / (w0 + w1),
+            (w0 * llr0[1] + w1 * llr1[1]) / (w0 + w1),
+        ];
+
+        assert!(walsh_conf < DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH);
+        assert_eq!(topk_used, 2);
+        assert_close(dqpsk_llr[0], expected[0], 1e-4, "llr0");
+        assert_close(dqpsk_llr[1], expected[1], 1e-4, "llr1");
+        assert!((dqpsk_llr[1] - llr0[1]).abs() > 0.1);
     }
 
     #[test]
