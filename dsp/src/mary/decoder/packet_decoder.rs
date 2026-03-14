@@ -93,6 +93,10 @@ pub(crate) struct PacketDecodeRuntime<'a> {
 const DQPSK_WALSH_TOPK_MAX: usize = 2;
 // walsh_conf = (E1-E2)/E1 がこの値未満なら Top-K 混合を有効化する。
 const DQPSK_WALSH_TOPK_ENABLE_CONF_THRESH: f32 = 0.30;
+// DQPSK LLR 正規化の雑音床下限スケール。
+// 小さくすると LLR が立ちやすくなり、弱い仮説を過信しやすい（誤判定時の振れが大きくなる）。
+// 大きくすると LLR を保守化できる一方、十分高SNRでも過小信頼になり得る。
+const DQPSK_LLR_NOISE_FLOOR_SCALE: f32 = 5.0;
 
 struct DecodeLayout {
     rows: usize,
@@ -146,6 +150,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
 
     let mut dqpsk_llr = [0.0f32; 2];
     let mut llr_weight_sum = 0.0f32;
+    let energy_sum = energies.iter().sum::<f32>();
     for rank in 0..dqpsk_topk {
         let idx = top_indices[rank];
         // 上位仮説を優先するため energy^2 で重み付けする。
@@ -155,7 +160,11 @@ fn dqpsk_llr_from_walsh_hypotheses(
         }
         let on_rot_h = on_corrs[idx] * phase_ref.conj();
         let diff_h = on_rot_h * prev_phase.conj();
-        let norm_h = on_rot_h.norm().max(1e-6);
+        let noise_floor_h = ((energy_sum - top_energies[rank]).max(0.0) / 15.0).sqrt();
+        let norm_h = on_rot_h
+            .norm()
+            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_h)
+            .max(1e-6);
         let llr_h = demodulator.dqpsk_llr(diff_h, norm_h);
         dqpsk_llr[0] += weight * llr_h[0];
         dqpsk_llr[1] += weight * llr_h[1];
@@ -165,7 +174,11 @@ fn dqpsk_llr_from_walsh_hypotheses(
         dqpsk_llr[0] /= llr_weight_sum;
         dqpsk_llr[1] /= llr_weight_sum;
     } else {
-        let dqpsk_norm = on_rot_best.norm().max(1e-6);
+        let noise_floor_best = ((energy_sum - max_energy).max(0.0) / 15.0).sqrt();
+        let dqpsk_norm = on_rot_best
+            .norm()
+            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor_best)
+            .max(1e-6);
         dqpsk_llr = demodulator.dqpsk_llr(diff_best, dqpsk_norm);
     }
 
@@ -762,8 +775,20 @@ mod tests {
             diff_best,
         );
 
-        let llr0 = demodulator.dqpsk_llr(on_corrs[0], on_corrs[0].norm());
-        let llr1 = demodulator.dqpsk_llr(on_corrs[1], on_corrs[1].norm());
+        let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
+        let energy_sum = energies.iter().sum::<f32>();
+        let noise_floor0 = ((energy_sum - energies[0]).max(0.0) / 15.0).sqrt();
+        let noise_floor1 = ((energy_sum - energies[1]).max(0.0) / 15.0).sqrt();
+        let norm0 = on_corrs[0]
+            .norm()
+            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor0)
+            .max(1e-6);
+        let norm1 = on_corrs[1]
+            .norm()
+            .max(DQPSK_LLR_NOISE_FLOOR_SCALE * noise_floor1)
+            .max(1e-6);
+        let llr0 = demodulator.dqpsk_llr(on_corrs[0], norm0);
+        let llr1 = demodulator.dqpsk_llr(on_corrs[1], norm1);
         let w0 = 100.0f32 * 100.0f32;
         let w1 = 80.0f32 * 80.0f32;
         let expected = [
