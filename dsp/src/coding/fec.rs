@@ -422,6 +422,21 @@ impl FecDecodeWorkspace {
             }
 
             std::mem::swap(&mut self.path_metrics, &mut self.new_metrics);
+            // Path metricの絶対オフセットは判定に影響しないため、毎シンボルで正規化して
+            // 大きなLLR入力時の桁落ち/精度劣化を防ぐ。
+            let mut max_metric = NEG_INF;
+            for &score in &self.path_metrics {
+                if score > max_metric {
+                    max_metric = score;
+                }
+            }
+            if max_metric.is_finite() {
+                for score in &mut self.path_metrics {
+                    if score.is_finite() {
+                        *score -= max_metric;
+                    }
+                }
+            }
         }
 
         self.ranked.clear();
@@ -653,6 +668,21 @@ mod tests {
         let d1 = decode_soft(&scaled_llr);
         assert_eq!(d0, d1);
         assert_eq!(d0, original);
+    }
+
+    #[test]
+    fn test_soft_decode_stable_under_very_large_llr_scale() {
+        let original: Vec<u8> = (0..96u32).map(|i| ((i * 17 + 9) % 2) as u8).collect();
+        let coded = encode(&original);
+        let base_llr: Vec<f32> = coded
+            .iter()
+            .map(|&b| if b == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let huge_llr: Vec<f32> = base_llr.iter().map(|v| v * 1.0e8).collect();
+        let d0 = decode_soft(&base_llr);
+        let d1 = decode_soft(&huge_llr);
+        assert_eq!(d0, original);
+        assert_eq!(d1, original);
     }
 
     #[test]
