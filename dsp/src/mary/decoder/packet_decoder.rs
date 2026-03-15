@@ -136,6 +136,7 @@ struct PhaseSlotObservation {
     prev_phase_conj: Complex32,
     max_energy: f32,
     prev_phase_kappa: f32,
+    snr_proxy: f32,
     is_data: bool,
 }
 
@@ -185,11 +186,20 @@ const PILOT_PHASE_SNR_PROXY_MIN: f32 = 2.0;
 const DQPSK_SEMI_COHERENT_PHASE_STATES: usize = 32;
 // 位相状態遷移のランダムウォーク分散 [rad^2]（小さいほど連続性を強く仮定）。
 const DQPSK_SEMI_COHERENT_PHASE_TRANS_VAR: f32 = 0.35 * 0.35;
+// 遷移分散に対する SNR/位相不確かさの加重係数。
+const DQPSK_SEMI_COHERENT_TRANS_KAPPA_SNR_WEIGHT: f32 = 0.20;
+const DQPSK_SEMI_COHERENT_TRANS_KAPPA_PHASE_WEIGHT: f32 = 0.20;
+// 観測分散に対する SNR/位相不確かさの加重係数。
+const DQPSK_PHASE_MODEL_VAR_SNR_WEIGHT: f32 = 0.20;
+const DQPSK_PHASE_MODEL_VAR_PHASE_WEIGHT: f32 = 0.20;
+// Walsh仮説重みの温度化係数（低SNR/高位相不確かさでソフト化）。
+const DQPSK_WALSH_TEMP_SNR_WEIGHT: f32 = 0.50;
+const DQPSK_WALSH_TEMP_PHASE_WEIGHT: f32 = 0.30;
 
 struct PhaseHmmCache {
     state_angles: Vec<f32>,
     state_residual_rots: Vec<Complex32>,
-    transition: Vec<f32>,
+    transition_cos: Vec<f32>,
 }
 
 fn phase_hmm_cache() -> &'static PhaseHmmCache {
@@ -206,18 +216,17 @@ fn phase_hmm_cache() -> &'static PhaseHmmCache {
             state_residual_rots.push(Complex32::new(cos_p, sin_p));
         }
 
-        let kappa = (1.0 / DQPSK_SEMI_COHERENT_PHASE_TRANS_VAR.max(1e-6)).clamp(0.5, 64.0);
-        let mut transition = vec![f32::NEG_INFINITY; m_len * m_len];
+        let mut transition_cos = vec![0.0f32; m_len * m_len];
         for prev in 0..m_len {
             for curr in 0..m_len {
                 let d = wrap_to_pi(state_angles[curr] - state_angles[prev]);
-                transition[prev * m_len + curr] = kappa * d.cos();
+                transition_cos[prev * m_len + curr] = d.cos();
             }
         }
         PhaseHmmCache {
             state_angles,
             state_residual_rots,
-            transition,
+            transition_cos,
         }
     })
 }
@@ -269,7 +278,8 @@ fn dqpsk_phase_log_metrics(
     let amp_ref = amp.max(1e-6);
     let y = diff / amp_ref;
     let sigma2_obs = (noise_var / (amp_ref * amp_ref)).max(DQPSK_PHASE_OBS_VAR_FLOOR);
-    let sigma2_eff = sigma2_obs + DQPSK_PHASE_MODEL_VAR;
+    let snr_proxy = (amp_ref * amp_ref) / noise_var.max(DQPSK_NOISE_VAR_FLOOR);
+    let sigma2_eff = sigma2_obs + phase_model_var_from_kappa_snr(prev_phase_kappa, snr_proxy);
     let eta = 2.0 / sigma2_eff;
     let prior = Complex32::new(prev_phase_kappa.clamp(0.0, 1.0), 0.0);
     let z0 = prior + y.conj() * Complex32::new(1.0, 0.0) * eta; // s0: 00
@@ -315,6 +325,50 @@ fn log_i0_approx(x: f32) -> f32 {
                                 + y * (0.026_355_37 + y * (-0.016_476_33 + y * 0.003_923_77)))))));
         ax + poly.ln() - 0.5 * ax.ln()
     }
+}
+
+#[inline]
+fn phase_sigma2_from_kappa(kappa: f32) -> f32 {
+    let k = kappa.clamp(1e-4, 1.0);
+    (-2.0 * k.ln()).clamp(0.0, DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2))
+}
+
+#[inline]
+fn snr_penalty_from_proxy(snr_proxy: f32) -> f32 {
+    1.0 / (snr_proxy.max(0.0) + 1.0)
+}
+
+#[inline]
+fn transition_kappa_from_observations(prev: &PhaseSlotObservation, curr: &PhaseSlotObservation) -> f32 {
+    let sigma2_prev = phase_sigma2_from_kappa(prev.prev_phase_kappa);
+    let sigma2_curr = phase_sigma2_from_kappa(curr.prev_phase_kappa);
+    let snr_pair = 0.5 * (prev.snr_proxy + curr.snr_proxy);
+    let sigma2_pair = 0.5 * (sigma2_prev + sigma2_curr);
+    let sigma2_trans = DQPSK_SEMI_COHERENT_PHASE_TRANS_VAR
+        * (1.0 + DQPSK_SEMI_COHERENT_TRANS_KAPPA_PHASE_WEIGHT * sigma2_pair)
+        * (1.0 + DQPSK_SEMI_COHERENT_TRANS_KAPPA_SNR_WEIGHT * snr_penalty_from_proxy(snr_pair));
+    (1.0 / sigma2_trans.max(1e-4)).clamp(0.2, 16.0)
+}
+
+#[inline]
+fn observation_model_var_from_observation(obs: &PhaseSlotObservation) -> f32 {
+    phase_model_var_from_kappa_snr(obs.prev_phase_kappa, obs.snr_proxy)
+}
+
+#[inline]
+fn phase_model_var_from_kappa_snr(prev_phase_kappa: f32, snr_proxy: f32) -> f32 {
+    let sigma2_prior = phase_sigma2_from_kappa(prev_phase_kappa);
+    let snr_penalty = snr_penalty_from_proxy(snr_proxy);
+    DQPSK_PHASE_MODEL_VAR
+        * (1.0 + DQPSK_PHASE_MODEL_VAR_PHASE_WEIGHT * sigma2_prior)
+        * (1.0 + DQPSK_PHASE_MODEL_VAR_SNR_WEIGHT * snr_penalty)
+}
+
+#[inline]
+fn walsh_temperature_scale(prev_phase_kappa: f32, snr_proxy: f32) -> f32 {
+    let sigma2_prior = phase_sigma2_from_kappa(prev_phase_kappa);
+    let snr_penalty = snr_penalty_from_proxy(snr_proxy);
+    1.0 + DQPSK_WALSH_TEMP_PHASE_WEIGHT * sigma2_prior + DQPSK_WALSH_TEMP_SNR_WEIGHT * snr_penalty
 }
 
 #[inline]
@@ -371,6 +425,8 @@ fn dqpsk_llr_from_walsh_hypotheses(
     let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
     let energy_sum = energies.iter().sum::<f32>();
     let walsh_noise_floor_e = dqpsk_noise_var_from_energy(energy_sum, max_energy);
+    let snr_proxy = max_energy / (walsh_noise_floor_e + 1e-6);
+    let walsh_temp_scale = walsh_temperature_scale(prev_phase_kappa, snr_proxy);
 
     // p(s|y) ∝ Σ_h p(y|h) p(y|s,h) を log-domain で周辺化する。
     let mut sym_logs = [f32::NEG_INFINITY; 4];
@@ -382,7 +438,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
         let phase_logs =
             dqpsk_phase_log_metrics(diff_h, on_rot_h.norm(), noise_var_h, prev_phase_kappa);
         // 相対ログ重みを使って数値桁落ちを避ける（定数項はLLR差分で相殺される）。
-        let log_p_h = (energy_h - max_energy) / walsh_noise_floor_e;
+        let log_p_h = (energy_h - max_energy) / (walsh_noise_floor_e * walsh_temp_scale);
         for s in 0..4 {
             sym_logs[s] = log_add_exp(sym_logs[s], log_p_h + phase_logs[s]);
         }
@@ -458,6 +514,7 @@ fn dqpsk_symbol_logs_for_phase_state(
     residual_rot: Complex32,
 ) -> [f32; 4] {
     let walsh_noise_floor_e = dqpsk_noise_var_from_energy(obs.energy_sum, obs.max_energy);
+    let walsh_temp_scale = walsh_temperature_scale(obs.prev_phase_kappa, obs.snr_proxy);
     let mut sym_logs = [f32::NEG_INFINITY; 4];
     let (idx_begin, idx_end) = if obs.is_data {
         (0usize, DQPSK_WALSH_HYPOTHESES)
@@ -472,11 +529,12 @@ fn dqpsk_symbol_logs_for_phase_state(
         let amp = on_rot_h.norm().max(1e-6);
         let y = diff_h / amp;
         let sigma2_obs = (noise_var_h / (amp * amp)).max(DQPSK_PHASE_OBS_VAR_FLOOR);
-        let sigma2_eff = sigma2_obs + DQPSK_PHASE_MODEL_VAR;
+        let sigma2_model = observation_model_var_from_observation(obs);
+        let sigma2_eff = sigma2_obs + sigma2_model;
         let eta = 2.0 / sigma2_eff;
         let phase_logs = [eta * y.re, eta * y.im, -eta * y.re, -eta * y.im];
         let log_p_h = if obs.is_data {
-            (energy_h - obs.max_energy) / walsh_noise_floor_e
+            (energy_h - obs.max_energy) / (walsh_noise_floor_e * walsh_temp_scale)
         } else {
             0.0
         };
@@ -538,13 +596,14 @@ fn dqpsk_llrs_with_phase_hmm(
     normalize_log_row(&mut buffers.hmm_alpha[..m_len]);
 
     for t in 1..t_len {
+        let kappa_trans = transition_kappa_from_observations(&slot_obs[t - 1], &slot_obs[t]);
         for curr in 0..m_len {
             let mut v = f32::NEG_INFINITY;
             for prev in 0..m_len {
                 v = log_add_exp(
                     v,
                     buffers.hmm_alpha[(t - 1) * m_len + prev]
-                        + cache.transition[prev * m_len + curr],
+                        + kappa_trans * cache.transition_cos[prev * m_len + curr],
                 );
             }
             buffers.hmm_pred[t * m_len + curr] = v;
@@ -555,12 +614,13 @@ fn dqpsk_llrs_with_phase_hmm(
 
     if t_len >= 2 {
         for t in (0..(t_len - 1)).rev() {
+            let kappa_trans = transition_kappa_from_observations(&slot_obs[t], &slot_obs[t + 1]);
             for prev in 0..m_len {
                 let mut v = f32::NEG_INFINITY;
                 for curr in 0..m_len {
                     v = log_add_exp(
                         v,
-                        cache.transition[prev * m_len + curr]
+                        kappa_trans * cache.transition_cos[prev * m_len + curr]
                             + buffers.hmm_slot_logz[(t + 1) * m_len + curr]
                             + buffers.hmm_beta[(t + 1) * m_len + curr],
                     );
@@ -586,10 +646,9 @@ fn dqpsk_llrs_with_phase_hmm(
                 post[s] = log_add_exp(post[s], weight + l[s]);
             }
         }
-        out_llrs.push([
-            log_add_exp(post[0], post[1]) - log_add_exp(post[2], post[3]),
-            log_add_exp(post[0], post[3]) - log_add_exp(post[1], post[2]),
-        ]);
+        let llr0 = log_add_exp(post[0], post[1]) - log_add_exp(post[2], post[3]);
+        let llr1 = log_add_exp(post[0], post[3]) - log_add_exp(post[1], post[2]);
+        out_llrs.push([llr0, llr1]);
     }
 }
 
@@ -776,6 +835,7 @@ where
             prev_phase_conj: prev_phase_sym.conj(),
             max_energy,
             prev_phase_kappa,
+            snr_proxy,
             is_data: is_data_slot,
         });
         if is_data_slot {
@@ -1449,6 +1509,7 @@ mod tests {
             prev_phase_conj: Complex32::new(1.0, 0.0).conj(),
             max_energy: on_corrs[0].norm_sqr(),
             prev_phase_kappa: 1.0,
+            snr_proxy: 20.0,
             is_data: true,
         }];
         let mut buffers = PacketDecodeBuffers::new();
@@ -1485,6 +1546,7 @@ mod tests {
                 prev_phase_conj: Complex32::new(1.0, 0.0).conj(),
                 max_energy: pilot_corrs[PAYLOAD_PILOT_WALSH_INDEX].norm_sqr(),
                 prev_phase_kappa: 1.0,
+                snr_proxy: 20.0,
                 is_data: false,
             },
             PhaseSlotObservation {
@@ -1495,6 +1557,7 @@ mod tests {
                 prev_phase_conj: Complex32::new(1.0, 0.0).conj(),
                 max_energy: data_corrs[0].norm_sqr(),
                 prev_phase_kappa: 1.0,
+                snr_proxy: 20.0,
                 is_data: true,
             },
         ];
@@ -1505,6 +1568,55 @@ mod tests {
         // data symbol=00 なので両bitとも 0 側に寄る。
         assert!(llrs[0][0] > 0.0);
         assert!(llrs[0][1] > 0.0);
+    }
+
+    #[test]
+    fn test_transition_kappa_respects_snr_and_phase_uncertainty() {
+        let base = PhaseSlotObservation {
+            on_corrs: [Complex32::new(0.0, 0.0); 16],
+            energies: [0.0; 16],
+            energy_sum: 0.0,
+            phase_ref_conj: Complex32::new(1.0, 0.0),
+            prev_phase_conj: Complex32::new(1.0, 0.0),
+            max_energy: 1.0,
+            prev_phase_kappa: 1.0,
+            snr_proxy: 20.0,
+            is_data: true,
+        };
+        let mut noisy = base;
+        noisy.prev_phase_kappa = 0.2;
+        noisy.snr_proxy = 1.0;
+        let kappa_good = transition_kappa_from_observations(&base, &base);
+        let kappa_noisy = transition_kappa_from_observations(&noisy, &noisy);
+        assert!(kappa_good > kappa_noisy);
+    }
+
+    #[test]
+    fn test_observation_model_var_respects_snr_and_phase_uncertainty() {
+        let base = PhaseSlotObservation {
+            on_corrs: [Complex32::new(0.0, 0.0); 16],
+            energies: [0.0; 16],
+            energy_sum: 0.0,
+            phase_ref_conj: Complex32::new(1.0, 0.0),
+            prev_phase_conj: Complex32::new(1.0, 0.0),
+            max_energy: 1.0,
+            prev_phase_kappa: 1.0,
+            snr_proxy: 20.0,
+            is_data: true,
+        };
+        let mut noisy = base;
+        noisy.prev_phase_kappa = 0.2;
+        noisy.snr_proxy = 1.0;
+        let sigma2_good = observation_model_var_from_observation(&base);
+        let sigma2_noisy = observation_model_var_from_observation(&noisy);
+        assert!(sigma2_noisy > sigma2_good);
+    }
+
+    #[test]
+    fn test_walsh_temperature_scale_respects_snr_and_phase_uncertainty() {
+        let scale_good = walsh_temperature_scale(1.0, 20.0);
+        let scale_noisy = walsh_temperature_scale(0.2, 1.0);
+        assert!(scale_noisy > scale_good);
     }
 
     #[test]
