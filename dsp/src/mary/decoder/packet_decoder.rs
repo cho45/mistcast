@@ -786,6 +786,9 @@ fn decode_single_llr_candidate(
             .resize(layout.interleaved_bits, 0.0);
         context.buffers.erasure_llr_buffer[..layout.interleaved_bits]
             .copy_from_slice(&context.buffers.deinterleave_buffer[..layout.interleaved_bits]);
+        // NOTE: DQPSK 2bit限定 erasure も評価したが、
+        // 2026-03-15のAWGN sweep (sigma=0.8..1.2) では改善せず、
+        // sigma=1.2で crc_pass/goodput がわずかに悪化したため不採用とした。
         apply_llr_erasure_quantile_with_scratch(
             &mut context.buffers.erasure_llr_buffer[..layout.fec_bits],
             context.options.llr_erasure_quantile,
