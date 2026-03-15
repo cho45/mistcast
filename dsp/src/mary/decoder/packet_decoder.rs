@@ -146,6 +146,13 @@ const DQPSK_NONCAUSAL_PHASE_SLOPE_MAX_RAD_PER_SYMBOL: f32 = 0.35;
 const DQPSK_NONCAUSAL_PHASE_MIN_VALID_SYMBOLS: usize = 8;
 // 非因果位相フィットに使う重みの下限。
 const DQPSK_NONCAUSAL_PHASE_MIN_WEIGHT: f32 = 0.2;
+// 既知パイロットで phase_rate を直接更新するときの低ゲイン設定。
+// データ判定由来の更新より小さいゲインで、長尺時の累積ズレだけを穏やかに補正する。
+const PILOT_PHASE_PROP_GAIN: f32 = 0.12;
+const PILOT_PHASE_RATE_GAIN: f32 = 0.015;
+const PILOT_PHASE_ERR_CLAMP: f32 = 0.60;
+const PILOT_PHASE_WALSH_CONF_MIN: f32 = 0.20;
+const PILOT_PHASE_SNR_PROXY_MIN: f32 = 2.0;
 
 struct DecodeLayout {
     rows: usize,
@@ -626,41 +633,71 @@ where
             (phase_err_abs * phase_err_abs).min(DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
         prev_phase_sigma2 = DQPSK_PREV_PHASE_VAR_EWMA_ALPHA * prev_phase_sigma2
             + (1.0 - DQPSK_PREV_PHASE_VAR_EWMA_ALPHA) * phase_var_sample;
-        let innovation_rejected = tracking_state.phase_gate_enabled
-            && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
-            && dqpsk_conf_tracking < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
-        let phase_rate_update_enabled = tracking_state.phase_gate_enabled
-            && tracking::phase_rate_update_enabled(dqpsk_conf_tracking, walsh_conf, snr_proxy);
-        if is_data_slot && innovation_rejected {
-            stats.phase_innovation_reject_symbols += 1;
-        }
-        let phase_step = if tracking_state.phase_gate_enabled {
-            // DQPSK信頼度が低いときは位相更新の駆動誤差を抑え、
-            // 誤ったイノベーションでループが振れるのを防ぐ。
-            let dqpsk_phase_weight =
-                (dqpsk_conf_tracking / TRACKING_PHASE_DQPSK_CONF_ON_MIN).clamp(0.0, 1.0);
-            let phase_err_for_update = if innovation_rejected || !phase_rate_update_enabled {
-                0.0
-            } else {
-                phase_err * dqpsk_phase_weight
-            };
-            tracking_state.phase_rate = update_phase_rate_when_gate_on(
-                tracking_state.phase_rate,
-                phase_err_for_update,
-                phase_rate_update_enabled,
-            );
-            tracking::phase_step_from_phase_error(phase_err_for_update, tracking_state.phase_rate)
-        } else {
-            let damped_err =
-                phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
-            tracking_state.phase_rate = (tracking_state.phase_rate
-                * TRACKING_PHASE_RATE_HOLD_DECAY
-                + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
-                .clamp(
-                    -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
-                    tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+        let phase_step = if is_data_slot {
+            let innovation_rejected = tracking_state.phase_gate_enabled
+                && phase_err_abs > TRACKING_PHASE_ERR_GATE_RAD
+                && dqpsk_conf_tracking < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
+            let phase_rate_update_enabled = tracking_state.phase_gate_enabled
+                && tracking::phase_rate_update_enabled(dqpsk_conf_tracking, walsh_conf, snr_proxy);
+            if innovation_rejected {
+                stats.phase_innovation_reject_symbols += 1;
+            }
+            if tracking_state.phase_gate_enabled {
+                // DQPSK信頼度が低いときは位相更新の駆動誤差を抑え、
+                // 誤ったイノベーションでループが振れるのを防ぐ。
+                let dqpsk_phase_weight =
+                    (dqpsk_conf_tracking / TRACKING_PHASE_DQPSK_CONF_ON_MIN).clamp(0.0, 1.0);
+                let phase_err_for_update = if innovation_rejected || !phase_rate_update_enabled {
+                    0.0
+                } else {
+                    phase_err * dqpsk_phase_weight
+                };
+                tracking_state.phase_rate = update_phase_rate_when_gate_on(
+                    tracking_state.phase_rate,
+                    phase_err_for_update,
+                    phase_rate_update_enabled,
                 );
-            (tracking_state.phase_rate + TRACKING_PHASE_PROP_GAIN_OFF * damped_err)
+                tracking::phase_step_from_phase_error(
+                    phase_err_for_update,
+                    tracking_state.phase_rate,
+                )
+            } else {
+                let damped_err =
+                    phase_err.clamp(-TRACKING_PHASE_OFF_ERR_CLAMP, TRACKING_PHASE_OFF_ERR_CLAMP);
+                tracking_state.phase_rate = (tracking_state.phase_rate
+                    * TRACKING_PHASE_RATE_HOLD_DECAY
+                    + TRACKING_PHASE_FREQ_GAIN_OFF * damped_err)
+                    .clamp(
+                        -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                        tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                    );
+                (tracking_state.phase_rate + TRACKING_PHASE_PROP_GAIN_OFF * damped_err)
+                    .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
+            }
+        } else {
+            // 既知パイロットは低ゲインで phase_rate を直接補正する。
+            // データ復調の判定誤差を介さず、長尺時の残留位相傾きを前向きに抑える。
+            let pilot_update_enabled =
+                walsh_conf >= PILOT_PHASE_WALSH_CONF_MIN && snr_proxy >= PILOT_PHASE_SNR_PROXY_MIN;
+            let pilot_err = if pilot_update_enabled {
+                phase_err.clamp(-PILOT_PHASE_ERR_CLAMP, PILOT_PHASE_ERR_CLAMP)
+            } else {
+                0.0
+            };
+            if pilot_update_enabled {
+                tracking_state.phase_rate =
+                    (tracking_state.phase_rate + PILOT_PHASE_RATE_GAIN * pilot_err).clamp(
+                        -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                        tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                    );
+            } else {
+                tracking_state.phase_rate =
+                    (tracking_state.phase_rate * TRACKING_PHASE_RATE_HOLD_DECAY).clamp(
+                        -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                        tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
+                    );
+            }
+            (tracking_state.phase_rate + PILOT_PHASE_PROP_GAIN * pilot_err)
                 .clamp(-TRACKING_PHASE_STEP_CLAMP, TRACKING_PHASE_STEP_CLAMP)
         };
         let (sin_dphi, cos_dphi) = phase_step.sin_cos();
