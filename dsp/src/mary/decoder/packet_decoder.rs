@@ -407,6 +407,17 @@ fn fit_noncausal_phase_line(observations: &[SymbolObservation]) -> Option<(f32, 
     Some((intercept, slope))
 }
 
+#[inline]
+fn residual_rot_from_phase_line(phase_line: Option<(f32, f32)>, sym_idx: usize) -> Complex32 {
+    if let Some((intercept, slope)) = phase_line {
+        let phase = -(intercept + slope * sym_idx as f32);
+        let (sin_p, cos_p) = phase.sin_cos();
+        Complex32::new(cos_p, sin_p)
+    } else {
+        Complex32::new(1.0, 0.0)
+    }
+}
+
 pub(crate) fn process_packet_core<D>(
     runtime: PacketDecodeRuntime<'_>,
     options: &PacketDecodeOptions,
@@ -616,15 +627,12 @@ where
         *prev_phase = on_rot_tracking / on_norm;
     }
 
+    // NOTE: 非因果位相フィットの1回追加反復（EM-lite）を評価したが、
+    // 2026-03-15のAWGN sweep (sigma=0.8..1.2) では crc_pass/raw_ber/goodput 差分は 0 だった。
+    // 計算量のみ増えるため、現状は単発フィットを採用する。
     let phase_line = fit_noncausal_phase_line(&observations);
     for (sym_idx, obs) in observations.iter().enumerate() {
-        let residual_rot = if let Some((intercept, slope)) = phase_line {
-            let phase = -(intercept + slope * sym_idx as f32);
-            let (sin_p, cos_p) = phase.sin_cos();
-            Complex32::new(cos_p, sin_p)
-        } else {
-            Complex32::new(1.0, 0.0)
-        };
+        let residual_rot = residual_rot_from_phase_line(phase_line, sym_idx);
         let (dqpsk_llr, _walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
             &obs.on_corrs,
             obs.phase_ref,
@@ -1288,6 +1296,12 @@ mod tests {
         observations[9].phase_err = f32::INFINITY;
         let (_a, b) = fit_noncausal_phase_line(&observations).expect("fit should survive NaN/Inf");
         assert_close(b, 0.03, 3e-3, "slope_non_finite_filtered");
+    }
+
+    #[test]
+    fn test_residual_rot_from_phase_line_unit_magnitude() {
+        let r = residual_rot_from_phase_line(Some((0.2, -0.03)), 7);
+        assert_close(r.norm(), 1.0, 1e-6, "residual_rot_norm");
     }
 
     #[test]
