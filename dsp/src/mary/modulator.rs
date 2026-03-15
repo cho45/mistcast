@@ -14,6 +14,7 @@ use crate::common::nco::Nco;
 use crate::common::resample::Resampler;
 use crate::common::rrc_filter::RrcFilter;
 use crate::common::walsh::WalshDictionary;
+use crate::mary::interleaver_config;
 use crate::mary::params;
 use crate::params::{INTERNAL_SPC, SYNC_WORD};
 use crate::DspConfig;
@@ -189,16 +190,18 @@ impl Modulator {
         output_q: &mut Vec<f32>,
     ) {
         let sf = params::PAYLOAD_SPREAD_FACTOR;
-        let num_symbols = bits.len().div_ceil(6);
+        let num_data_symbols = bits.len().div_ceil(6);
+        let num_total_symbols = params::payload_total_symbols(num_data_symbols);
         output_i.clear();
         output_q.clear();
-        let needed = num_symbols * sf;
+        let needed = num_total_symbols * sf;
         if output_i.capacity() < needed {
             output_i.reserve(needed);
             output_q.reserve(needed);
         }
 
-        for sym_idx in 0..num_symbols {
+        let data_symbols_per_packet = interleaver_config::mary_symbols().max(1);
+        for sym_idx in 0..num_data_symbols {
             let start_bit = sym_idx * 6;
             let end_bit = (start_bit + 6).min(bits.len());
             let mut sym_bits = [0u8; 6];
@@ -218,6 +221,28 @@ impl Modulator {
             let (si, sq) = phase_to_iq(*prev_phase);
 
             Self::append_mary_symbol_chips(wdict, w_idx, si, sq, output_i, output_q);
+
+            // 16シンボルごとに既知パイロット( Walh[0], DQPSK delta=0 )を挿入する。
+            // パケット境界で位相追従が不連続にならないよう、間隔は各パケット内でリセットする。
+            let sym_idx_in_packet = sym_idx % data_symbols_per_packet;
+            if params::PAYLOAD_PILOT_INTERVAL_SYMBOLS > 0
+                && (sym_idx_in_packet + 1) % params::PAYLOAD_PILOT_INTERVAL_SYMBOLS == 0
+                && (sym_idx_in_packet + 1) < data_symbols_per_packet
+                && (sym_idx + 1) < num_data_symbols
+            {
+                let (pb0, pb1) = params::PAYLOAD_PILOT_DQPSK_BITS;
+                let pdelta = dqpsk_delta(pb0, pb1);
+                *prev_phase = (*prev_phase + pdelta) & 0x03;
+                let (psi, psq) = phase_to_iq(*prev_phase);
+                Self::append_mary_symbol_chips(
+                    wdict,
+                    params::PAYLOAD_PILOT_WALSH_INDEX as u8,
+                    psi,
+                    psq,
+                    output_i,
+                    output_q,
+                );
+            }
         }
     }
 
@@ -451,8 +476,15 @@ impl Modulator {
     }
 
     fn estimate_frame_samples(&self, bits_len: usize) -> usize {
-        let payload_symbols = bits_len.div_ceil(6);
-        let payload_chips = payload_symbols * params::PAYLOAD_SPREAD_FACTOR;
+        let packet_bits = interleaver_config::interleaved_bits();
+        let packet_data_symbols = interleaver_config::mary_symbols();
+        let full_packets = bits_len / packet_bits;
+        let rem_bits = bits_len % packet_bits;
+        let rem_data_symbols = rem_bits.div_ceil(6);
+        let payload_total_symbols = full_packets
+            * params::payload_total_symbols(packet_data_symbols)
+            + params::payload_total_symbols(rem_data_symbols);
+        let payload_chips = payload_total_symbols * params::PAYLOAD_SPREAD_FACTOR;
         let preamble_chips = self.config.preamble_sf * self.config.preamble_repeat;
         let sync_chips = self.config.sync_word_bits * params::SYNC_SPREAD_FACTOR;
         let total_chips = preamble_chips + sync_chips + payload_chips;

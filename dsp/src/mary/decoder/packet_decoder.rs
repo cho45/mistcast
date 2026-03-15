@@ -16,7 +16,10 @@ use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::{Packet, PACKET_BYTES};
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
-use crate::mary::params::PAYLOAD_SPREAD_FACTOR;
+use crate::mary::params::{
+    payload_data_index_for_symbol_slot, payload_total_symbols, PAYLOAD_PILOT_DQPSK_BITS,
+    PAYLOAD_PILOT_WALSH_INDEX, PAYLOAD_SPREAD_FACTOR,
+};
 use num_complex::Complex32;
 
 /// LLR観測用コールバック型
@@ -443,9 +446,11 @@ where
     let mut total_packet_energy = 0.0f32;
     let mut prev_phase_sigma2 = 0.0f32;
     let mut observations = Vec::with_capacity(expected_symbols);
+    let total_symbol_slots = payload_total_symbols(expected_symbols);
 
-    for sym_idx in 0..expected_symbols {
-        let symbol_start = options.spc + sym_idx * PAYLOAD_SPREAD_FACTOR * options.spc;
+    for slot_idx in 0..total_symbol_slots {
+        let is_data_slot = payload_data_index_for_symbol_slot(slot_idx).is_some();
+        let symbol_start = options.spc + slot_idx * PAYLOAD_SPREAD_FACTOR * options.spc;
 
         let on_corrs =
             if let Some(c) = despread_symbol(symbol_start, tracking_state.timing_offset, 0.0) {
@@ -481,20 +486,31 @@ where
             };
         };
 
-        let mut max_energy = 0.0f32;
+        let energies_on = on_corrs.map(|corr| corr.norm_sqr());
+        let best_idx = if is_data_slot {
+            let mut best = 0usize;
+            let mut best_energy = energies_on[0];
+            for (idx, &energy) in energies_on.iter().enumerate().skip(1) {
+                if energy > best_energy {
+                    best = idx;
+                    best_energy = energy;
+                }
+            }
+            best
+        } else {
+            // パイロットは送信側で Walsh[0] 固定なので、既知系列を基準に追従更新する。
+            PAYLOAD_PILOT_WALSH_INDEX
+        };
+        let max_energy = energies_on[best_idx];
         let mut second_energy = 0.0f32;
-        let mut best_idx = 0usize;
-        for (idx, corr) in on_corrs.iter().enumerate() {
-            let energy = corr.norm_sqr();
-            if energy > max_energy {
-                second_energy = max_energy;
-                max_energy = energy;
-                best_idx = idx;
-            } else if energy > second_energy {
+        for (idx, &energy) in energies_on.iter().enumerate() {
+            if idx != best_idx && energy > second_energy {
                 second_energy = energy;
             }
         }
-        total_packet_energy += max_energy;
+        if is_data_slot {
+            total_packet_energy += max_energy;
+        }
 
         let phase_ref_sym = tracking_state.phase_ref;
         let prev_phase_sym = *prev_phase;
@@ -502,69 +518,110 @@ where
         let on_rot = best_corr * phase_ref_sym.conj();
         let diff_best = on_rot * prev_phase_sym.conj();
         let prev_phase_kappa = dqpsk_prev_phase_kappa_from_sigma2(prev_phase_sigma2);
-
-        let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
-            &on_corrs,
-            phase_ref_sym,
-            prev_phase_sym,
-            prev_phase_kappa,
-            max_energy,
-            second_energy,
-            on_rot,
-            diff_best,
-            Complex32::new(1.0, 0.0),
-        );
-        let on_rot_tracking = walsh_posterior_weighted_on_rot(
-            &on_corrs,
-            phase_ref_sym,
-            &energies,
-            max_energy,
-            on_rot,
-        );
-        let diff_tracking = on_rot_tracking * prev_phase_sym.conj();
-
-        let energy_sum = energies.iter().sum::<f32>();
+        let energy_sum = energies_on.iter().sum::<f32>();
         let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
         let snr_proxy = max_energy / (noise_floor + 1e-6);
-        let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
-        // 位相追跡の信頼度は DQPSK 単独では過大になりやすいため、
-        // Walsh識別の確からしさを掛け合わせて低SNR時の追従暴走を抑える。
-        let dqpsk_conf_tracking = dqpsk_conf * walsh_conf.clamp(0.0, 1.0);
+
+        let (
+            _dqpsk_llr,
+            walsh_conf,
+            on_rot_tracking,
+            phase_err,
+            phase_fit_weight,
+            dqpsk_conf_tracking,
+        ) = if is_data_slot {
+            let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
+                &on_corrs,
+                phase_ref_sym,
+                prev_phase_sym,
+                prev_phase_kappa,
+                max_energy,
+                second_energy,
+                on_rot,
+                diff_best,
+                Complex32::new(1.0, 0.0),
+            );
+            let on_rot_tracking = walsh_posterior_weighted_on_rot(
+                &on_corrs,
+                phase_ref_sym,
+                &energies,
+                max_energy,
+                on_rot,
+            );
+            let diff_tracking = on_rot_tracking * prev_phase_sym.conj();
+            let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
+            // 位相追跡の信頼度は DQPSK 単独では過大になりやすいため、
+            // Walsh識別の確からしさを掛け合わせて低SNR時の追従暴走を抑える。
+            let dqpsk_conf_tracking = dqpsk_conf * walsh_conf.clamp(0.0, 1.0);
+            let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
+            let phase_err = tracking::phase_error_from_diff(diff_tracking, decided);
+            (
+                dqpsk_llr,
+                walsh_conf,
+                on_rot_tracking,
+                phase_err,
+                dqpsk_conf_tracking.clamp(0.0, 8.0),
+                dqpsk_conf_tracking,
+            )
+        } else {
+            // パイロットは既知系列なので、推定シンボルではなく既知差分で位相誤差を作る。
+            // 未知シンボル前提の判定誤りをループへ注入しないため、長尺耐性が安定する。
+            let pilot_on_rot = on_corrs[PAYLOAD_PILOT_WALSH_INDEX] * phase_ref_sym.conj();
+            let pilot_diff = pilot_on_rot * prev_phase_sym.conj();
+            let pilot_decided =
+                dqpsk_symbol_from_bits_pair(PAYLOAD_PILOT_DQPSK_BITS.0, PAYLOAD_PILOT_DQPSK_BITS.1);
+            let phase_err = tracking::phase_error_from_diff(pilot_diff, pilot_decided);
+            let pilot_energy = energies_on[PAYLOAD_PILOT_WALSH_INDEX];
+            let walsh_conf = ((pilot_energy - second_energy).max(0.0)) / pilot_energy.max(1e-6);
+            // 既知パイロットでは DQPSK 判定信頼度は固定扱いとし、
+            // ゲートの実質判定は Walsh/SNR 側で行う。
+            let dqpsk_conf_tracking = TRACKING_PHASE_DQPSK_CONF_ON_MIN;
+            (
+                [0.0, 0.0],
+                walsh_conf,
+                pilot_on_rot,
+                phase_err,
+                0.0,
+                dqpsk_conf_tracking,
+            )
+        };
         tracking_state.phase_gate_enabled = tracking::next_phase_gate_enabled(
             tracking_state.phase_gate_enabled,
             dqpsk_conf_tracking,
             walsh_conf,
             snr_proxy,
         );
-        if tracking_state.phase_gate_enabled {
-            stats.phase_gate_on_symbols += 1;
-        } else {
-            stats.phase_gate_off_symbols += 1;
+        if is_data_slot {
+            if tracking_state.phase_gate_enabled {
+                stats.phase_gate_on_symbols += 1;
+            } else {
+                stats.phase_gate_off_symbols += 1;
+            }
         }
 
-        let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
-        let phase_err = tracking::phase_error_from_diff(diff_tracking, decided);
         let phase_err_abs = phase_err.abs();
-        stats.phase_err_abs_sum_rad += phase_err_abs as f64;
-        stats.phase_err_abs_count += 1;
-        if phase_err_abs >= PHASE_ERR_ABS_THRESH_0P5_RAD {
-            stats.phase_err_abs_ge_0p5_symbols += 1;
+        if is_data_slot {
+            stats.phase_err_abs_sum_rad += phase_err_abs as f64;
+            stats.phase_err_abs_count += 1;
+            if phase_err_abs >= PHASE_ERR_ABS_THRESH_0P5_RAD {
+                stats.phase_err_abs_ge_0p5_symbols += 1;
+            }
+            if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
+                stats.phase_err_abs_ge_1p0_symbols += 1;
+            }
+            observations.push(SymbolObservation {
+                on_corrs,
+                phase_ref: phase_ref_sym,
+                prev_phase: prev_phase_sym,
+                max_energy,
+                second_energy,
+                on_rot_best: on_rot,
+                diff_best,
+                prev_phase_kappa,
+                phase_err,
+                phase_fit_weight,
+            });
         }
-        if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
-            stats.phase_err_abs_ge_1p0_symbols += 1;
-        }
-        observations.push(SymbolObservation {
-            on_corrs,
-            phase_ref: phase_ref_sym,
-            prev_phase: prev_phase_sym,
-            max_energy,
-            second_energy,
-            on_rot_best: on_rot,
-            diff_best,
-            prev_phase_kappa,
-            phase_err,
-            phase_fit_weight: dqpsk_conf_tracking.clamp(0.0, 8.0),
-        });
         let phase_var_sample =
             (phase_err_abs * phase_err_abs).min(DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
         prev_phase_sigma2 = DQPSK_PREV_PHASE_VAR_EWMA_ALPHA * prev_phase_sigma2
@@ -574,7 +631,7 @@ where
             && dqpsk_conf_tracking < TRACKING_PHASE_ERR_GATE_DQPSK_CONF_HIGH;
         let phase_rate_update_enabled = tracking_state.phase_gate_enabled
             && tracking::phase_rate_update_enabled(dqpsk_conf_tracking, walsh_conf, snr_proxy);
-        if innovation_rejected {
+        if is_data_slot && innovation_rejected {
             stats.phase_innovation_reject_symbols += 1;
         }
         let phase_step = if tracking_state.phase_gate_enabled {
@@ -865,6 +922,17 @@ fn try_decode_soft_list_llrs(
     }
 }
 
+#[inline]
+fn dqpsk_symbol_from_bits_pair(b0: u8, b1: u8) -> Complex32 {
+    match (b0, b1) {
+        (0, 0) => Complex32::new(1.0, 0.0),
+        (0, 1) => Complex32::new(0.0, 1.0),
+        (1, 1) => Complex32::new(-1.0, 0.0),
+        (1, 0) => Complex32::new(0.0, -1.0),
+        _ => Complex32::new(1.0, 0.0),
+    }
+}
+
 fn decode_packet(
     packet_bits: &[u8],
     decoded_bytes: &mut Vec<u8>,
@@ -975,6 +1043,7 @@ mod tests {
     use crate::frame::packet::{Packet, PACKET_BYTES};
     use crate::mary::demodulator::Demodulator;
     use crate::mary::interleaver_config;
+    use crate::mary::params;
     use std::sync::{Arc, Mutex};
 
     fn assert_close(actual: f32, expected: f32, tol: f32, label: &str) {
@@ -1048,19 +1117,35 @@ mod tests {
     fn build_symbol_correlation_sequence(packet: &Packet, amplitude: f32) -> Vec<[Complex32; 16]> {
         let bits = encode_packet_to_interleaved_bits(packet);
         let mut prev = Complex32::new(1.0, 0.0);
-        bits.chunks_exact(6)
-            .map(|chunk| {
-                let walsh_idx = chunk[..4]
-                    .iter()
-                    .fold(0usize, |acc, &bit| (acc << 1) | bit as usize);
-                let diff = dqpsk_symbol_from_bits(&chunk[4..6]);
-                let current = prev * diff;
-                prev = current;
-                let mut corrs = [Complex32::new(0.0, 0.0); 16];
-                corrs[walsh_idx] = current * amplitude;
-                corrs
-            })
-            .collect()
+        let data_symbols = bits.len().div_ceil(6);
+        let mut out = Vec::with_capacity(params::payload_total_symbols(data_symbols));
+        for (sym_idx, chunk) in bits.chunks_exact(6).enumerate() {
+            let data_walsh_idx = chunk[..4]
+                .iter()
+                .fold(0usize, |acc, &bit| (acc << 1) | bit as usize);
+            let data_diff = dqpsk_symbol_from_bits(&chunk[4..6]);
+            let data_current = prev * data_diff;
+            prev = data_current;
+            let mut data_corrs = [Complex32::new(0.0, 0.0); 16];
+            data_corrs[data_walsh_idx] = data_current * amplitude;
+            out.push(data_corrs);
+
+            if params::PAYLOAD_PILOT_INTERVAL_SYMBOLS > 0
+                && (sym_idx + 1) % params::PAYLOAD_PILOT_INTERVAL_SYMBOLS == 0
+                && (sym_idx + 1) < data_symbols
+            {
+                let pilot_diff = dqpsk_symbol_from_bits(&[
+                    params::PAYLOAD_PILOT_DQPSK_BITS.0,
+                    params::PAYLOAD_PILOT_DQPSK_BITS.1,
+                ]);
+                let pilot_current = prev * pilot_diff;
+                prev = pilot_current;
+                let mut pilot_corrs = [Complex32::new(0.0, 0.0); 16];
+                pilot_corrs[params::PAYLOAD_PILOT_WALSH_INDEX] = pilot_current * amplitude;
+                out.push(pilot_corrs);
+            }
+        }
+        out
     }
 
     #[test]
@@ -1624,8 +1709,8 @@ mod tests {
             },
             &options,
             |symbol_start, _timing_offset, _sample_shift| {
-                let sym_idx = (symbol_start - options.spc) / (PAYLOAD_SPREAD_FACTOR * options.spc);
-                symbol_corrs.get(sym_idx).copied()
+                let slot_idx = (symbol_start - options.spc) / (PAYLOAD_SPREAD_FACTOR * options.spc);
+                symbol_corrs.get(slot_idx).copied()
             },
         );
 

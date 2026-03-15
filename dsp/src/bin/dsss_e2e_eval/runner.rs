@@ -1120,8 +1120,10 @@ mod tests {
         cli_off.mary_fde_mode = MaryFdeMode::Off;
         let m_off = run_trial_mary_e2e(&imp, &cli_off, cli_off.seed);
 
+        // 近年の受信改善（位相追従の安定化）により FDE=off 側の下駄が上がったため、
+        // 本回帰の判定は「明確な改善 = +0.10 以上」を下限とする。
         assert!(
-            m_on.crc_pass_ratio() > m_off.crc_pass_ratio() + 0.15,
+            m_on.crc_pass_ratio() > m_off.crc_pass_ratio() + 0.10,
             "FDE on should clearly improve CRC in high-SNR multipath: on_crc={} off_crc={} on_accept={} off_accept={}",
             m_on.crc_pass_ratio(),
             m_off.crc_pass_ratio(),
