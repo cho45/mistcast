@@ -87,6 +87,20 @@ pub(crate) struct PacketDecodeRuntime<'a> {
     pub llr_callback: &'a mut Option<LlrCallback>,
 }
 
+#[derive(Clone, Copy)]
+struct SymbolObservation {
+    on_corrs: [Complex32; 16],
+    phase_ref: Complex32,
+    prev_phase: Complex32,
+    max_energy: f32,
+    second_energy: f32,
+    on_rot_best: Complex32,
+    diff_best: Complex32,
+    prev_phase_kappa: f32,
+    phase_err: f32,
+    phase_fit_weight: f32,
+}
+
 // DQPSK LLR は (Walsh仮説 h, 位相仮説 s) の同時尤度を
 // 全Walsh仮説で周辺化して計算する。
 // walsh_conf は位相追跡のゲート制御にも使うため継続して算出する。
@@ -122,6 +136,13 @@ const DQPSK_PREV_PHASE_SIGMA_MAX_RAD: f32 = 1.2;
 const DQPSK_TRACKING_POSTERIOR_NORM_MIN: f32 = 1e-5;
 // 期待シンボルの振幅がこの値未満なら、方向が不安定とみなして hard 判定へフォールバックする。
 const DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN: f32 = 1e-3;
+// パケット内の残留位相傾き（rad/symbol）を非因果推定で補償する際の上限。
+// これを超える推定は外れ値起因とみなし、補償を無効化する。
+const DQPSK_NONCAUSAL_PHASE_SLOPE_MAX_RAD_PER_SYMBOL: f32 = 0.35;
+// 非因果位相フィットに使う最小有効シンボル数。
+const DQPSK_NONCAUSAL_PHASE_MIN_VALID_SYMBOLS: usize = 8;
+// 非因果位相フィットに使う重みの下限。
+const DQPSK_NONCAUSAL_PHASE_MIN_WEIGHT: f32 = 0.2;
 
 struct DecodeLayout {
     rows: usize,
@@ -266,6 +287,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
     second_energy: f32,
     on_rot_best: Complex32,
     diff_best: Complex32,
+    residual_rot: Complex32,
 ) -> ([f32; 2], f32, usize, [f32; 16]) {
     let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
     let walsh_conf = ((max_energy - second_energy).max(0.0)) / max_energy.max(1e-6);
@@ -277,7 +299,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
     for idx in 0..DQPSK_WALSH_HYPOTHESES {
         let energy_h = energies[idx];
         let on_rot_h = on_corrs[idx] * phase_ref.conj();
-        let diff_h = on_rot_h * prev_phase.conj();
+        let diff_h = on_rot_h * prev_phase.conj() * residual_rot;
         let noise_var_h = dqpsk_noise_var_from_energy(energy_sum, energy_h);
         let phase_logs =
             dqpsk_phase_log_metrics(diff_h, on_rot_h.norm(), noise_var_h, prev_phase_kappa);
@@ -297,7 +319,7 @@ fn dqpsk_llr_from_walsh_hypotheses(
     } else {
         let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, max_energy);
         let phase_logs = dqpsk_phase_log_metrics(
-            diff_best,
+            diff_best * residual_rot,
             on_rot_best.norm(),
             noise_var_best,
             prev_phase_kappa,
@@ -309,6 +331,80 @@ fn dqpsk_llr_from_walsh_hypotheses(
     };
 
     (dqpsk_llr, walsh_conf, DQPSK_WALSH_HYPOTHESES, energies)
+}
+
+#[inline]
+fn wrap_to_pi(mut x: f32) -> f32 {
+    while x > std::f32::consts::PI {
+        x -= 2.0 * std::f32::consts::PI;
+    }
+    while x < -std::f32::consts::PI {
+        x += 2.0 * std::f32::consts::PI;
+    }
+    x
+}
+
+fn fit_noncausal_phase_line(observations: &[SymbolObservation]) -> Option<(f32, f32)> {
+    let mut xs = Vec::with_capacity(observations.len());
+    let mut ys = Vec::with_capacity(observations.len());
+    let mut ws = Vec::with_capacity(observations.len());
+
+    let mut last_raw = 0.0f32;
+    let mut last_unwrapped = 0.0f32;
+    let mut has_prev = false;
+    for (i, obs) in observations.iter().enumerate() {
+        let w = obs.phase_fit_weight;
+        if !w.is_finite() || w < DQPSK_NONCAUSAL_PHASE_MIN_WEIGHT || !obs.phase_err.is_finite() {
+            continue;
+        }
+        let raw = wrap_to_pi(obs.phase_err);
+        let unwrapped = if has_prev {
+            last_unwrapped + wrap_to_pi(raw - last_raw)
+        } else {
+            raw
+        };
+        has_prev = true;
+        last_raw = raw;
+        last_unwrapped = unwrapped;
+        xs.push(i as f32);
+        ys.push(unwrapped);
+        ws.push(w);
+    }
+
+    if xs.len() < DQPSK_NONCAUSAL_PHASE_MIN_VALID_SYMBOLS {
+        return None;
+    }
+
+    let mut sw = 0.0f32;
+    let mut sx = 0.0f32;
+    let mut sy = 0.0f32;
+    let mut sxx = 0.0f32;
+    let mut sxy = 0.0f32;
+    for i in 0..xs.len() {
+        let w = ws[i];
+        let x = xs[i];
+        let y = ys[i];
+        sw += w;
+        sx += w * x;
+        sy += w * y;
+        sxx += w * x * x;
+        sxy += w * x * y;
+    }
+    if sw <= 0.0 {
+        return None;
+    }
+
+    let denom = sw * sxx - sx * sx;
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+
+    let slope = (sw * sxy - sx * sy) / denom;
+    if slope.abs() > DQPSK_NONCAUSAL_PHASE_SLOPE_MAX_RAD_PER_SYMBOL {
+        return None;
+    }
+    let intercept = (sy - slope * sx) / sw;
+    Some((intercept, slope))
 }
 
 pub(crate) fn process_packet_core<D>(
@@ -335,6 +431,7 @@ where
     buffers.packet_llrs_buffer.clear();
     let mut total_packet_energy = 0.0f32;
     let mut prev_phase_sigma2 = 0.0f32;
+    let mut observations = Vec::with_capacity(expected_symbols);
 
     for sym_idx in 0..expected_symbols {
         let symbol_start = options.spc + sym_idx * PAYLOAD_SPREAD_FACTOR * options.spc;
@@ -388,33 +485,32 @@ where
         }
         total_packet_energy += max_energy;
 
+        let phase_ref_sym = tracking_state.phase_ref;
+        let prev_phase_sym = *prev_phase;
         let best_corr = on_corrs[best_idx];
-        let on_rot = best_corr * tracking_state.phase_ref.conj();
-        let diff_best = on_rot * prev_phase.conj();
+        let on_rot = best_corr * phase_ref_sym.conj();
+        let diff_best = on_rot * prev_phase_sym.conj();
         let prev_phase_kappa = dqpsk_prev_phase_kappa_from_sigma2(prev_phase_sigma2);
 
         let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
             &on_corrs,
-            tracking_state.phase_ref,
-            *prev_phase,
+            phase_ref_sym,
+            prev_phase_sym,
             prev_phase_kappa,
             max_energy,
             second_energy,
             on_rot,
             diff_best,
+            Complex32::new(1.0, 0.0),
         );
         let on_rot_tracking = walsh_posterior_weighted_on_rot(
             &on_corrs,
-            tracking_state.phase_ref,
+            phase_ref_sym,
             &energies,
             max_energy,
             on_rot,
         );
-        let diff_tracking = on_rot_tracking * prev_phase.conj();
-        let walsh_llr = demodulator.walsh_llr(&energies, max_energy);
-
-        buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
-        buffers.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
+        let diff_tracking = on_rot_tracking * prev_phase_sym.conj();
 
         let energy_sum = energies.iter().sum::<f32>();
         let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
@@ -446,6 +542,18 @@ where
         if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
             stats.phase_err_abs_ge_1p0_symbols += 1;
         }
+        observations.push(SymbolObservation {
+            on_corrs,
+            phase_ref: phase_ref_sym,
+            prev_phase: prev_phase_sym,
+            max_energy,
+            second_energy,
+            on_rot_best: on_rot,
+            diff_best,
+            prev_phase_kappa,
+            phase_err,
+            phase_fit_weight: dqpsk_conf_tracking.clamp(0.0, 8.0),
+        });
         let phase_var_sample =
             (phase_err_abs * phase_err_abs).min(DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
         prev_phase_sigma2 = DQPSK_PREV_PHASE_VAR_EWMA_ALPHA * prev_phase_sigma2
@@ -506,6 +614,31 @@ where
 
         let on_norm = on_rot_tracking.norm().max(1e-6);
         *prev_phase = on_rot_tracking / on_norm;
+    }
+
+    let phase_line = fit_noncausal_phase_line(&observations);
+    for (sym_idx, obs) in observations.iter().enumerate() {
+        let residual_rot = if let Some((intercept, slope)) = phase_line {
+            let phase = -(intercept + slope * sym_idx as f32);
+            let (sin_p, cos_p) = phase.sin_cos();
+            Complex32::new(cos_p, sin_p)
+        } else {
+            Complex32::new(1.0, 0.0)
+        };
+        let (dqpsk_llr, _walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
+            &obs.on_corrs,
+            obs.phase_ref,
+            obs.prev_phase,
+            obs.prev_phase_kappa,
+            obs.max_energy,
+            obs.second_energy,
+            obs.on_rot_best,
+            obs.diff_best,
+            residual_rot,
+        );
+        let walsh_llr = demodulator.walsh_llr(&energies, obs.max_energy);
+        buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
+        buffers.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
     }
 
     let _avg_energy = total_packet_energy / expected_symbols as f32;
@@ -939,6 +1072,7 @@ mod tests {
             1.0,
             on_rot_best,
             diff_best,
+            Complex32::new(1.0, 0.0),
         );
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
@@ -977,6 +1111,7 @@ mod tests {
             80.0,
             on_rot_best,
             diff_best,
+            Complex32::new(1.0, 0.0),
         );
 
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
@@ -1096,6 +1231,63 @@ mod tests {
                 "x={x}, approx={approx}, ref={reference}, err={err}"
             );
         }
+    }
+
+    fn make_phase_obs(phase_err: f32, weight: f32) -> SymbolObservation {
+        SymbolObservation {
+            on_corrs: [Complex32::new(0.0, 0.0); 16],
+            phase_ref: Complex32::new(1.0, 0.0),
+            prev_phase: Complex32::new(1.0, 0.0),
+            max_energy: 1.0,
+            second_energy: 0.0,
+            on_rot_best: Complex32::new(1.0, 0.0),
+            diff_best: Complex32::new(1.0, 0.0),
+            prev_phase_kappa: 1.0,
+            phase_err,
+            phase_fit_weight: weight,
+        }
+    }
+
+    #[test]
+    fn test_fit_noncausal_phase_line_recovers_linear_phase() {
+        let intercept = 0.12f32;
+        let slope = 0.04f32;
+        let observations: Vec<SymbolObservation> = (0..20)
+            .map(|i| make_phase_obs(intercept + slope * i as f32, 1.0))
+            .collect();
+        let (a, b) = fit_noncausal_phase_line(&observations).expect("fit should succeed");
+        assert_close(a, intercept, 1e-4, "intercept");
+        assert_close(b, slope, 1e-4, "slope");
+    }
+
+    #[test]
+    fn test_fit_noncausal_phase_line_unwraps_wrapped_sequence() {
+        let intercept = 2.9f32;
+        let slope = 0.08f32;
+        let observations: Vec<SymbolObservation> = (0..24)
+            .map(|i| make_phase_obs(wrap_to_pi(intercept + slope * i as f32), 1.0))
+            .collect();
+        let (_a, b) = fit_noncausal_phase_line(&observations).expect("fit should succeed");
+        assert_close(b, slope, 2e-3, "slope_wrapped");
+    }
+
+    #[test]
+    fn test_fit_noncausal_phase_line_rejects_too_steep_slope() {
+        let observations: Vec<SymbolObservation> = (0..24)
+            .map(|i| make_phase_obs(0.8 * i as f32, 1.0))
+            .collect();
+        assert!(fit_noncausal_phase_line(&observations).is_none());
+    }
+
+    #[test]
+    fn test_fit_noncausal_phase_line_ignores_non_finite_phase_errors() {
+        let mut observations: Vec<SymbolObservation> = (0..24)
+            .map(|i| make_phase_obs(0.1 + 0.03 * i as f32, 1.0))
+            .collect();
+        observations[5].phase_err = f32::NAN;
+        observations[9].phase_err = f32::INFINITY;
+        let (_a, b) = fit_noncausal_phase_line(&observations).expect("fit should survive NaN/Inf");
+        assert_close(b, 0.03, 3e-3, "slope_non_finite_filtered");
     }
 
     #[test]
