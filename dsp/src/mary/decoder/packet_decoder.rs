@@ -162,20 +162,26 @@ fn dqpsk_phase_log_metrics(
     noise_var: f32,
     prev_phase_kappa: f32,
 ) -> [f32; 4] {
-    // 観測モデル:
-    //   y = diff / amp_ref ≈ s + n, n ~ CN(0, sigma2)
-    //   log p(y|s) = -|y-s|^2 / sigma2 + const
-    // LLR差分に効くのは Re{y * conj(s)} / sigma2 項のみ。
+    // 位相不確かさを含む観測モデル（周辺化）:
+    //   y = diff / amp_ref ≈ s * exp(jδ) + n, n ~ CN(0, sigma2), δ ~ von Mises(kappa, mean=0)
+    //   p(y|s) ∝ ∫ exp(kappa*cosδ + (2/sigma2)*Re{y*conj(s)*exp(-jδ)}) dδ
+    //          ∝ I0(|kappa + (2/sigma2) * conj(y) * s|)
+    // よって log-metric は log I0 の形になる。
     let amp_ref = amp.max(1e-6);
     let y = diff / amp_ref;
     let sigma2_obs = (noise_var / (amp_ref * amp_ref)).max(DQPSK_PHASE_OBS_VAR_FLOOR);
     let sigma2_eff = sigma2_obs + DQPSK_PHASE_MODEL_VAR;
-    let gain = prev_phase_kappa / sigma2_eff;
+    let eta = 2.0 / sigma2_eff;
+    let prior = Complex32::new(prev_phase_kappa.clamp(0.0, 1.0), 0.0);
+    let z0 = prior + y.conj() * Complex32::new(1.0, 0.0) * eta; // s0: 00
+    let z1 = prior + y.conj() * Complex32::new(0.0, 1.0) * eta; // s1: 01
+    let z2 = prior + y.conj() * Complex32::new(-1.0, 0.0) * eta; // s2: 11
+    let z3 = prior + y.conj() * Complex32::new(0.0, -1.0) * eta; // s3: 10
     [
-        gain * y.re,  // s0: phase0 -> 00
-        gain * y.im,  // s1: phase1 -> 01
-        -gain * y.re, // s2: phase2 -> 11
-        -gain * y.im, // s3: phase3 -> 10
+        log_i0_approx(z0.norm()),
+        log_i0_approx(z1.norm()),
+        log_i0_approx(z2.norm()),
+        log_i0_approx(z3.norm()),
     ]
 }
 
@@ -183,6 +189,33 @@ fn dqpsk_phase_log_metrics(
 fn dqpsk_prev_phase_kappa_from_sigma2(sigma2: f32) -> f32 {
     let sigma2_clamped = sigma2.clamp(0.0, DQPSK_PREV_PHASE_SIGMA_MAX_RAD.powi(2));
     (-0.5 * sigma2_clamped).exp().clamp(0.0, 1.0)
+}
+
+#[inline]
+fn log_i0_approx(x: f32) -> f32 {
+    // 変形ベッセル関数 I0 の近似係数は Cephes math library (i0f) 由来。
+    // 参考: S. L. Moshier, Cephes Math Library（Numerical Recipes掲載式と同系）。
+    // 区分点 3.75 も同近似の既知パラメータで、小x/大xで安定な多項式を使い分ける。
+    // ここでは I0(x) を直接計算せず log-domain に変換してオーバーフローを避ける。
+    let ax = x.abs();
+    if ax < 3.75 {
+        let y = (ax / 3.75) * (ax / 3.75);
+        let i0 = 1.0
+            + y * (3.515_623
+                + y * (3.089_942
+                    + y * (1.206_749 + y * (0.265_973 + y * (0.036_076_8 + y * 0.004_581_3)))));
+        i0.ln()
+    } else {
+        let y = 3.75 / ax;
+        let poly = 0.398_942_3
+            + y * (0.013_285_92
+                + y * (0.002_253_19
+                    + y * (-0.001_575_65
+                        + y * (0.009_162_81
+                            + y * (-0.020_577_06
+                                + y * (0.026_355_37 + y * (-0.016_476_33 + y * 0.003_923_77)))))));
+        ax + poly.ln() - 0.5 * ax.ln()
+    }
 }
 
 #[inline]
@@ -1014,6 +1047,58 @@ mod tests {
     }
 
     #[test]
+    fn test_log_i0_approx_is_finite_across_range() {
+        for &x in &[0.0_f32, 1e-3, 0.1, 1.0, 5.0, 10.0, 50.0, 500.0] {
+            let v = log_i0_approx(x);
+            assert!(v.is_finite(), "x={x}, log_i0={v}");
+        }
+    }
+
+    #[test]
+    fn test_log_i0_approx_monotonic_non_decreasing() {
+        let xs = [0.0_f32, 0.2, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+        let mut prev = log_i0_approx(xs[0]);
+        for &x in &xs[1..] {
+            let cur = log_i0_approx(x);
+            assert!(cur >= prev - 1e-6, "x={x}, prev={prev}, cur={cur}");
+            prev = cur;
+        }
+    }
+
+    fn log_i0_reference_series(x: f32) -> f32 {
+        // I0(x) = Σ_{k=0..∞} ((x^2/4)^k / (k!)^2)
+        // 精度テスト用の参照実装（f64）。大きいxは使わず収束が十分速い範囲で比較する。
+        let x64 = x as f64;
+        let t = 0.25 * x64 * x64;
+        let mut sum = 1.0f64;
+        let mut term = 1.0f64;
+        for k in 1..=200 {
+            let kk = k as f64;
+            term *= t / (kk * kk);
+            sum += term;
+            if term.abs() <= 1e-15 * sum.abs() {
+                break;
+            }
+        }
+        (sum.ln()) as f32
+    }
+
+    #[test]
+    fn test_log_i0_approx_matches_reference_series() {
+        // Cephes区分点(3.75)近傍を含めて近似誤差を監視する。
+        let xs = [0.0_f32, 0.1, 1.0, 2.5, 3.75, 4.0, 6.0, 10.0];
+        for &x in &xs {
+            let approx = log_i0_approx(x);
+            let reference = log_i0_reference_series(x);
+            let err = (approx - reference).abs();
+            assert!(
+                err < 2e-4,
+                "x={x}, approx={approx}, ref={reference}, err={err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_apply_llr_erasure_quantile_zeroes_small_abs_values() {
         let mut llrs = vec![0.1, -0.2, 0.5, -1.0, 2.0];
         apply_llr_erasure_quantile(&mut llrs, 0.4);
@@ -1090,8 +1175,18 @@ mod tests {
             -tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
             tracking::TRACKING_PHASE_RATE_LIMIT_RAD,
         );
-        assert_close(updated_small_err, expected, 1e-7, "phase_rate_hold_decay_small");
-        assert_close(updated_large_err, expected, 1e-7, "phase_rate_hold_decay_large");
+        assert_close(
+            updated_small_err,
+            expected,
+            1e-7,
+            "phase_rate_hold_decay_small",
+        );
+        assert_close(
+            updated_large_err,
+            expected,
+            1e-7,
+            "phase_rate_hold_decay_large",
+        );
     }
 
     #[test]
