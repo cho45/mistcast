@@ -21,6 +21,7 @@ use crate::mary::params::{
     PAYLOAD_PILOT_WALSH_INDEX, PAYLOAD_SPREAD_FACTOR,
 };
 use num_complex::Complex32;
+use std::sync::OnceLock;
 
 /// LLR観測用コールバック型
 pub type LlrCallback = Box<dyn FnMut(&[f32]) + Send>;
@@ -48,11 +49,23 @@ pub(crate) struct PacketDecodeBuffers {
     pub fec_candidate_bits_buffer: Vec<u8>,
     pub decoded_bytes_buffer: Vec<u8>,
     pub fec_workspace: fec::FecDecodeWorkspace,
+    pub hmm_sym_logs: Vec<[f32; 4]>,
+    pub hmm_slot_logz: Vec<f32>,
+    pub hmm_theta_log_prior: Vec<f32>,
+    pub hmm_pred: Vec<f32>,
+    pub hmm_alpha: Vec<f32>,
+    pub hmm_beta: Vec<f32>,
+    pub hmm_dqpsk_llrs: Vec<[f32; 2]>,
+    symbol_observations: Vec<SymbolObservation>,
+    phase_slot_observations: Vec<PhaseSlotObservation>,
 }
 
 impl PacketDecodeBuffers {
     pub fn new() -> Self {
         let cap = interleaver_config::interleaved_bits();
+        let slots = payload_total_symbols(interleaver_config::mary_symbols());
+        let hmm_cap = slots * DQPSK_SEMI_COHERENT_PHASE_STATES.max(1);
+        let symbols = interleaver_config::mary_symbols();
         let mut fec_workspace = fec::FecDecodeWorkspace::new();
         fec_workspace.preallocate_for_llr_len(cap, 1);
         Self {
@@ -63,6 +76,15 @@ impl PacketDecodeBuffers {
             fec_candidate_bits_buffer: Vec::with_capacity(PACKET_BYTES * 8),
             decoded_bytes_buffer: Vec::with_capacity(PACKET_BYTES),
             fec_workspace,
+            hmm_sym_logs: Vec::with_capacity(hmm_cap),
+            hmm_slot_logz: Vec::with_capacity(hmm_cap),
+            hmm_theta_log_prior: Vec::with_capacity(hmm_cap),
+            hmm_pred: Vec::with_capacity(hmm_cap),
+            hmm_alpha: Vec::with_capacity(hmm_cap),
+            hmm_beta: Vec::with_capacity(hmm_cap),
+            hmm_dqpsk_llrs: Vec::with_capacity(slots),
+            symbol_observations: Vec::with_capacity(symbols),
+            phase_slot_observations: Vec::with_capacity(slots),
         }
     }
 
@@ -73,6 +95,15 @@ impl PacketDecodeBuffers {
         self.llr_abs_scratch.clear();
         self.fec_candidate_bits_buffer.clear();
         self.decoded_bytes_buffer.clear();
+        self.hmm_sym_logs.clear();
+        self.hmm_slot_logz.clear();
+        self.hmm_theta_log_prior.clear();
+        self.hmm_pred.clear();
+        self.hmm_alpha.clear();
+        self.hmm_beta.clear();
+        self.hmm_dqpsk_llrs.clear();
+        self.symbol_observations.clear();
+        self.phase_slot_observations.clear();
     }
 }
 
@@ -93,15 +124,19 @@ pub(crate) struct PacketDecodeRuntime<'a> {
 #[derive(Clone, Copy)]
 struct SymbolObservation {
     on_corrs: [Complex32; 16],
-    phase_ref: Complex32,
-    prev_phase: Complex32,
     max_energy: f32,
-    second_energy: f32,
-    on_rot_best: Complex32,
-    diff_best: Complex32,
+}
+
+#[derive(Clone, Copy)]
+struct PhaseSlotObservation {
+    on_corrs: [Complex32; 16],
+    energies: [f32; 16],
+    energy_sum: f32,
+    phase_ref_conj: Complex32,
+    prev_phase_conj: Complex32,
+    max_energy: f32,
     prev_phase_kappa: f32,
-    phase_err: f32,
-    phase_fit_weight: f32,
+    is_data: bool,
 }
 
 // DQPSK LLR は (Walsh仮説 h, 位相仮説 s) の同時尤度を
@@ -139,13 +174,6 @@ const DQPSK_PREV_PHASE_SIGMA_MAX_RAD: f32 = 1.2;
 const DQPSK_TRACKING_POSTERIOR_NORM_MIN: f32 = 1e-5;
 // 期待シンボルの振幅がこの値未満なら、方向が不安定とみなして hard 判定へフォールバックする。
 const DQPSK_PHASE_SOFT_SYMBOL_NORM_MIN: f32 = 1e-3;
-// パケット内の残留位相傾き（rad/symbol）を非因果推定で補償する際の上限。
-// これを超える推定は外れ値起因とみなし、補償を無効化する。
-const DQPSK_NONCAUSAL_PHASE_SLOPE_MAX_RAD_PER_SYMBOL: f32 = 0.35;
-// 非因果位相フィットに使う最小有効シンボル数。
-const DQPSK_NONCAUSAL_PHASE_MIN_VALID_SYMBOLS: usize = 8;
-// 非因果位相フィットに使う重みの下限。
-const DQPSK_NONCAUSAL_PHASE_MIN_WEIGHT: f32 = 0.2;
 // 既知パイロットで phase_rate を直接更新するときの低ゲイン設定。
 // データ判定由来の更新より小さいゲインで、長尺時の累積ズレだけを穏やかに補正する。
 const PILOT_PHASE_PROP_GAIN: f32 = 0.12;
@@ -153,6 +181,46 @@ const PILOT_PHASE_RATE_GAIN: f32 = 0.015;
 const PILOT_PHASE_ERR_CLAMP: f32 = 0.60;
 const PILOT_PHASE_WALSH_CONF_MIN: f32 = 0.20;
 const PILOT_PHASE_SNR_PROXY_MIN: f32 = 2.0;
+// 準コヒーレント復調の位相状態数（[-pi, pi) の離散グリッド）。
+const DQPSK_SEMI_COHERENT_PHASE_STATES: usize = 32;
+// 位相状態遷移のランダムウォーク分散 [rad^2]（小さいほど連続性を強く仮定）。
+const DQPSK_SEMI_COHERENT_PHASE_TRANS_VAR: f32 = 0.35 * 0.35;
+
+struct PhaseHmmCache {
+    state_angles: Vec<f32>,
+    state_residual_rots: Vec<Complex32>,
+    transition: Vec<f32>,
+}
+
+fn phase_hmm_cache() -> &'static PhaseHmmCache {
+    static CACHE: OnceLock<PhaseHmmCache> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let m_len = DQPSK_SEMI_COHERENT_PHASE_STATES.max(1);
+        let mut state_angles = Vec::with_capacity(m_len);
+        let mut state_residual_rots = Vec::with_capacity(m_len);
+        for i in 0..m_len {
+            let theta =
+                -std::f32::consts::PI + (2.0 * std::f32::consts::PI * i as f32) / m_len as f32;
+            state_angles.push(theta);
+            let (sin_p, cos_p) = (-theta).sin_cos();
+            state_residual_rots.push(Complex32::new(cos_p, sin_p));
+        }
+
+        let kappa = (1.0 / DQPSK_SEMI_COHERENT_PHASE_TRANS_VAR.max(1e-6)).clamp(0.5, 64.0);
+        let mut transition = vec![f32::NEG_INFINITY; m_len * m_len];
+        for prev in 0..m_len {
+            for curr in 0..m_len {
+                let d = wrap_to_pi(state_angles[curr] - state_angles[prev]);
+                transition[prev * m_len + curr] = kappa * d.cos();
+            }
+        }
+        PhaseHmmCache {
+            state_angles,
+            state_residual_rots,
+            transition,
+        }
+    })
+}
 
 struct DecodeLayout {
     rows: usize,
@@ -309,8 +377,8 @@ fn dqpsk_llr_from_walsh_hypotheses(
     for idx in 0..DQPSK_WALSH_HYPOTHESES {
         let energy_h = energies[idx];
         let on_rot_h = on_corrs[idx] * phase_ref.conj();
-        let diff_h = on_rot_h * prev_phase.conj() * residual_rot;
         let noise_var_h = dqpsk_noise_var_from_energy(energy_sum, energy_h);
+        let diff_h = on_rot_h * prev_phase.conj() * residual_rot;
         let phase_logs =
             dqpsk_phase_log_metrics(diff_h, on_rot_h.norm(), noise_var_h, prev_phase_kappa);
         // 相対ログ重みを使って数値桁落ちを避ける（定数項はLLR差分で相殺される）。
@@ -354,77 +422,174 @@ fn wrap_to_pi(mut x: f32) -> f32 {
     x
 }
 
-fn fit_noncausal_phase_line(observations: &[SymbolObservation]) -> Option<(f32, f32)> {
-    let mut xs = Vec::with_capacity(observations.len());
-    let mut ys = Vec::with_capacity(observations.len());
-    let mut ws = Vec::with_capacity(observations.len());
-
-    let mut last_raw = 0.0f32;
-    let mut last_unwrapped = 0.0f32;
-    let mut has_prev = false;
-    for (i, obs) in observations.iter().enumerate() {
-        let w = obs.phase_fit_weight;
-        if !w.is_finite() || w < DQPSK_NONCAUSAL_PHASE_MIN_WEIGHT || !obs.phase_err.is_finite() {
-            continue;
-        }
-        let raw = wrap_to_pi(obs.phase_err);
-        let unwrapped = if has_prev {
-            last_unwrapped + wrap_to_pi(raw - last_raw)
-        } else {
-            raw
-        };
-        has_prev = true;
-        last_raw = raw;
-        last_unwrapped = unwrapped;
-        xs.push(i as f32);
-        ys.push(unwrapped);
-        ws.push(w);
-    }
-
-    if xs.len() < DQPSK_NONCAUSAL_PHASE_MIN_VALID_SYMBOLS {
-        return None;
-    }
-
-    let mut sw = 0.0f32;
-    let mut sx = 0.0f32;
-    let mut sy = 0.0f32;
-    let mut sxx = 0.0f32;
-    let mut sxy = 0.0f32;
-    for i in 0..xs.len() {
-        let w = ws[i];
-        let x = xs[i];
-        let y = ys[i];
-        sw += w;
-        sx += w * x;
-        sy += w * y;
-        sxx += w * x * x;
-        sxy += w * x * y;
-    }
-    if sw <= 0.0 {
-        return None;
-    }
-
-    let denom = sw * sxx - sx * sx;
-    if denom.abs() < 1e-6 {
-        return None;
-    }
-
-    let slope = (sw * sxy - sx * sy) / denom;
-    if slope.abs() > DQPSK_NONCAUSAL_PHASE_SLOPE_MAX_RAD_PER_SYMBOL {
-        return None;
-    }
-    let intercept = (sy - slope * sx) / sw;
-    Some((intercept, slope))
+#[inline]
+fn log_sum_exp4(v: [f32; 4]) -> f32 {
+    log_add_exp(log_add_exp(v[0], v[1]), log_add_exp(v[2], v[3]))
 }
 
 #[inline]
-fn residual_rot_from_phase_line(phase_line: Option<(f32, f32)>, sym_idx: usize) -> Complex32 {
-    if let Some((intercept, slope)) = phase_line {
-        let phase = -(intercept + slope * sym_idx as f32);
-        let (sin_p, cos_p) = phase.sin_cos();
-        Complex32::new(cos_p, sin_p)
+fn normalize_log_row(row: &mut [f32]) {
+    let mut max_v = f32::NEG_INFINITY;
+    for &v in row.iter() {
+        if v > max_v {
+            max_v = v;
+        }
+    }
+    if max_v.is_finite() {
+        for v in row.iter_mut() {
+            *v -= max_v;
+        }
+    }
+}
+
+#[inline]
+fn dqpsk_symbol_index_from_bits_pair(b0: u8, b1: u8) -> usize {
+    match (b0, b1) {
+        (0, 0) => 0,
+        (0, 1) => 1,
+        (1, 1) => 2,
+        (1, 0) => 3,
+        _ => 0,
+    }
+}
+
+fn dqpsk_symbol_logs_for_phase_state(
+    obs: &PhaseSlotObservation,
+    residual_rot: Complex32,
+) -> [f32; 4] {
+    let walsh_noise_floor_e = dqpsk_noise_var_from_energy(obs.energy_sum, obs.max_energy);
+    let mut sym_logs = [f32::NEG_INFINITY; 4];
+    let (idx_begin, idx_end) = if obs.is_data {
+        (0usize, DQPSK_WALSH_HYPOTHESES)
     } else {
-        Complex32::new(1.0, 0.0)
+        (PAYLOAD_PILOT_WALSH_INDEX, PAYLOAD_PILOT_WALSH_INDEX + 1)
+    };
+    for idx in idx_begin..idx_end {
+        let energy_h = obs.energies[idx];
+        let on_rot_h = obs.on_corrs[idx] * obs.phase_ref_conj;
+        let diff_h = on_rot_h * obs.prev_phase_conj * residual_rot;
+        let noise_var_h = dqpsk_noise_var_from_energy(obs.energy_sum, energy_h);
+        let amp = on_rot_h.norm().max(1e-6);
+        let y = diff_h / amp;
+        let sigma2_obs = (noise_var_h / (amp * amp)).max(DQPSK_PHASE_OBS_VAR_FLOOR);
+        let sigma2_eff = sigma2_obs + DQPSK_PHASE_MODEL_VAR;
+        let eta = 2.0 / sigma2_eff;
+        let phase_logs = [eta * y.re, eta * y.im, -eta * y.re, -eta * y.im];
+        let log_p_h = if obs.is_data {
+            (energy_h - obs.max_energy) / walsh_noise_floor_e
+        } else {
+            0.0
+        };
+        for s in 0..4 {
+            sym_logs[s] = log_add_exp(sym_logs[s], log_p_h + phase_logs[s]);
+        }
+    }
+    sym_logs
+}
+
+fn dqpsk_llrs_with_phase_hmm(
+    slot_obs: &[PhaseSlotObservation],
+    out_llrs: &mut Vec<[f32; 2]>,
+    buffers: &mut PacketDecodeBuffers,
+) {
+    out_llrs.clear();
+    if slot_obs.is_empty() {
+        return;
+    }
+
+    let cache = phase_hmm_cache();
+    let t_len = slot_obs.len();
+    let m_len = cache.state_angles.len();
+    let flat_len = t_len * m_len;
+    let pilot_sym_idx =
+        dqpsk_symbol_index_from_bits_pair(PAYLOAD_PILOT_DQPSK_BITS.0, PAYLOAD_PILOT_DQPSK_BITS.1);
+
+    buffers
+        .hmm_sym_logs
+        .resize(flat_len, [f32::NEG_INFINITY; 4]);
+    buffers.hmm_slot_logz.resize(flat_len, f32::NEG_INFINITY);
+    buffers.hmm_theta_log_prior.resize(flat_len, 0.0);
+    buffers.hmm_pred.resize(flat_len, f32::NEG_INFINITY);
+    buffers.hmm_alpha.resize(flat_len, f32::NEG_INFINITY);
+    buffers.hmm_beta.resize(flat_len, 0.0);
+    // resize は既存要素を初期化しないため、前パケットの残値混入を防ぐために毎回明示ゼロ化する。
+    buffers.hmm_beta.fill(0.0);
+
+    for (t, obs) in slot_obs.iter().enumerate() {
+        let kappa_prior = obs.prev_phase_kappa.clamp(0.0, 1.0);
+        for m in 0..m_len {
+            let l = dqpsk_symbol_logs_for_phase_state(obs, cache.state_residual_rots[m]);
+            let flat = t * m_len + m;
+            buffers.hmm_sym_logs[flat] = l;
+            buffers.hmm_theta_log_prior[flat] = kappa_prior * cache.state_angles[m].cos();
+            buffers.hmm_slot_logz[flat] = if obs.is_data {
+                log_sum_exp4(l) + buffers.hmm_theta_log_prior[flat]
+            } else {
+                l[pilot_sym_idx] + buffers.hmm_theta_log_prior[flat]
+            };
+        }
+    }
+
+    let log_pi = -(m_len as f32).ln();
+    for m in 0..m_len {
+        buffers.hmm_pred[m] = log_pi;
+        buffers.hmm_alpha[m] = log_pi + buffers.hmm_slot_logz[m];
+    }
+    normalize_log_row(&mut buffers.hmm_alpha[..m_len]);
+
+    for t in 1..t_len {
+        for curr in 0..m_len {
+            let mut v = f32::NEG_INFINITY;
+            for prev in 0..m_len {
+                v = log_add_exp(
+                    v,
+                    buffers.hmm_alpha[(t - 1) * m_len + prev]
+                        + cache.transition[prev * m_len + curr],
+                );
+            }
+            buffers.hmm_pred[t * m_len + curr] = v;
+            buffers.hmm_alpha[t * m_len + curr] = v + buffers.hmm_slot_logz[t * m_len + curr];
+        }
+        normalize_log_row(&mut buffers.hmm_alpha[t * m_len..(t + 1) * m_len]);
+    }
+
+    if t_len >= 2 {
+        for t in (0..(t_len - 1)).rev() {
+            for prev in 0..m_len {
+                let mut v = f32::NEG_INFINITY;
+                for curr in 0..m_len {
+                    v = log_add_exp(
+                        v,
+                        cache.transition[prev * m_len + curr]
+                            + buffers.hmm_slot_logz[(t + 1) * m_len + curr]
+                            + buffers.hmm_beta[(t + 1) * m_len + curr],
+                    );
+                }
+                buffers.hmm_beta[t * m_len + prev] = v;
+            }
+            normalize_log_row(&mut buffers.hmm_beta[t * m_len..(t + 1) * m_len]);
+        }
+    }
+
+    out_llrs.reserve(slot_obs.len());
+    for (t, obs) in slot_obs.iter().enumerate() {
+        if !obs.is_data {
+            continue;
+        }
+        let mut post = [f32::NEG_INFINITY; 4];
+        for m in 0..m_len {
+            let weight = buffers.hmm_pred[t * m_len + m]
+                + buffers.hmm_beta[t * m_len + m]
+                + buffers.hmm_theta_log_prior[t * m_len + m];
+            let l = buffers.hmm_sym_logs[t * m_len + m];
+            for s in 0..4 {
+                post[s] = log_add_exp(post[s], weight + l[s]);
+            }
+        }
+        out_llrs.push([
+            log_add_exp(post[0], post[1]) - log_add_exp(post[2], post[3]),
+            log_add_exp(post[0], post[3]) - log_add_exp(post[1], post[2]),
+        ]);
     }
 }
 
@@ -450,10 +615,12 @@ where
     let timing_rate_limit = options.spc as f32 * tracking::TRACKING_TIMING_RATE_LIMIT_CHIP;
 
     buffers.packet_llrs_buffer.clear();
+    buffers.symbol_observations.clear();
+    buffers.phase_slot_observations.clear();
     let mut total_packet_energy = 0.0f32;
     let mut prev_phase_sigma2 = 0.0f32;
-    let mut observations = Vec::with_capacity(expected_symbols);
     let total_symbol_slots = payload_total_symbols(expected_symbols);
+    buffers.phase_slot_observations.reserve(total_symbol_slots);
 
     for slot_idx in 0..total_symbol_slots {
         let is_data_slot = payload_data_index_for_symbol_slot(slot_idx).is_some();
@@ -529,69 +696,63 @@ where
         let noise_floor = ((energy_sum - max_energy).max(0.0)) / 15.0;
         let snr_proxy = max_energy / (noise_floor + 1e-6);
 
-        let (
-            _dqpsk_llr,
-            walsh_conf,
-            on_rot_tracking,
-            phase_err,
-            phase_fit_weight,
-            dqpsk_conf_tracking,
-        ) = if is_data_slot {
-            let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
-                &on_corrs,
-                phase_ref_sym,
-                prev_phase_sym,
-                prev_phase_kappa,
-                max_energy,
-                second_energy,
-                on_rot,
-                diff_best,
-                Complex32::new(1.0, 0.0),
-            );
-            let on_rot_tracking = walsh_posterior_weighted_on_rot(
-                &on_corrs,
-                phase_ref_sym,
-                &energies,
-                max_energy,
-                on_rot,
-            );
-            let diff_tracking = on_rot_tracking * prev_phase_sym.conj();
-            let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
-            // 位相追跡の信頼度は DQPSK 単独では過大になりやすいため、
-            // Walsh識別の確からしさを掛け合わせて低SNR時の追従暴走を抑える。
-            let dqpsk_conf_tracking = dqpsk_conf * walsh_conf.clamp(0.0, 1.0);
-            let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
-            let phase_err = tracking::phase_error_from_diff(diff_tracking, decided);
-            (
-                dqpsk_llr,
-                walsh_conf,
-                on_rot_tracking,
-                phase_err,
-                dqpsk_conf_tracking.clamp(0.0, 8.0),
-                dqpsk_conf_tracking,
-            )
-        } else {
-            // パイロットは既知系列なので、推定シンボルではなく既知差分で位相誤差を作る。
-            // 未知シンボル前提の判定誤りをループへ注入しないため、長尺耐性が安定する。
-            let pilot_on_rot = on_corrs[PAYLOAD_PILOT_WALSH_INDEX] * phase_ref_sym.conj();
-            let pilot_diff = pilot_on_rot * prev_phase_sym.conj();
-            let pilot_decided =
-                dqpsk_symbol_from_bits_pair(PAYLOAD_PILOT_DQPSK_BITS.0, PAYLOAD_PILOT_DQPSK_BITS.1);
-            let phase_err = tracking::phase_error_from_diff(pilot_diff, pilot_decided);
-            let pilot_energy = energies_on[PAYLOAD_PILOT_WALSH_INDEX];
-            let walsh_conf = ((pilot_energy - second_energy).max(0.0)) / pilot_energy.max(1e-6);
-            // 既知パイロットでは DQPSK 判定信頼度は固定扱いとし、
-            // ゲートの実質判定は Walsh/SNR 側で行う。
-            let dqpsk_conf_tracking = TRACKING_PHASE_DQPSK_CONF_ON_MIN;
-            (
-                [0.0, 0.0],
-                walsh_conf,
-                pilot_on_rot,
-                phase_err,
-                0.0,
-                dqpsk_conf_tracking,
-            )
-        };
+        let (_dqpsk_llr, walsh_conf, on_rot_tracking, phase_err, dqpsk_conf_tracking) =
+            if is_data_slot {
+                let (dqpsk_llr, walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
+                    &on_corrs,
+                    phase_ref_sym,
+                    prev_phase_sym,
+                    prev_phase_kappa,
+                    max_energy,
+                    second_energy,
+                    on_rot,
+                    diff_best,
+                    Complex32::new(1.0, 0.0),
+                );
+                let on_rot_tracking = walsh_posterior_weighted_on_rot(
+                    &on_corrs,
+                    phase_ref_sym,
+                    &energies,
+                    max_energy,
+                    on_rot,
+                );
+                let diff_tracking = on_rot_tracking * prev_phase_sym.conj();
+                let dqpsk_conf = dqpsk_llr[0].abs() + dqpsk_llr[1].abs();
+                // 位相追跡の信頼度は DQPSK 単独では過大になりやすいため、
+                // Walsh識別の確からしさを掛け合わせて低SNR時の追従暴走を抑える。
+                let dqpsk_conf_tracking = dqpsk_conf * walsh_conf.clamp(0.0, 1.0);
+                let decided = decide_dqpsk_symbol_for_phase_update(dqpsk_llr);
+                let phase_err = tracking::phase_error_from_diff(diff_tracking, decided);
+                (
+                    dqpsk_llr,
+                    walsh_conf,
+                    on_rot_tracking,
+                    phase_err,
+                    dqpsk_conf_tracking,
+                )
+            } else {
+                // パイロットは既知系列なので、推定シンボルではなく既知差分で位相誤差を作る。
+                // 未知シンボル前提の判定誤りをループへ注入しないため、長尺耐性が安定する。
+                let pilot_on_rot = on_corrs[PAYLOAD_PILOT_WALSH_INDEX] * phase_ref_sym.conj();
+                let pilot_diff = pilot_on_rot * prev_phase_sym.conj();
+                let pilot_decided = dqpsk_symbol_from_bits_pair(
+                    PAYLOAD_PILOT_DQPSK_BITS.0,
+                    PAYLOAD_PILOT_DQPSK_BITS.1,
+                );
+                let phase_err = tracking::phase_error_from_diff(pilot_diff, pilot_decided);
+                let pilot_energy = energies_on[PAYLOAD_PILOT_WALSH_INDEX];
+                let walsh_conf = ((pilot_energy - second_energy).max(0.0)) / pilot_energy.max(1e-6);
+                // 既知パイロットでは DQPSK 判定信頼度は固定扱いとし、
+                // ゲートの実質判定は Walsh/SNR 側で行う。
+                let dqpsk_conf_tracking = TRACKING_PHASE_DQPSK_CONF_ON_MIN;
+                (
+                    [0.0, 0.0],
+                    walsh_conf,
+                    pilot_on_rot,
+                    phase_err,
+                    dqpsk_conf_tracking,
+                )
+            };
         tracking_state.phase_gate_enabled = tracking::next_phase_gate_enabled(
             tracking_state.phase_gate_enabled,
             dqpsk_conf_tracking,
@@ -607,6 +768,16 @@ where
         }
 
         let phase_err_abs = phase_err.abs();
+        buffers.phase_slot_observations.push(PhaseSlotObservation {
+            on_corrs,
+            energies: energies_on,
+            energy_sum,
+            phase_ref_conj: phase_ref_sym.conj(),
+            prev_phase_conj: prev_phase_sym.conj(),
+            max_energy,
+            prev_phase_kappa,
+            is_data: is_data_slot,
+        });
         if is_data_slot {
             stats.phase_err_abs_sum_rad += phase_err_abs as f64;
             stats.phase_err_abs_count += 1;
@@ -616,17 +787,9 @@ where
             if phase_err_abs >= PHASE_ERR_ABS_THRESH_1P0_RAD {
                 stats.phase_err_abs_ge_1p0_symbols += 1;
             }
-            observations.push(SymbolObservation {
+            buffers.symbol_observations.push(SymbolObservation {
                 on_corrs,
-                phase_ref: phase_ref_sym,
-                prev_phase: prev_phase_sym,
                 max_energy,
-                second_energy,
-                on_rot_best: on_rot,
-                diff_best,
-                prev_phase_kappa,
-                phase_err,
-                phase_fit_weight,
             });
         }
         let phase_var_sample =
@@ -721,27 +884,24 @@ where
         *prev_phase = on_rot_tracking / on_norm;
     }
 
-    // NOTE: 非因果位相フィットの1回追加反復（EM-lite）を評価したが、
-    // 2026-03-15のAWGN sweep (sigma=0.8..1.2) では crc_pass/raw_ber/goodput 差分は 0 だった。
-    // 計算量のみ増えるため、現状は単発フィットを採用する。
-    let phase_line = fit_noncausal_phase_line(&observations);
-    for (sym_idx, obs) in observations.iter().enumerate() {
-        let residual_rot = residual_rot_from_phase_line(phase_line, sym_idx);
-        let (dqpsk_llr, _walsh_conf, _topk_used, energies) = dqpsk_llr_from_walsh_hypotheses(
-            &obs.on_corrs,
-            obs.phase_ref,
-            obs.prev_phase,
-            obs.prev_phase_kappa,
-            obs.max_energy,
-            obs.second_energy,
-            obs.on_rot_best,
-            obs.diff_best,
-            residual_rot,
-        );
+    // 準コヒーレント復調:
+    // 位相を離散状態 θ_n の隠れマルコフ過程として forward/backward で周辺化し、
+    // pilot(既知シンボル)を尤度拘束として取り込む。
+    let mut phase_slot_observations = std::mem::take(&mut buffers.phase_slot_observations);
+    let mut dqpsk_llrs_tmp = std::mem::take(&mut buffers.hmm_dqpsk_llrs);
+    dqpsk_llrs_with_phase_hmm(&phase_slot_observations, &mut dqpsk_llrs_tmp, buffers);
+    for (sym_idx, obs) in buffers.symbol_observations.iter().enumerate() {
+        let energies: [f32; 16] = obs.on_corrs.map(|c| c.norm_sqr());
         let walsh_llr = demodulator.walsh_llr(&energies, obs.max_energy);
         buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
-        buffers.packet_llrs_buffer.extend_from_slice(&dqpsk_llr);
+        buffers
+            .packet_llrs_buffer
+            .extend_from_slice(&dqpsk_llrs_tmp[sym_idx]);
     }
+    dqpsk_llrs_tmp.clear();
+    buffers.hmm_dqpsk_llrs = dqpsk_llrs_tmp;
+    phase_slot_observations.clear();
+    buffers.phase_slot_observations = phase_slot_observations;
 
     let _avg_energy = total_packet_energy / expected_symbols as f32;
     let mut llr_buf = std::mem::take(&mut buffers.packet_llrs_buffer);
@@ -1275,6 +1435,79 @@ mod tests {
     }
 
     #[test]
+    fn test_dqpsk_llrs_with_phase_hmm_single_slot_is_finite() {
+        let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
+        on_corrs[0] = Complex32::new(10.0, 0.0);
+        on_corrs[1] = Complex32::new(1.0, 0.2);
+        let energies = on_corrs.map(|c| c.norm_sqr());
+        let energy_sum = energies.iter().sum::<f32>();
+        let slots = [PhaseSlotObservation {
+            on_corrs,
+            energies,
+            energy_sum,
+            phase_ref_conj: Complex32::new(1.0, 0.0).conj(),
+            prev_phase_conj: Complex32::new(1.0, 0.0).conj(),
+            max_energy: on_corrs[0].norm_sqr(),
+            prev_phase_kappa: 1.0,
+            is_data: true,
+        }];
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llrs = Vec::new();
+        dqpsk_llrs_with_phase_hmm(&slots, &mut llrs, &mut buffers);
+        assert_eq!(llrs.len(), 1);
+        assert!(llrs[0][0].is_finite());
+        assert!(llrs[0][1].is_finite());
+    }
+
+    #[test]
+    fn test_dqpsk_llrs_with_phase_hmm_uses_pilot_constraint() {
+        let omega = 0.45f32;
+        let (sin_o, cos_o) = omega.sin_cos();
+        let rot = Complex32::new(cos_o, sin_o);
+        let amp = 10.0f32;
+
+        let mut pilot_corrs = [Complex32::new(0.0, 0.0); 16];
+        pilot_corrs[PAYLOAD_PILOT_WALSH_INDEX] = rot * amp;
+        let pilot_energies = pilot_corrs.map(|c| c.norm_sqr());
+        let pilot_energy_sum = pilot_energies.iter().sum::<f32>();
+
+        let mut data_corrs = [Complex32::new(0.0, 0.0); 16];
+        data_corrs[0] = rot * amp;
+        let data_energies = data_corrs.map(|c| c.norm_sqr());
+        let data_energy_sum = data_energies.iter().sum::<f32>();
+
+        let slots = [
+            PhaseSlotObservation {
+                on_corrs: pilot_corrs,
+                energies: pilot_energies,
+                energy_sum: pilot_energy_sum,
+                phase_ref_conj: Complex32::new(1.0, 0.0).conj(),
+                prev_phase_conj: Complex32::new(1.0, 0.0).conj(),
+                max_energy: pilot_corrs[PAYLOAD_PILOT_WALSH_INDEX].norm_sqr(),
+                prev_phase_kappa: 1.0,
+                is_data: false,
+            },
+            PhaseSlotObservation {
+                on_corrs: data_corrs,
+                energies: data_energies,
+                energy_sum: data_energy_sum,
+                phase_ref_conj: Complex32::new(1.0, 0.0).conj(),
+                prev_phase_conj: Complex32::new(1.0, 0.0).conj(),
+                max_energy: data_corrs[0].norm_sqr(),
+                prev_phase_kappa: 1.0,
+                is_data: true,
+            },
+        ];
+        let mut buffers = PacketDecodeBuffers::new();
+        let mut llrs = Vec::new();
+        dqpsk_llrs_with_phase_hmm(&slots, &mut llrs, &mut buffers);
+        assert_eq!(llrs.len(), 1);
+        // data symbol=00 なので両bitとも 0 側に寄る。
+        assert!(llrs[0][0] > 0.0);
+        assert!(llrs[0][1] > 0.0);
+    }
+
+    #[test]
     fn test_walsh_posterior_weighted_on_rot_tracks_dominant_hypothesis() {
         let mut on_corrs = [Complex32::new(0.0, 0.0); 16];
         on_corrs[0] = Complex32::new(10.0, 0.0); // dominant
@@ -1364,69 +1597,6 @@ mod tests {
                 "x={x}, approx={approx}, ref={reference}, err={err}"
             );
         }
-    }
-
-    fn make_phase_obs(phase_err: f32, weight: f32) -> SymbolObservation {
-        SymbolObservation {
-            on_corrs: [Complex32::new(0.0, 0.0); 16],
-            phase_ref: Complex32::new(1.0, 0.0),
-            prev_phase: Complex32::new(1.0, 0.0),
-            max_energy: 1.0,
-            second_energy: 0.0,
-            on_rot_best: Complex32::new(1.0, 0.0),
-            diff_best: Complex32::new(1.0, 0.0),
-            prev_phase_kappa: 1.0,
-            phase_err,
-            phase_fit_weight: weight,
-        }
-    }
-
-    #[test]
-    fn test_fit_noncausal_phase_line_recovers_linear_phase() {
-        let intercept = 0.12f32;
-        let slope = 0.04f32;
-        let observations: Vec<SymbolObservation> = (0..20)
-            .map(|i| make_phase_obs(intercept + slope * i as f32, 1.0))
-            .collect();
-        let (a, b) = fit_noncausal_phase_line(&observations).expect("fit should succeed");
-        assert_close(a, intercept, 1e-4, "intercept");
-        assert_close(b, slope, 1e-4, "slope");
-    }
-
-    #[test]
-    fn test_fit_noncausal_phase_line_unwraps_wrapped_sequence() {
-        let intercept = 2.9f32;
-        let slope = 0.08f32;
-        let observations: Vec<SymbolObservation> = (0..24)
-            .map(|i| make_phase_obs(wrap_to_pi(intercept + slope * i as f32), 1.0))
-            .collect();
-        let (_a, b) = fit_noncausal_phase_line(&observations).expect("fit should succeed");
-        assert_close(b, slope, 2e-3, "slope_wrapped");
-    }
-
-    #[test]
-    fn test_fit_noncausal_phase_line_rejects_too_steep_slope() {
-        let observations: Vec<SymbolObservation> = (0..24)
-            .map(|i| make_phase_obs(0.8 * i as f32, 1.0))
-            .collect();
-        assert!(fit_noncausal_phase_line(&observations).is_none());
-    }
-
-    #[test]
-    fn test_fit_noncausal_phase_line_ignores_non_finite_phase_errors() {
-        let mut observations: Vec<SymbolObservation> = (0..24)
-            .map(|i| make_phase_obs(0.1 + 0.03 * i as f32, 1.0))
-            .collect();
-        observations[5].phase_err = f32::NAN;
-        observations[9].phase_err = f32::INFINITY;
-        let (_a, b) = fit_noncausal_phase_line(&observations).expect("fit should survive NaN/Inf");
-        assert_close(b, 0.03, 3e-3, "slope_non_finite_filtered");
-    }
-
-    #[test]
-    fn test_residual_rot_from_phase_line_unit_magnitude() {
-        let r = residual_rot_from_phase_line(Some((0.2, -0.03)), 7);
-        assert_close(r.norm(), 1.0, 1e-6, "residual_rot_norm");
     }
 
     #[test]
