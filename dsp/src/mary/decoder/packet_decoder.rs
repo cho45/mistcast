@@ -195,6 +195,9 @@ const DQPSK_PHASE_MODEL_VAR_PHASE_WEIGHT: f32 = 0.20;
 // Walsh仮説重みの温度化係数（低SNR/高位相不確かさでソフト化）。
 const DQPSK_WALSH_TEMP_SNR_WEIGHT: f32 = 0.50;
 const DQPSK_WALSH_TEMP_PHASE_WEIGHT: f32 = 0.30;
+// Walsh LLR に対する DQPSK(HMM) LLR の相対ゲイン。
+// 検出モデルが異なる2系列の尤度スケールを揃えるための校正項。
+const DQPSK_OUTPUT_LLR_REL_GAIN: f32 = 0.25;
 
 struct PhaseHmmCache {
     state_angles: Vec<f32>,
@@ -954,9 +957,13 @@ where
         let energies: [f32; 16] = obs.on_corrs.map(|c| c.norm_sqr());
         let walsh_llr = demodulator.walsh_llr(&energies, obs.max_energy);
         buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
+        let dqpsk = dqpsk_llrs_tmp[sym_idx];
         buffers
             .packet_llrs_buffer
-            .extend_from_slice(&dqpsk_llrs_tmp[sym_idx]);
+            .push(dqpsk[0] * DQPSK_OUTPUT_LLR_REL_GAIN);
+        buffers
+            .packet_llrs_buffer
+            .push(dqpsk[1] * DQPSK_OUTPUT_LLR_REL_GAIN);
     }
     dqpsk_llrs_tmp.clear();
     buffers.hmm_dqpsk_llrs = dqpsk_llrs_tmp;
