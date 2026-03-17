@@ -278,6 +278,7 @@ fn walsh_posterior_weighted_on_rot(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dqpsk_llr_from_walsh_hypotheses(
     on_corrs: &[Complex32; 16],
     phase_ref: Complex32,
@@ -858,8 +859,6 @@ fn try_decode_soft_list_llrs(
         Ok(packet)
     } else if saw_crc {
         Err(PacketDecodeError::Crc)
-    } else if saw_parse {
-        Err(PacketDecodeError::Parse)
     } else {
         Err(PacketDecodeError::Parse)
     }
