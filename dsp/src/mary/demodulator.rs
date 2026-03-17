@@ -1315,6 +1315,17 @@ mod tests {
         // データシンボル index -> 送信スロット index に変換して復調する。
         for data_sym_idx in 0..num_data_symbols {
             let slot_idx = params::payload_symbol_slot_for_data_index(data_sym_idx);
+
+            // パイロットスロットがあった場合は、Demodulatorの内部状態（prev）をパイロットで更新する
+            if data_sym_idx > 0 && params::is_payload_pilot_slot(slot_idx - 1) {
+                let pilot_slot = slot_idx - 1;
+                let pilot_offset = pilot_slot * sf;
+                let pilot_signal: Vec<Complex32> = (0..sf)
+                    .map(|i| Complex32::new(chips_i[pilot_offset + i], chips_q[pilot_offset + i]))
+                    .collect();
+                demodulator.demod_symbol(&pilot_signal); // prev_phaseを更新させる
+            }
+
             let offset = slot_idx * sf;
             let signal: Vec<Complex32> = (0..sf)
                 .map(|i| Complex32::new(chips_i[offset + i], chips_q[offset + i]))

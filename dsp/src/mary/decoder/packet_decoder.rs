@@ -16,7 +16,6 @@ use crate::coding::scrambler::Scrambler;
 use crate::frame::packet::{Packet, PACKET_BYTES};
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
-use crate::mary::params;
 use crate::mary::params::{
     payload_data_index_for_symbol_slot, payload_total_symbols, PAYLOAD_PILOT_DQPSK_BITS,
     PAYLOAD_PILOT_WALSH_INDEX, PAYLOAD_SPREAD_FACTOR,
@@ -548,7 +547,7 @@ fn joint_symbol_logs_for_phase_state(
         }
         let energy_h = obs.energies[walsh_idx];
         let on_rot_h = obs.on_corrs[walsh_idx] * obs.phase_ref_conj;
-        let diff_h = on_rot_h * obs.prev_phase_conj * residual_rot;
+        let diff_h = on_rot_h * residual_rot;
         let phase_logs =
             dqpsk_phase_log_metrics(diff_h, obs.max_energy, obs.avg_noise_var, obs.prev_phase_kappa);
         let log_p_h = if obs.is_data {
@@ -563,8 +562,20 @@ fn joint_symbol_logs_for_phase_state(
     joint
 }
 
-fn symbol_llrs_from_joint_post(joint_post: &[f32; DQPSK_JOINT_HYPOTHESES]) -> [f32; 6] {
+fn extract_differential_llrs_from_joint_post(
+    joint_post: &[f32; DQPSK_JOINT_HYPOTHESES],
+    prev_a: &[f32; 4],
+    out_a: &mut [f32; 4],
+) -> [f32; 6] {
     let mut out = [0.0f32; 6];
+
+    for walsh_idx in 0..DQPSK_WALSH_HYPOTHESES {
+        for dqpsk_sym_idx in 0..DQPSK_PHASE_SYMBOL_HYPOTHESES {
+            let v = joint_post[joint_hypothesis_index(walsh_idx, dqpsk_sym_idx)];
+            out_a[dqpsk_sym_idx] = log_add_exp(out_a[dqpsk_sym_idx], v);
+        }
+    }
+    normalize_log_row(out_a);
 
     // Walsh bits: out[0]=bit3(MSB), out[1]=bit2, out[2]=bit1, out[3]=bit0(LSB)
     for (i, item) in out.iter_mut().take(4).enumerate() {
@@ -572,50 +583,34 @@ fn symbol_llrs_from_joint_post(joint_post: &[f32; DQPSK_JOINT_HYPOTHESES]) -> [f
         let mut bit0 = f32::NEG_INFINITY;
         let mut bit1 = f32::NEG_INFINITY;
         for walsh_idx in 0..DQPSK_WALSH_HYPOTHESES {
+            let mut p_w = f32::NEG_INFINITY;
             for dqpsk_sym_idx in 0..DQPSK_PHASE_SYMBOL_HYPOTHESES {
-                let v = joint_post[joint_hypothesis_index(walsh_idx, dqpsk_sym_idx)];
-                if ((walsh_idx >> bit) & 1) == 0 {
-                    bit0 = log_add_exp(bit0, v);
-                } else {
-                    bit1 = log_add_exp(bit1, v);
-                }
+                p_w = log_add_exp(p_w, joint_post[joint_hypothesis_index(walsh_idx, dqpsk_sym_idx)]);
+            }
+            if ((walsh_idx >> bit) & 1) == 0 {
+                bit0 = log_add_exp(bit0, p_w);
+            } else {
+                bit1 = log_add_exp(bit1, p_w);
             }
         }
         *item = bit0 - bit1;
     }
 
-    // DQPSK bit0: 0->{s0,s1}, 1->{s2,s3}
-    let mut b0_0 = f32::NEG_INFINITY;
-    let mut b0_1 = f32::NEG_INFINITY;
-    // DQPSK bit1: 0->{s0,s3}, 1->{s1,s2}
-    let mut b1_0 = f32::NEG_INFINITY;
-    let mut b1_1 = f32::NEG_INFINITY;
-    for walsh_idx in 0..DQPSK_WALSH_HYPOTHESES {
-        for dqpsk_sym_idx in 0..DQPSK_PHASE_SYMBOL_HYPOTHESES {
-            let v = joint_post[joint_hypothesis_index(walsh_idx, dqpsk_sym_idx)];
-            match dqpsk_sym_idx {
-                0 => {
-                    b0_0 = log_add_exp(b0_0, v);
-                    b1_0 = log_add_exp(b1_0, v);
-                }
-                1 => {
-                    b0_0 = log_add_exp(b0_0, v);
-                    b1_1 = log_add_exp(b1_1, v);
-                }
-                2 => {
-                    b0_1 = log_add_exp(b0_1, v);
-                    b1_1 = log_add_exp(b1_1, v);
-                }
-                3 => {
-                    b0_1 = log_add_exp(b0_1, v);
-                    b1_0 = log_add_exp(b1_0, v);
-                }
-                _ => {}
-            }
+    let mut diff_logs = [f32::NEG_INFINITY; 4];
+    for a in 0..DQPSK_PHASE_SYMBOL_HYPOTHESES {
+        for b in 0..DQPSK_PHASE_SYMBOL_HYPOTHESES {
+            let d = (a + 4 - b) % 4;
+            diff_logs[d] = log_add_exp(diff_logs[d], out_a[a] + prev_a[b]);
         }
     }
+
+    let b0_0 = log_add_exp(diff_logs[0], diff_logs[1]);
+    let b0_1 = log_add_exp(diff_logs[2], diff_logs[3]);
+    let b1_0 = log_add_exp(diff_logs[0], diff_logs[3]);
+    let b1_1 = log_add_exp(diff_logs[1], diff_logs[2]);
     out[4] = b0_0 - b0_1;
     out[5] = b1_0 - b1_1;
+
     out
 }
 
@@ -651,7 +646,7 @@ fn dqpsk_symbol_logs_for_phase_state(
         }
         let energy_h = obs.energies[idx];
         let on_rot_h = obs.on_corrs[idx] * obs.phase_ref_conj;
-        let diff_h = on_rot_h * obs.prev_phase_conj * residual_rot;
+        let diff_h = on_rot_h * residual_rot;
         let noise_var_h = dqpsk_noise_var_from_energy(obs.energy_sum, energy_h);
         let phase_logs =
             dqpsk_phase_log_metrics(diff_h, on_rot_h.norm(), noise_var_h, obs.prev_phase_kappa);
@@ -751,10 +746,11 @@ fn symbol_llrs_with_phase_hmm(
     }
 
     out_llrs.reserve(slot_obs.len());
+    let mut prev_a = [f32::NEG_INFINITY; 4];
+    // 初期位相はPLLによって同期語の最後のシンボル(絶対位相0)にロックされているため
+    prev_a[0] = 0.0;
+
     for (t, obs) in slot_obs.iter().enumerate() {
-        if !obs.is_data {
-            continue;
-        }
         let mut joint_post = [f32::NEG_INFINITY; DQPSK_JOINT_HYPOTHESES];
         for m in 0..m_len {
             let base = buffers.hmm_pred[t * m_len + m]
@@ -765,7 +761,13 @@ fn symbol_llrs_with_phase_hmm(
                 joint_post[idx] = log_add_exp(joint_post[idx], base + joint[idx]);
             }
         }
-        out_llrs.push(symbol_llrs_from_joint_post(&joint_post));
+
+        let mut out_a = [f32::NEG_INFINITY; 4];
+        let llrs = extract_differential_llrs_from_joint_post(&joint_post, &prev_a, &mut out_a);
+        if obs.is_data {
+            out_llrs.push(llrs);
+        }
+        prev_a = out_a;
     }
 }
 
@@ -1094,19 +1096,16 @@ where
     let mut symbol_llrs_tmp = std::mem::take(&mut buffers.hmm_symbol_llrs);
     symbol_llrs_with_phase_hmm(&phase_slot_observations, &mut symbol_llrs_tmp, buffers);
     let mut sym_idx = 0usize;
-    for (slot_idx, obs) in phase_slot_observations.iter().enumerate() {
+    for (_slot_idx, obs) in phase_slot_observations.iter().enumerate() {
         if !obs.is_data {
             continue;
         }
         let walsh_llr = demodulator.walsh_llr(&obs.energies, obs.max_energy);
         buffers.packet_llrs_buffer.extend_from_slice(&walsh_llr);
         
-        // DQPSK bits from instantaneous diff
-        // Note: we need to find the correct diff for this slot
-        // For simplicity, we just use the first 2 bits from llr6 for now to see if HMM is the cause
         let llr6 = symbol_llrs_tmp[sym_idx];
-        buffers.packet_llrs_buffer.push(llr6[4] * 0.25);
-        buffers.packet_llrs_buffer.push(llr6[5] * 0.25);
+        buffers.packet_llrs_buffer.push(llr6[4] * DQPSK_OUTPUT_LLR_REL_GAIN);
+        buffers.packet_llrs_buffer.push(llr6[5] * DQPSK_OUTPUT_LLR_REL_GAIN);
         sym_idx += 1;
     }
     debug_assert_eq!(sym_idx, symbol_llrs_tmp.len());
@@ -1581,7 +1580,7 @@ mod tests {
         );
         let energies: [f32; 16] = on_corrs.map(|c| c.norm_sqr());
         let energy_sum = energies.iter().sum::<f32>();
-        let noise_var_best = dqpsk_noise_var_from_energy(energy_sum, energies[0]);
+        let _noise_var_best = dqpsk_noise_var_from_energy(energy_sum, energies[0]);
         let phase_logs =
             dqpsk_phase_log_metrics(diff_best, 100.0, 1.6, 1.0);
         let expected = [

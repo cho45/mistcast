@@ -222,7 +222,7 @@ impl Modulator {
 
             Self::append_mary_symbol_chips(wdict, w_idx, si, sq, output_i, output_q);
 
-            // 16シンボルごとに既知パイロット( Walh[0], DQPSK delta=0 )を挿入する。
+            // 16シンボルごとに既知パイロット( Walsh[0], 絶対位相0 )を挿入する。
             // パケット境界で位相追従が不連続にならないよう、間隔は各パケット内でリセットする。
             let sym_idx_in_packet = sym_idx % data_symbols_per_packet;
             if params::PAYLOAD_PILOT_INTERVAL_SYMBOLS > 0
@@ -230,9 +230,9 @@ impl Modulator {
                 && (sym_idx_in_packet + 1) < data_symbols_per_packet
                 && (sym_idx + 1) < num_data_symbols
             {
-                let (pb0, pb1) = params::PAYLOAD_PILOT_DQPSK_BITS;
-                let pdelta = dqpsk_delta(pb0, pb1);
-                *prev_phase = (*prev_phase + pdelta) & 0x03;
+                // HMMの絶対位相アンカーとして機能させるため、差動ではなく常に絶対位相0を送信する。
+                // 次のデータシンボルは、この絶対位相0を基準とした差動としてエンコードされる。
+                *prev_phase = 0;
                 let (psi, psq) = phase_to_iq(*prev_phase);
                 Self::append_mary_symbol_chips(
                     wdict,
