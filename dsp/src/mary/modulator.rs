@@ -226,7 +226,7 @@ impl Modulator {
             // パケット境界で位相追従が不連続にならないよう、間隔は各パケット内でリセットする。
             let sym_idx_in_packet = sym_idx % data_symbols_per_packet;
             if params::PAYLOAD_PILOT_INTERVAL_SYMBOLS > 0
-                && (sym_idx_in_packet + 1) % params::PAYLOAD_PILOT_INTERVAL_SYMBOLS == 0
+                && (sym_idx_in_packet + 1).is_multiple_of(params::PAYLOAD_PILOT_INTERVAL_SYMBOLS)
                 && (sym_idx_in_packet + 1) < data_symbols_per_packet
                 && (sym_idx + 1) < num_data_symbols
             {

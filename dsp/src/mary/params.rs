@@ -68,7 +68,7 @@ pub const fn is_payload_pilot_slot(slot_index: usize) -> bool {
     if PAYLOAD_PILOT_INTERVAL_SYMBOLS == 0 {
         false
     } else {
-        (slot_index + 1) % (PAYLOAD_PILOT_INTERVAL_SYMBOLS + 1) == 0
+        (slot_index + 1).is_multiple_of(PAYLOAD_PILOT_INTERVAL_SYMBOLS + 1)
     }
 }
 
