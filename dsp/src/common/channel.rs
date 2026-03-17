@@ -170,9 +170,9 @@ pub fn add_awgn_snr_iq(
 /// 重要: `bandwidth` は「その SNR を定義したときの帯域 B[Hz]」を必ず指定すること。
 /// ここでの式は汎用で、どの帯域を使うかは SNR の定義方法に依存する。
 /// 例:
-/// - 実信号AWGN分散比 `SNR = P_signal / sigma^2`（本プロジェクトの e2e_eval 理論列）
-///   では C/N0(片側PSD)との対応として `bandwidth = sample_rate / 2` が整合
+/// - 実信号AWGN分散比 `SNR = P_signal / sigma^2`（本プロジェクトの e2e_eval 理論列）では C/N0(片側PSD)との対応として `bandwidth = sample_rate / 2` が整合
 /// - 相関器/チップ領域で定義した内部SNRなら `bandwidth = chip_rate`（または等価帯域）
+///
 /// rb は情報ビットレート (bps)。
 pub fn ebn0_db_to_snr_db(ebn0_db: f32, bandwidth: f32, rb: f32) -> f32 {
     // SNR = (Eb/N0) * (Rb/B)

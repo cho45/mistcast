@@ -623,6 +623,7 @@ mod tests {
         simulate_rx_frontend(&tx, config)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replay_sync_word_mse_with_given_cir(
         config: &DspConfig,
         detector: &MarySyncDetector,

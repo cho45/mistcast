@@ -366,15 +366,15 @@ impl FecDecodeWorkspace {
 
             let tail_only_zero = sym_idx >= data_len;
 
-            for state in 0..NUM_STATES {
+            for (state, preds) in TRELLIS_PREDS.iter().enumerate() {
                 // テール区間では bit=0 の遷移のみ有効なため、上位半分(state>=32)は到達不能。
                 if tail_only_zero && state >= (NUM_STATES / 2) {
                     continue;
                 }
 
                 let base = state * list_size;
-                let pred0 = TRELLIS_PREDS[state][0];
-                let pred1 = TRELLIS_PREDS[state][1];
+                let pred0 = preds[0];
+                let pred1 = preds[1];
                 let pred0_base = pred0.prev_state as usize * list_size;
                 let pred1_base = pred1.prev_state as usize * list_size;
                 let add0 = branch_scores[pred0.out_idx];
