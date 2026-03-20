@@ -380,7 +380,8 @@ impl BerAccumulator {
 
                     for sym in 0..full_symbols {
                         let base = sym * MARY_BITS_PER_SYMBOL;
-                        let walsh_abs_mean = interleaved_llrs[base..base + MARY_WALSH_BITS_PER_SYMBOL]
+                        let walsh_abs_mean = interleaved_llrs
+                            [base..base + MARY_WALSH_BITS_PER_SYMBOL]
                             .iter()
                             .map(|v| v.abs())
                             .sum::<f32>()

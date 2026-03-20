@@ -64,7 +64,9 @@ impl Encoder {
 
         // Modulator 出力バッファサイズ (最大フレームサンプル数)
         let max_bits = mary_aligned_size * packets_per_sync_burst;
-        let max_symbols = max_bits.div_ceil(6);
+        let packet_symbols = interleaver_config::mary_symbols();
+        let max_symbols = params::payload_total_symbols(packet_symbols) * packets_per_sync_burst
+            + params::payload_total_symbols(max_bits.div_ceil(6) % packet_symbols);
         let max_chips = max_symbols * params::PAYLOAD_SPREAD_FACTOR + 2000;
         let dsp_ref = &config.dsp;
         let max_samples =
@@ -97,7 +99,9 @@ impl Encoder {
 
         // Modulator 出力バッファサイズ
         let max_bits = mary_aligned_size * packets_per_sync_burst;
-        let max_symbols = max_bits.div_ceil(6);
+        let packet_symbols = interleaver_config::mary_symbols();
+        let max_symbols = params::payload_total_symbols(packet_symbols) * packets_per_sync_burst
+            + params::payload_total_symbols(max_bits.div_ceil(6) % packet_symbols);
         let max_chips = max_symbols * params::PAYLOAD_SPREAD_FACTOR + 2000;
         let dsp_ref = &config.dsp;
         let max_samples =
@@ -363,8 +367,9 @@ mod tests {
         decoder.set_fde_auto_path_select(false);
 
         let spc = config.proc_samples_per_chip().max(1);
-        let packet_samples = crate::mary::interleaver_config::mary_symbols()
-            * crate::mary::params::PAYLOAD_SPREAD_FACTOR
+        let packet_samples = crate::mary::params::payload_total_symbols(
+            crate::mary::interleaver_config::mary_symbols(),
+        ) * crate::mary::params::PAYLOAD_SPREAD_FACTOR
             * spc;
         let insufficient_equalized = packet_samples + spc - 1;
         decoder.test_inject_exhausted_incomplete_frame_state(0, insufficient_equalized);

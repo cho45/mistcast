@@ -27,7 +27,7 @@ use crate::common::walsh::WalshCorrelator;
 use crate::frame::packet::Packet;
 use crate::mary::demodulator::Demodulator;
 use crate::mary::interleaver_config;
-use crate::mary::params::{PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
+use crate::mary::params::{payload_total_symbols, PAYLOAD_SPREAD_FACTOR, SYNC_SPREAD_FACTOR};
 use crate::mary::sync::{ChannelQualityEstimate, MarySyncDetector};
 use crate::params::PAYLOAD_SIZE;
 use crate::DspConfig;
@@ -738,8 +738,10 @@ impl Decoder {
             0
         };
 
-        let frame_samples =
-            (sync_word_bits * sf_sync + packets_per_frame * (expected_symbols * sf_payload)) * spc;
+        let expected_total_symbols = payload_total_symbols(expected_symbols);
+        let frame_samples = (sync_word_bits * sf_sync
+            + packets_per_frame * (expected_total_symbols * sf_payload))
+            * spc;
 
         FrameStartPlan {
             use_fde_this_frame,
@@ -799,7 +801,8 @@ impl Decoder {
         }
 
         let expected_symbols = interleaver_config::mary_symbols();
-        let packet_samples = expected_symbols * sf_payload * spc;
+        let packet_total_symbols = payload_total_symbols(expected_symbols);
+        let packet_samples = packet_total_symbols * sf_payload * spc;
         let max_packets = self.config.packets_per_burst;
         let packets_decoded = self.packets_decoded_in_burst();
 
@@ -2038,7 +2041,7 @@ mod tests {
         let mut decoder = make_decoder();
         let spc = decoder.config.proc_samples_per_chip().max(1);
         let expected_symbols = interleaver_config::mary_symbols();
-        let packet_samples = expected_symbols * PAYLOAD_SPREAD_FACTOR * spc;
+        let packet_samples = payload_total_symbols(expected_symbols) * PAYLOAD_SPREAD_FACTOR * spc;
 
         decoder.config.packets_per_burst = 2;
         decoder.frame_session = Some(FrameSession {

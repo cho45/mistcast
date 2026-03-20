@@ -1274,23 +1274,24 @@ mod tests {
     /// 入力ビットと出力LLRの符号が全て完全に一致することを確認する。
     #[test]
     fn test_modulator_demodulator_full_packet_stream() {
+        use crate::mary::interleaver_config;
         use crate::mary::modulator::Modulator;
+        use crate::mary::params;
         use rand::Rng;
 
         let modulator = Modulator::default_48k();
         let mut demodulator = Demodulator::new();
         demodulator.set_reference_phase(16.0, 0.0);
 
-        // ランダムな352ビットを生成 (58シンボル * 6ビット + 4ビットパディング)
+        // ランダムな1パケット分のビット列を生成する
         let mut rng = rand::thread_rng();
-        let bits_len = 352;
+        let bits_len = interleaver_config::interleaved_bits();
         let mut bits = Vec::with_capacity(bits_len);
         for _ in 0..bits_len {
             bits.push(rng.gen_range(0..=1));
         }
 
-        // パディングとして、Modulatorは6の倍数にならない端数ビットを無視するため、
-        // 厳密なテストのために0埋めして6の倍数（354ビット = 59シンボル）にする
+        // Modulator は6bit単位でシンボル化するため、末尾を0埋めして6の倍数にする
         let padded_len = bits_len.div_ceil(6) * 6;
         let mut padded_bits = bits.clone();
         padded_bits.resize(padded_len, 0);
@@ -1307,11 +1308,25 @@ mod tests {
         );
 
         let sf = crate::mary::params::PAYLOAD_SPREAD_FACTOR;
-        let num_symbols = padded_len / 6;
+        let num_data_symbols = padded_len / 6;
         let mut all_llrs = Vec::with_capacity(padded_len);
 
-        for sym_idx in 0..num_symbols {
-            let offset = sym_idx * sf;
+        // payload には位相パイロットが挿入されるため、
+        // データシンボル index -> 送信スロット index に変換して復調する。
+        for data_sym_idx in 0..num_data_symbols {
+            let slot_idx = params::payload_symbol_slot_for_data_index(data_sym_idx);
+
+            // パイロットスロットがあった場合は、Demodulatorの内部状態（prev）をパイロットで更新する
+            if data_sym_idx > 0 && params::is_payload_pilot_slot(slot_idx - 1) {
+                let pilot_slot = slot_idx - 1;
+                let pilot_offset = pilot_slot * sf;
+                let pilot_signal: Vec<Complex32> = (0..sf)
+                    .map(|i| Complex32::new(chips_i[pilot_offset + i], chips_q[pilot_offset + i]))
+                    .collect();
+                demodulator.demod_symbol(&pilot_signal); // prev_phaseを更新させる
+            }
+
+            let offset = slot_idx * sf;
             let signal: Vec<Complex32> = (0..sf)
                 .map(|i| Complex32::new(chips_i[offset + i], chips_q[offset + i]))
                 .collect();
